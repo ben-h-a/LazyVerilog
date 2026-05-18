@@ -133,7 +133,7 @@ TEST_CASE("definition: named port lookup uses vcode extra files", "[definition]"
 
 TEST_CASE("definition: macro lookup resolves local define", "[definition]") {
     Analyzer analyzer;
-    const auto top_path = find_repo_file("demo/memory_top.sv");
+    const auto top_path = find_repo_file("tests/definition_memory_top.sv");
     const std::string top_uri = "file://" + top_path.string();
     analyzer.open(top_uri, read_text(top_path.string()));
 
@@ -147,7 +147,7 @@ TEST_CASE("definition: macro lookup resolves local define", "[definition]") {
 
 TEST_CASE("definition: typedef lookup resolves named type", "[definition]") {
     Analyzer analyzer;
-    const auto top_path = find_repo_file("demo/memory_top.sv");
+    const auto top_path = find_repo_file("tests/definition_memory_top.sv");
     const std::string top_uri = "file://" + top_path.string();
     analyzer.open(top_uri, read_text(top_path.string()));
 
@@ -161,11 +161,11 @@ TEST_CASE("definition: typedef lookup resolves named type", "[definition]") {
 
 TEST_CASE("definition: variable lookup prefers same module scope", "[definition]") {
     Analyzer analyzer;
-    const auto top_path = find_repo_file("demo/memory_top.sv");
+    const auto top_path = find_repo_file("tests/definition_memory_top.sv");
     const std::string top_uri = "file://" + top_path.string();
     analyzer.open(top_uri, read_text(top_path.string()));
 
-    auto loc = analyzer.definition_of(top_uri, 83, 11);
+    auto loc = analyzer.definition_of(top_uri, 84, 11);
     REQUIRE(loc.has_value());
     CHECK(loc->uri == top_uri);
     CHECK(loc->line == 54);
@@ -174,16 +174,16 @@ TEST_CASE("definition: variable lookup prefers same module scope", "[definition]
 
 TEST_CASE("definition: named subroutine argument resolves to formal argument", "[definition]") {
     Analyzer analyzer;
-    const auto top_path = find_repo_file("demo/memory_top.sv");
+    const auto top_path = find_repo_file("tests/definition_memory_top.sv");
     const std::string top_uri = "file://" + top_path.string();
     analyzer.open(top_uri, read_text(top_path.string()));
 
-    auto loc = analyzer.definition_of(top_uri, 181, 16);
+    auto loc = analyzer.definition_of(top_uri, 182, 17);
     REQUIRE(loc.has_value());
     CHECK(loc->uri == top_uri);
     CHECK(loc->line == 24);
-    CHECK(loc->col == 26);
-    CHECK(loc->end_col == 27);
+    CHECK(loc->col == 27);
+    CHECK(loc->end_col == 28);
 }
 
 TEST_CASE("definition: macro lookup uses cached extra files", "[definition]") {
