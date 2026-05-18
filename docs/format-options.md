@@ -59,8 +59,10 @@ Extra indentation levels applied inside outmost `module`, `interface`, and `pack
 |------|---------|
 | bool | `false` |
 
-Stored in config and used by some alignment-related behavior in the broader
-formatter configuration.
+When enabled, alignment columns are snapped up to the next multiple of
+`indent_size`. This affects aligned statements, port declarations, variable
+declarations, enum declarations, modports, and fixed-mode instance port
+connections. It still uses spaces; no literal tab characters are inserted.
 
 ### `align_punctuation`
 
@@ -449,7 +451,9 @@ DONE
 When `align = true`, `enum_name_min_width` and `enum_value_min_width` define
 minimum columns for enumerator names and assigned values. With
 `align_adaptive = false`, long names or values widen the whole enum block. With
-`align_adaptive = true`, long entries only affect their own line.
+`align_adaptive = true`, long entries only affect their own line. If
+`[format].tab_align = true`, aligned enum columns are snapped to the
+`indent_size` grid.
 
 ## `[format.modport]`
 
@@ -474,7 +478,8 @@ output data
 When `align = true`, `direction_min_width` and `signal_min_width` define minimum
 columns for directions and signal names. With `align_adaptive = false`, long
 strings widen the whole modport block. With `align_adaptive = true`, long
-strings only affect their own line.
+strings only affect their own line. If `[format].tab_align = true`, aligned
+modport columns are snapped to the `indent_size` grid.
 
 ## Currently unsupported or limited SystemVerilog formatter syntax
 

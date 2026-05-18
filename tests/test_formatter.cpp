@@ -606,3 +606,130 @@ TEST_CASE("formatter: enum strict alignment does not leave trailing spaces on fi
                                  "    ERROR\n"
                                  "} state_t;\n");
 }
+
+TEST_CASE("formatter: tab_align snaps statement assignment columns", "[formatter]") {
+    FormatOptions opts;
+    opts.indent_size = 4;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.statement.align = true;
+    opts.tab_align = true;
+
+    CHECK(format_source("module top;\n"
+                        "always_comb begin\n"
+                        "abcde = 1;\n"
+                        "x = 2;\n"
+                        "end\n"
+                        "endmodule\n",
+                        opts) == "module top;\n"
+                                 "always_comb begin\n"
+                                 "    abcde   = 1;\n"
+                                 "    x       = 2;\n"
+                                 "end\n"
+                                 "endmodule\n");
+}
+
+TEST_CASE("formatter: tab_align snaps declaration columns", "[formatter]") {
+    FormatOptions opts;
+    opts.indent_size = 4;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.tab_align = true;
+    opts.port_declaration.align = true;
+    opts.port_declaration.section1_min_width = 1;
+    opts.port_declaration.section2_min_width = 1;
+    opts.port_declaration.section3_min_width = 1;
+    opts.port_declaration.section4_min_width = 1;
+    opts.port_declaration.section5_min_width = 1;
+    opts.var_declaration.align = true;
+    opts.var_declaration.section1_min_width = 1;
+    opts.var_declaration.section2_min_width = 1;
+    opts.var_declaration.section3_min_width = 1;
+    opts.var_declaration.section4_min_width = 1;
+
+    CHECK(format_source("module top(a, bb);\n"
+                        "input logic a;\n"
+                        "output wire bb;\n"
+                        "logic a;\n"
+                        "wire bb;\n"
+                        "endmodule\n",
+                        opts) == "module top(\n"
+                                 "    a,\n"
+                                 "    bb\n"
+                                 ");\n"
+                                 "input   logic   a       ;\n"
+                                 "output  wire    bb      ;\n"
+                                 "logic   a       ;\n"
+                                 "wire    bb      ;\n"
+                                 "endmodule\n");
+}
+
+TEST_CASE("formatter: tab_align snaps enum and modport columns", "[formatter]") {
+    FormatOptions opts;
+    opts.indent_size = 4;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.tab_align = true;
+    opts.enum_declaration.align = true;
+    opts.enum_declaration.enum_name_min_width = 0;
+    opts.enum_declaration.enum_value_min_width = 0;
+    opts.modport.align = true;
+    opts.modport.direction_min_width = 0;
+    opts.modport.signal_min_width = 0;
+
+    CHECK(format_source("interface i;\n"
+                        "typedef enum {A=1,LONG=22} e_t;\n"
+                        "modport m(input clk,output ready);\n"
+                        "endinterface\n",
+                        opts) == "interface i;\n"
+                                 "typedef enum {\n"
+                                 "    A       = 1 ,\n"
+                                 "    LONG    = 22\n"
+                                 "} e_t;\n"
+                                 "modport m (\n"
+                                 "    input   clk     ,\n"
+                                 "    output  ready\n"
+                                 ");\n"
+                                 "endinterface\n");
+}
+
+TEST_CASE("formatter: tab_align snaps fixed instance connection columns", "[formatter]") {
+    FormatOptions opts;
+    opts.indent_size = 4;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.tab_align = true;
+    opts.instance.align = true;
+    opts.instance.align_adaptive = false;
+    opts.instance.port_indent_level = 1;
+    opts.instance.instance_port_name_width = 9;
+    opts.instance.instance_port_between_paren_width = 3;
+
+    CHECK(format_source("module top;\n"
+                        "child u_child(.abcde(sig), .x(s));\n"
+                        "endmodule\n",
+                        opts) == "module top;\n"
+                                 "child u_child (\n"
+                                 "    .abcde      (sig),\n"
+                                 "    .x          (s  )\n"
+                                 ");\n"
+                                 "endmodule\n");
+}
+
+TEST_CASE("formatter: tab_align does not align equals inside headers or for controls",
+          "[formatter]") {
+    FormatOptions opts;
+    opts.indent_size = 4;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.statement.align = true;
+    opts.tab_align = true;
+
+    CHECK(format_source("interface bus_intf #(parameter W_IDTH = 8) (input logic i_clk);\n"
+                        "for(int i = 0; i < 32; i++) begin\n"
+                        "foo_bar = 1;\n"
+                        "x = 2;\n"
+                        "end\n"
+                        "endinterface\n",
+                        opts) == "interface bus_intf #(parameter W_IDTH = 8) (input logic i_clk);\n"
+                                 "for (int i = 0; i < 32; i++) begin\n"
+                                 "    foo_bar = 1;\n"
+                                 "    x = 2;\n"
+                                 "end\n"
+                                 "endinterface\n");
+}

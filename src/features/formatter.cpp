@@ -17,6 +17,16 @@ using namespace slang::syntax;
 
 namespace {
 
+static int snap_to_indent_grid(int value, int indent_size) {
+    if (indent_size <= 0)
+        return value;
+    return ((value + indent_size - 1) / indent_size) * indent_size;
+}
+
+static int tab_aligned_width(int value, const FormatOptions& opts) {
+    return opts.tab_align ? snap_to_indent_grid(value, opts.indent_size) : value;
+}
+
 // ---------------------------------------------------------------------------
 // Slang-based line classification
 // ---------------------------------------------------------------------------
@@ -876,12 +886,18 @@ static std::string align_port_pass(const std::string& text, const FormatOptions&
             continue;
         }
 
-        int s1 = std::max(opts.port_declaration.section1_min_width, md + 1);
-        int s2 = ms2_content > 0
-                     ? std::max(opts.port_declaration.section2_min_width, ms2_content + 1)
-                     : 0;
-        int s3 = mdim > 0 ? std::max(opts.port_declaration.section3_min_width, mdim + 1) : 0;
-        int s5_min = opts.port_declaration.section5_min_width;
+        const auto& pd = opts.port_declaration;
+        int pd_s1_min = tab_aligned_width(pd.section1_min_width, opts);
+        int pd_s2_min = tab_aligned_width(pd.section2_min_width, opts);
+        int pd_s3_min = tab_aligned_width(pd.section3_min_width, opts);
+        int pd_s4_min = tab_aligned_width(pd.section4_min_width, opts);
+        int pd_s5_min = tab_aligned_width(pd.section5_min_width, opts);
+
+        int s1 = tab_aligned_width(std::max(pd_s1_min, md + 1), opts);
+        int s2 =
+            ms2_content > 0 ? tab_aligned_width(std::max(pd_s2_min, ms2_content + 1), opts) : 0;
+        int s3 = mdim > 0 ? tab_aligned_width(std::max(pd_s3_min, mdim + 1), opts) : 0;
+        int s5_min = pd_s5_min;
 
         // Per-slot id and trailing widths
         std::vector<int> id_widths(max_slots, 0), trail_widths(max_slots, 0);
@@ -895,8 +911,8 @@ static std::string align_port_pass(const std::string& text, const FormatOptions&
                     max_tr = std::max(max_tr, (int)pp.names[slot].second.size());
                 }
             }
-            id_widths[slot] = std::max(opts.port_declaration.section4_min_width, max_id + 1);
-            trail_widths[slot] = std::max(s5_min, max_tr);
+            id_widths[slot] = tab_aligned_width(std::max(pd_s4_min, max_id + 1), opts);
+            trail_widths[slot] = tab_aligned_width(std::max(s5_min, max_tr), opts);
         }
 
         auto pad = [](std::string s, int w) -> std::string {
@@ -915,37 +931,38 @@ static std::string align_port_pass(const std::string& text, const FormatOptions&
             std::vector<int> line_id_widths = id_widths;
             std::vector<int> line_trail_widths = trail_widths;
             if (opts.port_declaration.align_adaptive) {
-                const auto& pd = opts.port_declaration;
                 std::string tp = pp.dtype + (pp.qualifier.empty() ? "" : " " + pp.qualifier);
                 // Cumulative minimum target end columns (fixed reference points).
                 // Each section pads to max(target_end, actual_end).
                 // Overflow on one line is absorbed by subsequent sections' slack,
                 // so downstream sections stay aligned as long as overflow is small.
-                int t1 = pd.section1_min_width;
-                int t2 = t1 + (s2 > 0 ? pd.section2_min_width : 0);
-                int t3 = t2 + (s3 > 0 ? pd.section3_min_width : 0);
+                int t1 = pd_s1_min;
+                int t2 = t1 + (s2 > 0 ? pd_s2_min : 0);
+                int t3 = t2 + (s3 > 0 ? pd_s3_min : 0);
 
-                int e1 = std::max(t1, (int)pp.direction.size() + 1);
+                int e1 = tab_aligned_width(std::max(t1, (int)pp.direction.size() + 1), opts);
                 line_s1 = e1;
 
                 int e2 = e1;
                 if (s2 > 0) {
                     int c2 = tp.empty() ? 0 : (int)tp.size() + 1;
-                    e2 = std::max(t2, e1 + c2);
+                    e2 = tab_aligned_width(std::max(t2, e1 + c2), opts);
                     line_s2 = e2 - e1;
                 }
 
                 if (s3 > 0) {
                     int c3 = pp.dim.empty() ? 0 : (int)pp.dim.size() + 1;
-                    int e3 = std::max(t3, e2 + c3);
+                    int e3 = tab_aligned_width(std::max(t3, e2 + c3), opts);
                     line_s3 = e3 - e2;
                 }
 
                 line_id_widths.clear();
                 line_trail_widths.clear();
                 for (const auto& [nm, tr] : pp.names) {
-                    line_id_widths.push_back(std::max(pd.section4_min_width, (int)nm.size() + 1));
-                    line_trail_widths.push_back(std::max(s5_min, (int)tr.size()));
+                    line_id_widths.push_back(
+                        tab_aligned_width(std::max(pd_s4_min, (int)nm.size() + 1), opts));
+                    line_trail_widths.push_back(
+                        tab_aligned_width(std::max(s5_min, (int)tr.size()), opts));
                 }
             }
             std::string line = pp.indent;
@@ -1017,23 +1034,40 @@ static std::string align_port_pass(const std::string& text, const FormatOptions&
 
 static std::string align_assign_pass(const std::string& text, const FormatOptions& opts,
                                      const std::unordered_map<int, LineKind>* kinds) {
-    static const std::regex BLK(R"( ((?:[+\-*/%&|^]|<<|>>|<<<|>>>)?=)(?!=) )");
-    static const std::regex NBLK(R"( <= )");
-
     auto find_op = [&](const std::string& line) -> std::pair<int, std::string> {
         size_t cp = line.find("//");
         std::string code = (cp != std::string::npos) ? line.substr(0, cp) : line;
-        std::smatch m1, m2;
-        bool h1 = std::regex_search(code, m1, BLK);
-        bool h2 = std::regex_search(code, m2, NBLK);
-        if (h1 && h2)
-            return (m2.position() < m1.position())
-                       ? std::make_pair((int)m2.position(), std::string("<="))
-                       : std::make_pair((int)m1.position(), m1[1].str());
-        if (h2)
-            return {(int)m2.position(), "<="};
-        if (h1)
-            return {(int)m1.position(), m1[1].str()};
+        static const std::vector<std::string> OPS = {"<<<=", ">>>=", "<<=", ">>=", "<=",
+                                                     "+=",   "-=",   "*=",  "/=",  "%=",
+                                                     "&=",   "|=",   "^=",  "="};
+        int paren = 0;
+        int bracket = 0;
+        int brace = 0;
+        for (size_t i = 0; i < code.size(); ++i) {
+            char ch = code[i];
+            if (ch == '(')
+                ++paren;
+            else if (ch == ')' && paren > 0)
+                --paren;
+            else if (ch == '[')
+                ++bracket;
+            else if (ch == ']' && bracket > 0)
+                --bracket;
+            else if (ch == '{')
+                ++brace;
+            else if (ch == '}' && brace > 0)
+                --brace;
+            if (paren != 0 || bracket != 0 || brace != 0 || ch != ' ')
+                continue;
+            for (const auto& op : OPS) {
+                size_t op_pos = i + 1;
+                size_t after = op_pos + op.size();
+                if (after < code.size() && code.compare(op_pos, op.size(), op) == 0 &&
+                    code[after] == ' ') {
+                    return {(int)i, op};
+                }
+            }
+        }
         return {-1, ""};
     };
 
@@ -1097,6 +1131,8 @@ static std::string align_assign_pass(const std::string& text, const FormatOption
         for (auto& e : grp)
             mx = std::max(mx, e.lw);
         int col = mx + 1;
+        if (opts.tab_align && opts.indent_size > 0)
+            col = snap_to_indent_grid((int)ind + mx + 1, opts.indent_size) - (int)ind;
         for (auto& e : grp) {
             int sp = std::max(1, col - e.lw);
             std::string lhs = e.line.substr(0, e.pos);
@@ -1404,13 +1440,18 @@ static std::string align_var_pass(const std::string& text, const FormatOptions& 
                 e.parsed->type_kw + (e.parsed->qualifier.empty() ? "" : " " + e.parsed->qualifier);
             max_s1 = std::max(max_s1, (int)s1.size());
         }
-        int s1_w = std::max(vo.section1_min_width, max_s1 + 1);
+        int vo_s1_min = tab_aligned_width(vo.section1_min_width, opts);
+        int vo_s2_min = tab_aligned_width(vo.section2_min_width, opts);
+        int vo_s3_min = tab_aligned_width(vo.section3_min_width, opts);
+        int vo_s4_min = tab_aligned_width(vo.section4_min_width, opts);
+
+        int s1_w = tab_aligned_width(std::max(vo_s1_min, max_s1 + 1), opts);
 
         int max_dim = 0;
         for (auto& e : block)
             if (e.parsed)
                 max_dim = std::max(max_dim, (int)e.parsed->dim.size());
-        int s2_w = max_dim > 0 ? std::max(vo.section2_min_width, max_dim + 1) : 0;
+        int s2_w = max_dim > 0 ? tab_aligned_width(std::max(vo_s2_min, max_dim + 1), opts) : 0;
 
         size_t max_slots = 0;
         for (auto& e : block)
@@ -1428,8 +1469,8 @@ static std::string align_var_pass(const std::string& text, const FormatOptions& 
                     mx_tr = std::max(mx_tr, (int)e.parsed->declarators[slot].second.size());
                 }
             }
-            id_widths[slot] = std::max(vo.section3_min_width, mx_id + 1);
-            trail_widths[slot] = std::max(vo.section4_min_width, mx_tr);
+            id_widths[slot] = tab_aligned_width(std::max(vo_s3_min, mx_id + 1), opts);
+            trail_widths[slot] = tab_aligned_width(std::max(vo_s4_min, mx_tr), opts);
         }
 
         auto pad_to = [](std::string s, int w) -> std::string {
@@ -1451,16 +1492,16 @@ static std::string align_var_pass(const std::string& text, const FormatOptions& 
             if (vo.align_adaptive) {
                 std::string s1part = vp.type_kw + (vp.qualifier.empty() ? "" : " " + vp.qualifier);
                 // Cumulative minimum target end columns — same model as port_declaration.
-                int t1 = vo.section1_min_width;
-                int t2 = t1 + (s2_w > 0 ? vo.section2_min_width : 0);
+                int t1 = vo_s1_min;
+                int t2 = t1 + (s2_w > 0 ? vo_s2_min : 0);
 
-                int e1 = std::max(t1, (int)s1part.size() + 1);
+                int e1 = tab_aligned_width(std::max(t1, (int)s1part.size() + 1), opts);
                 line_s1_w = e1;
 
                 int e2 = e1;
                 if (s2_w > 0) {
                     int c2 = vp.dim.empty() ? 0 : (int)vp.dim.size() + 1;
-                    e2 = std::max(t2, e1 + c2);
+                    e2 = tab_aligned_width(std::max(t2, e1 + c2), opts);
                     line_s2_w = e2 - e1;
                 }
 
@@ -1469,7 +1510,8 @@ static std::string align_var_pass(const std::string& text, const FormatOptions& 
                 // the block.
                 line_trail_widths.clear();
                 for (const auto& [_, tr] : vp.declarators)
-                    line_trail_widths.push_back(std::max(vo.section4_min_width, (int)tr.size()));
+                    line_trail_widths.push_back(
+                        tab_aligned_width(std::max(vo_s4_min, (int)tr.size()), opts));
             }
             std::string ln = vp.indent;
             std::string s1part = vp.type_kw + (vp.qualifier.empty() ? "" : " " + vp.qualifier);
@@ -1791,6 +1833,14 @@ static std::string expand_instances_pass(const std::string& text, const FormatOp
         }
         int eff_before = std::max(1, m_before - max_port - 1);
         int eff_inside = std::max(0, m_inside - max_sig);
+        if (!adaptive && opts.tab_align && opts.indent_size > 1) {
+            auto snap = [&](int pos) { return snap_to_indent_grid(pos, opts.indent_size); };
+            int base = (int)indent.size() + (int)port_indent.size() + 1 + max_port;
+            int open_paren = snap(base + eff_before);
+            eff_before = open_paren - base;
+            int close_paren = snap(open_paren + 1 + max_sig + eff_inside);
+            eff_inside = close_paren - open_paren - 1 - max_sig;
+        }
 
         std::string hdr = indent + module_type;
         if (!param_block.empty())
@@ -2008,13 +2058,23 @@ static std::string format_enum_declaration_pass(const std::string& text,
             continue;
         }
 
-        int block_name_width = eo.enum_name_min_width;
-        int block_value_width = eo.enum_value_min_width;
+        int item_base_col = (int)leading.size() + opts.indent_size;
+        int block_name_width = tab_aligned_width(eo.enum_name_min_width, opts);
+        int block_value_width = tab_aligned_width(eo.enum_value_min_width, opts);
         if (eo.align && !eo.align_adaptive) {
             for (const auto& item : items) {
                 block_name_width = std::max(block_name_width, (int)item.name.size() + 1);
                 if (item.has_value)
                     block_value_width = std::max(block_value_width, (int)item.value.size());
+            }
+            if (opts.tab_align) {
+                block_name_width =
+                    snap_to_indent_grid(item_base_col + block_name_width, opts.indent_size) -
+                    item_base_col;
+                block_value_width =
+                    snap_to_indent_grid(item_base_col + block_name_width + 2 + block_value_width,
+                                        opts.indent_size) -
+                    item_base_col - block_name_width - 2;
             }
         }
 
@@ -2029,9 +2089,20 @@ static std::string format_enum_declaration_pass(const std::string& text,
                 int name_width = block_name_width;
                 int value_width = block_value_width;
                 if (eo.align_adaptive) {
-                    name_width = std::max(eo.enum_name_min_width, (int)item.name.size() + 1);
+                    name_width = std::max(tab_aligned_width(eo.enum_name_min_width, opts),
+                                          (int)item.name.size() + 1);
                     if (item.has_value)
-                        value_width = std::max(eo.enum_value_min_width, (int)item.value.size());
+                        value_width = std::max(tab_aligned_width(eo.enum_value_min_width, opts),
+                                               (int)item.value.size());
+                    if (opts.tab_align) {
+                        name_width =
+                            snap_to_indent_grid(item_base_col + name_width, opts.indent_size) -
+                            item_base_col;
+                        value_width =
+                            snap_to_indent_grid(item_base_col + name_width + 2 + value_width,
+                                                opts.indent_size) -
+                            item_base_col - name_width - 2;
+                    }
                 }
                 rendered = pad_right(item.name, name_width);
                 if (item.has_value)
@@ -2168,13 +2239,23 @@ static std::string format_modport_pass(const std::string& text, const FormatOpti
         std::string leading = line.substr(0, first);
         for (size_t mi = 0; mi < modports.size(); ++mi) {
             const auto& mp = modports[mi];
-            int block_dir_width = mo.direction_min_width;
-            int block_signal_width = mo.signal_min_width;
+            int item_base_col = (int)leading.size() + opts.indent_size;
+            int block_dir_width = tab_aligned_width(mo.direction_min_width, opts);
+            int block_signal_width = tab_aligned_width(mo.signal_min_width, opts);
             if (mo.align) {
                 for (const auto& item : mp.items) {
                     block_dir_width = std::max(block_dir_width, (int)item.direction.size() + 1);
                     if (!mo.align_adaptive)
                         block_signal_width = std::max(block_signal_width, (int)item.name.size());
+                }
+                if (opts.tab_align) {
+                    block_dir_width =
+                        snap_to_indent_grid(item_base_col + block_dir_width, opts.indent_size) -
+                        item_base_col;
+                    block_signal_width =
+                        snap_to_indent_grid(item_base_col + block_dir_width + block_signal_width,
+                                            opts.indent_size) -
+                        item_base_col - block_dir_width;
                 }
             }
             out.push_back(leading + "modport " + mp.name + " (");
@@ -2187,8 +2268,15 @@ static std::string format_modport_pass(const std::string& text, const FormatOpti
                 } else {
                     int dir_width = block_dir_width;
                     int signal_width = block_signal_width;
-                    if (mo.align_adaptive)
-                        signal_width = std::max(mo.signal_min_width, (int)item.name.size());
+                    if (mo.align_adaptive) {
+                        signal_width = std::max(tab_aligned_width(mo.signal_min_width, opts),
+                                                (int)item.name.size());
+                        if (opts.tab_align)
+                            signal_width =
+                                snap_to_indent_grid(item_base_col + dir_width + signal_width,
+                                                    opts.indent_size) -
+                                item_base_col - dir_width;
+                    }
                     rendered =
                         pad_right(item.direction, dir_width) + pad_right(item.name, signal_width);
                 }
