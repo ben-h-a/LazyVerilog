@@ -85,6 +85,19 @@ struct ModportOptions {
     int signal_min_width{0};
 };
 
+struct SpacingOptions {
+    bool control_keyword_space{true};
+    bool space_inside_parens{false};
+    bool space_inside_dimension_brackets{false};
+    std::string binary_operator_spacing{"both"};
+    std::string dimension_binary_operator_spacing{"none"};
+    std::string semicolon_spacing{"after"};
+    std::string range_colon_spacing{"none"};
+    std::string indexed_part_select_spacing{"both"};
+    std::string procedural_event_control_at_spacing{"before"};
+    bool space_inside_event_control_parens{false};
+};
+
 struct FormatOptions {
     int indent_size{2};
     bool compact_indexing_and_selections{true};
@@ -103,6 +116,7 @@ struct FormatOptions {
     PortOptions port;
     EnumOptions enum_declaration;
     ModportOptions modport;
+    SpacingOptions spacing;
 };
 
 struct LintRuleConfig {

@@ -214,11 +214,62 @@ static bool is_hierarchy(const Tok& t) { return t.text == "." || t.text == "::";
 
 static bool is_unary_op(const Tok& t) { return has(ALWAYS_UNARY, t.text); }
 
+static bool is_control_keyword(const Tok& t) {
+    return is_keyword(t) &&
+           (t.lo == "if" || t.lo == "for" || t.lo == "foreach" || t.lo == "while" ||
+            t.lo == "repeat" || t.lo == "case" || t.lo == "casex" || t.lo == "casez");
+}
+
+static bool is_procedural_event_keyword(const Tok& t) {
+    return is_keyword(t) && (t.lo == "always" || t.lo == "always_ff" || t.lo == "always_comb" ||
+                             t.lo == "always_latch");
+}
+
 static bool is_binary_op(const Tok& t) {
     static const std::unordered_set<std::string> EXTRA_BINARY = {
-        "<=", "<", ">", "=", "?", "<<", ">>", "<<<", ">>>", "->", "<->", "|->"};
+        "+",   "-",   "<=", "<",   ">",   "?",      "<<", ">>",
+        "<<<", ">>>", "->", "<->", "|->", "inside", "&&&"};
     return has(ALWAYS_BINARY, t.text) || has(EXTRA_BINARY, t.text);
 }
+
+static bool is_assignment_op(const Tok& t, bool in_parens = false) {
+    if (t.text == "<=" && in_parens)
+        return false;
+    static const std::unordered_set<std::string> ASSIGN = {
+        "=", "<=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "<<<=", ">>>="};
+    return has(ASSIGN, t.text);
+}
+
+static bool binary_space_before(const std::string& mode) {
+    return mode == "before" || mode == "both";
+}
+
+static bool binary_space_after(const std::string& mode) {
+    return mode == "after" || mode == "both";
+}
+
+enum class ParenKind { Ordinary, FunctionCall, EventControl };
+
+static ParenKind classify_paren(const Tok& L, bool procedural_at = false) {
+    if (L.text == "@")
+        return procedural_at ? ParenKind::EventControl : ParenKind::FunctionCall;
+    if (is_identifier(L) || L.text == "]")
+        return ParenKind::FunctionCall;
+    return ParenKind::Ordinary;
+}
+
+static bool looks_unary_context(const Tok& L, const Tok& R) {
+    if (R.text != "+" && R.text != "-")
+        return false;
+    return L.text == "(" || L.text == "[" || L.text == "{" || L.text == "," || L.text == ";" ||
+           L.text == ":" || L.text == "?" || L.text == "=" || is_binary_op(L) || is_keyword(L);
+}
+
+static bool is_indexed_part_select_op_pair(const Tok& A, const Tok& B) {
+    return (A.text == "+" || A.text == "-") && B.text == ":";
+}
+
+static bool is_indexed_part_select_op(const Tok& t) { return t.text == "+:" || t.text == "-:"; }
 
 // ---------------------------------------------------------------------------
 // Disabled ranges (verilog_format: off/on and `define)
@@ -261,15 +312,38 @@ static bool in_disabled(int pos, const std::vector<std::pair<int, int>>& ranges)
 // Spacing rules — ported from SpacesRequiredBetween() in token-annotator.cc
 // ---------------------------------------------------------------------------
 
-static int spaces_req(const Tok& L, const Tok& R, const FormatOptions& opts, bool in_dim) {
+static int spaces_req(const Tok& L, const Tok& R, const FormatOptions& opts, bool in_dim,
+                      bool in_for_header, bool in_parens, ParenKind paren_kind,
+                      bool procedural_at) {
     const auto& lx = L.text;
     const auto& ll = L.lo;
     const auto& rx = R.text;
+    const auto& sp = opts.spacing;
+    bool L_assign = is_assignment_op(L, in_parens);
+    bool R_assign = is_assignment_op(R, in_parens);
 
     if (L.directive || R.directive)
         return 0;
     if (R.comment)
         return 1;
+    if (lx == "(") {
+        if (paren_kind == ParenKind::EventControl)
+            return sp.space_inside_event_control_parens ? 1 : 0;
+        if (paren_kind == ParenKind::Ordinary)
+            return sp.space_inside_parens ? 1 : 0;
+        return 0;
+    }
+    if (rx == ")") {
+        if (paren_kind == ParenKind::EventControl)
+            return sp.space_inside_event_control_parens ? 1 : 0;
+        if (paren_kind == ParenKind::Ordinary)
+            return sp.space_inside_parens ? 1 : 0;
+        return 0;
+    }
+    if (lx == "[")
+        return sp.space_inside_dimension_brackets ? 1 : 0;
+    if (rx == "]")
+        return sp.space_inside_dimension_brackets ? 1 : 0;
     if (is_open_group(L) || is_close_group(R))
         return 0;
     if (is_unary_op(L))
@@ -281,20 +355,42 @@ static int spaces_req(const Tok& L, const Tok& R, const FormatOptions& opts, boo
     if (lx == ",")
         return 1;
     if (rx == ";")
-        return (lx == ":") ? 1 : 0;
+        return in_for_header ? (binary_space_before(sp.semicolon_spacing) ? 1 : 0)
+                             : ((lx == ":") ? 1 : 0);
     if (lx == ";")
-        return 1;
+        return in_for_header ? (binary_space_after(sp.semicolon_spacing) ? 1 : 0) : 1;
     if (lx == "@")
-        return 0;
+        return procedural_at ? (binary_space_after(sp.procedural_event_control_at_spacing) ? 1 : 0)
+                             : 0;
     if (rx == "@")
-        return 1;
+        return procedural_at ? (binary_space_before(sp.procedural_event_control_at_spacing) ? 1 : 0)
+                             : 1;
     if (is_unary_op(L) && rx == "{")
         return 0;
+    if (L_assign || R_assign)
+        return 1;
+    if (in_dim && is_indexed_part_select_op(R))
+        return binary_space_before(sp.indexed_part_select_spacing) ? 1 : 0;
+    if (in_dim && is_indexed_part_select_op(L))
+        return binary_space_after(sp.indexed_part_select_spacing) ? 1 : 0;
+    if (in_dim && is_indexed_part_select_op_pair(L, R))
+        return binary_space_before(sp.indexed_part_select_spacing) ? 1 : 0;
+    if (in_dim && (lx == "+" || lx == "-") && rx == ":")
+        return 0;
+    if (in_dim && (lx == ":" || rx == ":"))
+        return (lx == ":") ? (binary_space_after(sp.range_colon_spacing) ? 1 : 0)
+                           : (binary_space_before(sp.range_colon_spacing) ? 1 : 0);
+    if ((is_binary_op(L) && !L_assign) || (is_binary_op(R) && !R_assign)) {
+        if (looks_unary_context(L, R))
+            return 0;
+        const std::string& mode =
+            in_dim ? sp.dimension_binary_operator_spacing : sp.binary_operator_spacing;
+        if (is_binary_op(R) && !R_assign)
+            return binary_space_before(mode) ? 1 : 0;
+        if (is_binary_op(L) && !L_assign)
+            return binary_space_after(mode) ? 1 : 0;
+    }
     if (is_binary_op(L) || is_binary_op(R)) {
-        if (is_binary_op(R) && in_dim && opts.compact_indexing_and_selections)
-            return 0;
-        if (is_binary_op(L) && in_dim)
-            return 0;
         return 1;
     }
     if (is_hierarchy(L) || is_hierarchy(R))
@@ -308,6 +404,8 @@ static int spaces_req(const Tok& L, const Tok& R, const FormatOptions& opts, boo
             return 1;
         if (is_identifier(L))
             return 0;
+        if (is_control_keyword(L))
+            return sp.control_keyword_space ? 1 : 0;
         if (is_keyword(L))
             return 1;
         return 0;
@@ -512,7 +610,7 @@ static void append_trivia_text(std::vector<Tok>& toks, const std::string& source
             static const std::vector<std::string> OPS = {
                 "<<=", ">>=", "===", "!==", "<<<", ">>>", "->", "<->", "&&", "||", "**", "##",
                 "|->", "+=",  "-=",  "*=",  "/=",  "%=",  "&=", "|=",  "^=", "<=", ">=", "==",
-                "!=",  "::",  "~&",  "~|",  "~^",  "^~",  "++", "--",  "<<", ">>"};
+                "!=",  "::",  "+:",  "-:",  "~&",  "~|",  "~^", "^~",  "++", "--", "<<", ">>"};
             bool matched = false;
             for (const auto& op : OPS) {
                 if (i + op.size() <= end && source.compare(i, op.size(), op) == 0) {
@@ -531,6 +629,50 @@ static void append_trivia_text(std::vector<Tok>& toks, const std::string& source
             ++i;
         }
     }
+}
+
+static std::string normalize_spacing_fragment(const std::string& text, const FormatOptions& opts,
+                                              bool in_dim) {
+    std::vector<Tok> toks;
+    append_trivia_text(toks, text, 0, text.size());
+
+    std::string out;
+    const Tok* prev = nullptr;
+    for (const auto& tok : toks) {
+        if (tok.whitespace)
+            continue;
+        if (prev) {
+            int spaces =
+                spaces_req(*prev, tok, opts, in_dim, false, false, ParenKind::Ordinary, false);
+            if (spaces > 0)
+                out += std::string(spaces, ' ');
+        }
+        out += tok.text;
+        prev = &tok;
+    }
+    return out;
+}
+
+static std::string normalize_bracket_spacing(const std::string& text, const FormatOptions& opts) {
+    std::string out;
+    for (size_t i = 0; i < text.size();) {
+        if (text[i] != '[') {
+            out += text[i++];
+            continue;
+        }
+
+        size_t start = i;
+        int depth = 0;
+        do {
+            if (text[i] == '[')
+                ++depth;
+            else if (text[i] == ']')
+                --depth;
+            ++i;
+        } while (i < text.size() && depth > 0);
+        out += normalize_spacing_fragment(text.substr(start, i - start), opts, true);
+    }
+    return out;
 }
 
 static std::vector<Tok> collect_cst_tokens(const std::string& source, const SyntaxTree& tree,
@@ -604,7 +746,7 @@ struct PortParsed {
     std::string terminator, comment;
 };
 
-static PortParsed parse_port(const std::string& raw) {
+static PortParsed parse_port(const std::string& raw, const FormatOptions& opts) {
     PortParsed r;
     std::string s = raw;
     while (!s.empty() && (s.back() == ' ' || s.back() == '\t'))
@@ -762,11 +904,12 @@ static PortParsed parse_port(const std::string& raw) {
         std::string nm = rn.substr(a, b - a);
         auto [name, trail] = split_id_trail(nm);
         if (!name.empty()) {
-            r.names.push_back({name, trail});
+            r.names.push_back({name, normalize_bracket_spacing(trail, opts)});
         } else {
             r.names.push_back({nm, ""});
         }
     }
+    r.dim = normalize_bracket_spacing(r.dim, opts);
     r.valid = !r.names.empty();
     return r;
 }
@@ -863,7 +1006,7 @@ static std::string align_port_pass(const std::string& text, const FormatOptions&
                 port_line += ";";
                 ++j;
             }
-            blk.push_back({port_line, parse_port(port_line)});
+            blk.push_back({port_line, parse_port(port_line, opts)});
         }
 
         int md = 0, ms2_content = 0, mdim = 0;
@@ -1037,9 +1180,8 @@ static std::string align_assign_pass(const std::string& text, const FormatOption
     auto find_op = [&](const std::string& line) -> std::pair<int, std::string> {
         size_t cp = line.find("//");
         std::string code = (cp != std::string::npos) ? line.substr(0, cp) : line;
-        static const std::vector<std::string> OPS = {"<<<=", ">>>=", "<<=", ">>=", "<=",
-                                                     "+=",   "-=",   "*=",  "/=",  "%=",
-                                                     "&=",   "|=",   "^=",  "="};
+        static const std::vector<std::string> OPS = {"<<<=", ">>>=", "<<=", ">>=", "<=", "+=", "-=",
+                                                     "*=",   "/=",   "%=",  "&=",  "|=", "^=", "="};
         int paren = 0;
         int bracket = 0;
         int brace = 0;
@@ -1178,7 +1320,7 @@ struct VarParsed {
     std::string comment;
 };
 
-static VarParsed* parse_var_line(const std::string& line) {
+static VarParsed* parse_var_line(const std::string& line, const FormatOptions& opts) {
     std::string stripped = line;
     while (!stripped.empty() && (stripped.back() == ' ' || stripped.back() == '\t'))
         stripped.pop_back();
@@ -1321,7 +1463,8 @@ static VarParsed* parse_var_line(const std::string& line) {
             return nullptr;
     }
 
-    auto* vp = new VarParsed{indent, type_kw, qualifier, dim, {}, comment};
+    auto* vp = new VarParsed{indent, type_kw, qualifier, normalize_bracket_spacing(dim, opts),
+                             {},     comment};
     for (auto& rn : raw_names) {
         size_t a = 0;
         while (a < rn.size() && (rn[a] == ' ' || rn[a] == '\t'))
@@ -1336,7 +1479,7 @@ static VarParsed* parse_var_line(const std::string& line) {
         std::string dname = nm.substr(0, ni);
         while (ni < nm.size() && (nm[ni] == ' ' || nm[ni] == '\t'))
             ++ni;
-        vp->declarators.push_back({dname, nm.substr(ni)});
+        vp->declarators.push_back({dname, normalize_bracket_spacing(nm.substr(ni), opts)});
     }
     if (vp->declarators.empty()) {
         delete vp;
@@ -1368,7 +1511,7 @@ static std::string align_var_pass(const std::string& text, const FormatOptions& 
     auto is_var_idx = [&](int idx) -> bool {
         if (kinds)
             return kinds->count(idx) && kinds->at(idx) == LineKind::VarDecl;
-        VarParsed* parsed = parse_var_line(lines[(size_t)idx]);
+        VarParsed* parsed = parse_var_line(lines[(size_t)idx], opts);
         if (!parsed)
             return false;
         delete parsed;
@@ -1397,7 +1540,7 @@ static std::string align_var_pass(const std::string& text, const FormatOptions& 
         while (j < lines.size()) {
             const std::string& cur = lines[j];
             if (is_var_idx((int)j)) {
-                block.push_back({cur, parse_var_line(cur)});
+                block.push_back({cur, parse_var_line(cur, opts)});
                 ++j;
                 continue;
             }
@@ -2915,6 +3058,8 @@ std::string format_source(const std::string& source, const FormatOptions& opts,
     //               Used to distinguish top-level ';' (statement end) from
     //               ';' inside a for(;;) header.
     int paren_depth = 0;
+    std::vector<ParenKind> paren_stack;
+    std::vector<bool> for_header_stack;
 
     // do_depth  — counts nested `do` keywords so we know when `end while`
     //             belongs to a do…while (MustAppend) vs. a plain `while`.
@@ -2980,6 +3125,7 @@ std::string format_source(const std::string& source, const FormatOptions& opts,
     // prev — pointer to the previous non-whitespace Tok, used by spaces_req()
     //        and break_dec() to decide spacing/line-break between token pairs.
     const Tok* prev = nullptr;
+    bool prev_at_procedural = false;
 
     // -----------------------------------------------------------------------
     // Helper lambdas
@@ -3086,10 +3232,21 @@ std::string format_source(const std::string& source, const FormatOptions& opts,
         //         SD::MustAppend → force tok onto the same line as prev
         //         SD::Undecided  → use pending_nl / blank_pend to decide
         bool in_dim = dim_depth > 0;
+        bool in_for_header =
+            std::any_of(for_header_stack.begin(), for_header_stack.end(), [](bool v) { return v; });
+        bool procedural_at = prev && ((tok.text == "@" && is_procedural_event_keyword(*prev)) ||
+                                      (prev->text == "@" && prev_at_procedural));
+        ParenKind paren_kind = ParenKind::Ordinary;
+        if (prev && (prev->text == "(" || tok.text == ")")) {
+            if (!paren_stack.empty())
+                paren_kind = paren_stack.back();
+        } else if (prev && tok.text == "(")
+            paren_kind = classify_paren(*prev, procedural_at);
         int spaces = 0;
         SD dec = SD::Undecided;
         if (prev) {
-            spaces = spaces_req(*prev, tok, opts, in_dim);
+            spaces = spaces_req(*prev, tok, opts, in_dim, in_for_header, !paren_stack.empty(),
+                                paren_kind, procedural_at);
             dec = break_dec(*prev, tok, opts, in_dim);
         }
 
@@ -3222,6 +3379,10 @@ std::string format_source(const std::string& source, const FormatOptions& opts,
             --dim_depth;
         else if (tok.text == "(") {
             ++paren_depth;
+            paren_stack.push_back(prev ? classify_paren(*prev, prev_at_procedural)
+                                       : ParenKind::Ordinary);
+            for_header_stack.push_back(prev && is_keyword(*prev) &&
+                                       (prev->lo == "for" || prev->lo == "foreach"));
             if (case_expr_pending) {
                 case_expr_depth = paren_depth; // remember which ')' ends the case expr
                 case_expr_pending = false;
@@ -3245,6 +3406,10 @@ std::string format_source(const std::string& source, const FormatOptions& opts,
                 control_expr_depth = -1;
             }
             --paren_depth;
+            if (!paren_stack.empty())
+                paren_stack.pop_back();
+            if (!for_header_stack.empty())
+                for_header_stack.pop_back();
         } else if (tok.text == ";")
             dim_depth = 0; // `;` always ends any dimension context
 
@@ -3360,6 +3525,7 @@ std::string format_source(const std::string& source, const FormatOptions& opts,
             in_pp_cond = false;
         }
 
+        prev_at_procedural = tok.text == "@" && prev && is_procedural_event_keyword(*prev);
         prev = &tok; // remember this token for next iteration's spacing decisions
     } // end main token loop
 

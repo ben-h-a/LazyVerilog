@@ -6,8 +6,8 @@ implementation of LazyVerilog.
 ## Files
 
 - `format-options.md`: formatter-related `lazyverilog.toml` options, including
-  declaration alignment, instance formatting, and function/task-call
-  formatting.
+  declaration alignment, spacing controls, instance formatting, and
+  function/task-call formatting.
 
 ## Scope
 

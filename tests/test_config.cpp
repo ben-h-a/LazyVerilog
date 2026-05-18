@@ -114,6 +114,18 @@ layout = "hanging"
 space_before_paren = true
 space_inside_paren = true
 
+[format.spacing]
+control_keyword_space = false
+space_inside_parens = true
+space_inside_dimension_brackets = true
+binary_operator_spacing = "none"
+dimension_binary_operator_spacing = "both"
+semicolon_spacing = "both"
+range_colon_spacing = "after"
+indexed_part_select_spacing = "before"
+procedural_event_control_at_spacing = "both"
+space_inside_event_control_parens = true
+
 [format.port]
 non_ansi_port_per_line_enabled = true
 non_ansi_port_per_line = 4
@@ -233,6 +245,17 @@ autoarg_on_save = true
     CHECK(cfg.format.function.layout == "hanging");
     CHECK(cfg.format.function.space_before_paren == true);
     CHECK(cfg.format.function.space_inside_paren == true);
+
+    CHECK(cfg.format.spacing.control_keyword_space == false);
+    CHECK(cfg.format.spacing.space_inside_parens == true);
+    CHECK(cfg.format.spacing.space_inside_dimension_brackets == true);
+    CHECK(cfg.format.spacing.binary_operator_spacing == "none");
+    CHECK(cfg.format.spacing.dimension_binary_operator_spacing == "both");
+    CHECK(cfg.format.spacing.semicolon_spacing == "both");
+    CHECK(cfg.format.spacing.range_colon_spacing == "after");
+    CHECK(cfg.format.spacing.indexed_part_select_spacing == "before");
+    CHECK(cfg.format.spacing.procedural_event_control_at_spacing == "both");
+    CHECK(cfg.format.spacing.space_inside_event_control_parens == true);
 
     CHECK(cfg.format.port.non_ansi_port_per_line_enabled == true);
     CHECK(cfg.format.port.non_ansi_port_per_line == 4);

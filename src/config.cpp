@@ -38,6 +38,20 @@ static std::vector<std::string> validate_config(const Config& cfg) {
     check_enum(cfg.format.function.break_policy, "[format.function_call].break_policy",
                {"auto", "always", "never"});
     check_enum(cfg.format.function.layout, "[format.function_call].layout", {"block", "hanging"});
+    check_enum(cfg.format.spacing.binary_operator_spacing,
+               "[format.spacing].binary_operator_spacing", {"none", "before", "after", "both"});
+    check_enum(cfg.format.spacing.dimension_binary_operator_spacing,
+               "[format.spacing].dimension_binary_operator_spacing",
+               {"none", "before", "after", "both"});
+    check_enum(cfg.format.spacing.semicolon_spacing, "[format.spacing].semicolon_spacing",
+               {"none", "before", "after", "both"});
+    check_enum(cfg.format.spacing.range_colon_spacing, "[format.spacing].range_colon_spacing",
+               {"none", "before", "after", "both"});
+    check_enum(cfg.format.spacing.indexed_part_select_spacing,
+               "[format.spacing].indexed_part_select_spacing", {"none", "before", "after", "both"});
+    check_enum(cfg.format.spacing.procedural_event_control_at_spacing,
+               "[format.spacing].procedural_event_control_at_spacing",
+               {"none", "before", "after", "both"});
 
     return errors;
 }
@@ -220,6 +234,28 @@ Config load_config(const std::filesystem::path& root, std::string* warning,
                     cfg.format.modport.direction_min_width = static_cast<int>(*v);
                 if (auto v = (*mp)["signal_min_width"].value<int64_t>())
                     cfg.format.modport.signal_min_width = static_cast<int>(*v);
+            }
+            if (auto sp = (*f)["spacing"].as_table()) {
+                if (auto v = (*sp)["control_keyword_space"].value<bool>())
+                    cfg.format.spacing.control_keyword_space = *v;
+                if (auto v = (*sp)["space_inside_parens"].value<bool>())
+                    cfg.format.spacing.space_inside_parens = *v;
+                if (auto v = (*sp)["space_inside_dimension_brackets"].value<bool>())
+                    cfg.format.spacing.space_inside_dimension_brackets = *v;
+                if (auto v = (*sp)["binary_operator_spacing"].value<std::string>())
+                    cfg.format.spacing.binary_operator_spacing = *v;
+                if (auto v = (*sp)["dimension_binary_operator_spacing"].value<std::string>())
+                    cfg.format.spacing.dimension_binary_operator_spacing = *v;
+                if (auto v = (*sp)["semicolon_spacing"].value<std::string>())
+                    cfg.format.spacing.semicolon_spacing = *v;
+                if (auto v = (*sp)["range_colon_spacing"].value<std::string>())
+                    cfg.format.spacing.range_colon_spacing = *v;
+                if (auto v = (*sp)["indexed_part_select_spacing"].value<std::string>())
+                    cfg.format.spacing.indexed_part_select_spacing = *v;
+                if (auto v = (*sp)["procedural_event_control_at_spacing"].value<std::string>())
+                    cfg.format.spacing.procedural_event_control_at_spacing = *v;
+                if (auto v = (*sp)["space_inside_event_control_parens"].value<bool>())
+                    cfg.format.spacing.space_inside_event_control_parens = *v;
             }
         }
 

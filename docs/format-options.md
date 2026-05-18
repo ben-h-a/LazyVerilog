@@ -22,12 +22,7 @@ Number of spaces per indentation level.
 |------|---------|
 | bool | `true` |
 
-Controls spacing inside index and selection expressions.
-
-```systemverilog
-a[i+1]      // true
-a[i + 1]    // false
-```
+Legacy option retained for compatibility. New configs should prefer `[format.spacing].dimension_binary_operator_spacing`.
 
 ### `keyword_case`
 
@@ -97,6 +92,54 @@ When `true`, formatting aborts if non-whitespace content changes.
 | bool | `true` |
 
 Controls whether formatted output ends with a trailing newline.
+
+## `[format.spacing]`
+
+```toml
+[format.spacing]
+control_keyword_space = true
+space_inside_parens = false
+space_inside_dimension_brackets = false
+binary_operator_spacing = "both"
+dimension_binary_operator_spacing = "none"
+semicolon_spacing = "after"
+range_colon_spacing = "none"
+indexed_part_select_spacing = "both"
+procedural_event_control_at_spacing = "before"
+space_inside_event_control_parens = false
+```
+
+Spacing mode values are `"none"`, `"before"`, `"after"`, and `"both"`.
+
+| option | default | effect |
+|--------|---------|--------|
+| `control_keyword_space` | `true` | Space between control-flow keywords and their header paren: `if (a)` vs `if(a)`. Applies to `if`, `else if`, `for`, `foreach`, `while`, `repeat`, `case`, `casex`, and `casez`; not function/task/system calls. |
+| `space_inside_parens` | `false` | Space just inside ordinary/control/grouping parentheses: `( a + b )`. Function/task/system call parens are excluded. |
+| `space_inside_dimension_brackets` | `false` | Space just inside packed/unpacked dimensions and select brackets: `[ WIDTH-1:0 ]`, `arr[ i ]`. |
+| `binary_operator_spacing` | `"both"` | Spacing around binary operators outside `[]`, excluding assignment and unary operators. |
+| `dimension_binary_operator_spacing` | `"none"` | Spacing around binary operators inside dimensions/selects, excluding range colons, indexed part-select operators, and unary operators. |
+| `semicolon_spacing` | `"after"` | Spacing around semicolons in `for`/`foreach` headers only. Statement terminators are not affected. |
+| `range_colon_spacing` | `"none"` | Spacing around range/select colons inside `[]`: `[hi:lo]`. Indexed part-select `+:`/`-:` is excluded. |
+| `indexed_part_select_spacing` | `"both"` | Spacing around indexed part-select operators as one unit: `arr[i +: 4]`. |
+| `procedural_event_control_at_spacing` | `"before"` | Spacing around `@` in procedural event controls after `always`, `always_ff`, `always_comb`, or `always_latch`. Standalone event controls are excluded. |
+| `space_inside_event_control_parens` | `false` | Space just inside procedural event-control parentheses: `always @( posedge clk )`. Normal parentheses are excluded. |
+
+Examples:
+
+```systemverilog
+// defaults
+if (a + b)
+logic [WIDTH-1:0] data;
+arr[i+: 4]
+always @(posedge clk)
+
+// selected alternatives
+if( a+b )
+logic [ WIDTH - 1 : 0 ] data;
+arr[ i +: 4 ]
+always @ ( posedge clk )
+```
+
 
 ## `[format.statement]`
 
