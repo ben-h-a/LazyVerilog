@@ -204,6 +204,26 @@ function M.setup(user_config)
 		desc     = "Start lazyverilog LSP server",
 	})
 
+	-- Ask lazyverilog to format before saving.  The server decides whether to
+	-- return edits based on [format].enable_format_on_save in lazyverilog.toml.
+	vim.api.nvim_create_autocmd("BufWritePre", {
+		group    = "LazyVerilog",
+		pattern  = { "*.sv", "*.svh", "*.v", "*.vh" },
+		callback = function(ev)
+			if not vim.lsp.get_clients({ bufnr = ev.buf, name = "lazyverilog" })[1] then
+				return
+			end
+			vim.lsp.buf.format({
+				bufnr  = ev.buf,
+				async  = false,
+				filter = function(client)
+					return client.name == "lazyverilog"
+				end,
+			})
+		end,
+		desc     = "Format LazyVerilog buffers before save",
+	})
+
 	-- Sync RtlTree highlight when switching to an RTL buffer.
 	vim.api.nvim_create_autocmd("BufEnter", {
 		group    = "LazyVerilog",
