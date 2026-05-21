@@ -118,6 +118,44 @@ TEST_CASE("formatter: define macro body not reformatted", "[formatter]") {
     CHECK(format_source(src, opts) == src);
 }
 
+TEST_CASE("formatter: macro calls with empty arguments are preserved", "[formatter]") {
+    FormatOptions opts;
+    opts.safe_mode = true;
+
+    const std::string src = "module top;\n"
+                            "  `DV_CHECK_FATAL(expr, , msg_id)\n"
+                            "endmodule\n";
+
+    REQUIRE_NOTHROW(format_source(src, opts));
+}
+
+TEST_CASE("formatter: calls with empty positional arguments are preserved", "[formatter]") {
+    FormatOptions opts;
+    opts.safe_mode = true;
+    opts.function.break_policy = "always";
+
+    const std::string src = "module top;\n"
+                            "  issue_data(req.data, rsp.data, , num_bits);\n"
+                            "endmodule\n";
+
+    REQUIRE_NOTHROW(format_source(src, opts));
+}
+
+TEST_CASE("formatter: port header comments do not gain semicolons", "[formatter]") {
+    FormatOptions opts;
+    opts.safe_mode = true;
+    opts.port_declaration.align = true;
+
+    const std::string src = "module top import pkg::*;\n"
+                            "(\n"
+                            "  input logic clk_i,\n"
+                            "  output logic done_o // done\n"
+                            ");\n"
+                            "endmodule\n";
+
+    REQUIRE_NOTHROW(format_source(src, opts));
+}
+
 TEST_CASE("formatter: inline line comments stay on their original line", "[formatter]") {
     FormatOptions opts;
     opts.default_indent_level_inside_outmost_block = 0;

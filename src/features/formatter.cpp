@@ -345,6 +345,74 @@ static std::vector<std::pair<int, int>> find_disabled(const std::string& src) {
             ++i;
     }
 
+    // Backtick macro calls are not lexically safe to rewrite: empty macro arguments (",,") and
+    // token-paste / stringify operators can be significant. Preserve each macro invocation
+    // verbatim, but keep compiler directives handled above formatable where possible.
+    static const std::unordered_set<std::string> DIRECTIVES = {
+        "`include", "`define", "`ifdef", "`ifndef", "`elsif", "`else", "`endif"};
+    for (size_t i = 0; i < n; ++i) {
+        if (src[i] != '`')
+            continue;
+        size_t name_end = i + 1;
+        while (name_end < n && (std::isalnum((unsigned char)src[name_end]) ||
+                                src[name_end] == '_' || src[name_end] == '$'))
+            ++name_end;
+        if (name_end == i + 1)
+            continue;
+        std::string name = src.substr(i, name_end - i);
+        if (has(DIRECTIVES, name))
+            continue;
+
+        size_t line_start = i;
+        while (line_start > 0 && src[line_start - 1] != '\n')
+            --line_start;
+        size_t j = name_end;
+        while (j < n && (src[j] == ' ' || src[j] == '\t'))
+            ++j;
+        if (j >= n || src[j] != '(') {
+            while (j < n && src[j] != '\n')
+                ++j;
+            out.push_back({(int)line_start, (int)j});
+            i = j;
+            continue;
+        }
+
+        int paren = 0;
+        bool in_string = false;
+        bool escaped = false;
+        for (; j < n; ++j) {
+            char ch = src[j];
+            if (in_string) {
+                if (escaped)
+                    escaped = false;
+                else if (ch == '\\')
+                    escaped = true;
+                else if (ch == '"')
+                    in_string = false;
+                continue;
+            }
+            if (ch == '"') {
+                in_string = true;
+                continue;
+            }
+            if (ch == '/' && j + 1 < n && src[j + 1] == '/') {
+                while (j < n && src[j] != '\n')
+                    ++j;
+                break;
+            }
+            if (ch == '(')
+                ++paren;
+            else if (ch == ')' && paren > 0 && --paren == 0) {
+                ++j;
+                break;
+            }
+        }
+        while (j < n && src[j] != '\n')
+            ++j;
+        out.push_back({(int)line_start, (int)j});
+        i = j;
+    }
+
     std::sort(out.begin(), out.end());
     return out;
 }
@@ -1097,9 +1165,16 @@ static std::vector<std::string> align_port_pass(std::vector<std::string> lines,
             ++i;
             continue;
         }
-        if ((trimmed_line.rfind("module ", 0) == 0 || trimmed_line.rfind("macromodule ", 0) == 0) &&
-            trimmed_line.find('(') != std::string::npos &&
-            trimmed_line.find(';') == std::string::npos) {
+        if ((trimmed_line.rfind("module ", 0) == 0 ||
+             trimmed_line.rfind("macromodule ", 0) == 0 ||
+             trimmed_line.rfind("interface ", 0) == 0 ||
+             trimmed_line.rfind("program ", 0) == 0 ||
+             trimmed_line.rfind("task ", 0) == 0 ||
+             trimmed_line.rfind("function ", 0) == 0) &&
+            trimmed_line.find(");") == std::string::npos &&
+            (trimmed_line.find('(') != std::string::npos ||
+             trimmed_line.find(';') == std::string::npos ||
+             trimmed_line.find(" import ") != std::string::npos)) {
             module_header_region = true;
             out.push_back(lines[i]);
             ++i;
@@ -2757,10 +2832,17 @@ static std::vector<std::string> format_function_calls_pass(std::vector<std::stri
         std::string args_text = line.substr(op + 1, cl - op - 1);
         auto raw_args = split_top_level(args_text);
         std::vector<std::string> args;
+        bool has_empty_arg = false;
         for (auto& a : raw_args) {
             auto t = trim_copy(a);
             if (!t.empty())
                 args.push_back(t);
+            else
+                has_empty_arg = true;
+        }
+        if (has_empty_arg && !(raw_args.size() == 1 && args.empty())) {
+            out.push_back(lines[li]);
+            continue;
         }
 
         std::string prefix = line.substr(0, ns);
@@ -3130,7 +3212,15 @@ static std::vector<std::string> format_portlist_pass(std::vector<std::string> li
             for (size_t k = 0; k < trimmed_ports.size(); ++k) {
                 std::string comma =
                     (k + 1 < trimmed_ports.size() || opts.port_declaration.align) ? "," : "";
-                port_lines += port_indent + trimmed_ports[k] + comma + "\n";
+                std::string port = trimmed_ports[k];
+                if (!comma.empty()) {
+                    size_t comment = find_line_comment_start(port);
+                    if (comment != std::string::npos)
+                        port.insert(comment, comma);
+                    else
+                        port += comma;
+                }
+                port_lines += port_indent + port + "\n";
             }
             if (!port_lines.empty() && port_lines.back() == '\n')
                 port_lines.pop_back();
