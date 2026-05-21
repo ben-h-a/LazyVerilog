@@ -66,8 +66,8 @@ Server registers these `executeCommand` commands:
 `src/features/formatter.cpp` produces output identical to the previous Python formatter:
 - Token-based; idempotent; semantics-neutral (whitespace only).
 - Disable regions: `// verilog_format: off` … `// verilog_format: on`; `` `define `` macro bodies passed verbatim.
-- Passes (in order): `align_port_pass`, `align_assign_pass`, `align_var_pass`, `expand_instances_pass`, `format_portlist_pass`.
-- `FormatOptions` has nested structs: `StatementOptions`, `PortDeclarationOptions`, `VarDeclarationOptions`, `InstanceOptions`, `PortOptions` — mirrors Python `FormatOptions` exactly.
+- Passes (in order): `align_port_pass`, `align_assign_pass`, `align_var_pass`, `expand_instances_pass`, `format_portlist_pass`, `format_function_declaration_pass`.
+- `FormatOptions` has nested structs: `StatementOptions`, `PortDeclarationOptions`, `VarDeclarationOptions`, `InstanceOptions`, `FunctionOptions`, `FunctionDeclarationOptions`, `PortOptions` — mirrors Python `FormatOptions` exactly.
 
 ### Lint
 

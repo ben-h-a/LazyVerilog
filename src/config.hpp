@@ -64,6 +64,11 @@ struct FunctionOptions {
     bool space_inside_paren{false};
 };
 
+struct FunctionDeclarationOptions {
+    std::string layout{"block"};
+    int line_length{100};
+};
+
 struct PortOptions {
     bool non_ansi_port_per_line_enabled{false};
     int non_ansi_port_per_line{1};
@@ -113,6 +118,7 @@ struct FormatOptions {
     VarDeclarationOptions var_declaration;
     InstanceOptions instance;
     FunctionOptions function;
+    FunctionDeclarationOptions function_declaration;
     PortOptions port;
     EnumOptions enum_declaration;
     ModportOptions modport;

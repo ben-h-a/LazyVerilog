@@ -38,6 +38,8 @@ static std::vector<std::string> validate_config(const Config& cfg) {
     check_enum(cfg.format.function.break_policy, "[format.function_call].break_policy",
                {"auto", "always", "never"});
     check_enum(cfg.format.function.layout, "[format.function_call].layout", {"block", "hanging"});
+    check_enum(cfg.format.function_declaration.layout, "[format.function_declaration].layout",
+               {"block", "hanging"});
     check_enum(cfg.format.spacing.binary_operator_spacing,
                "[format.spacing].binary_operator_spacing", {"none", "before", "after", "both"});
     check_enum(cfg.format.spacing.dimension_binary_operator_spacing,
@@ -204,6 +206,12 @@ Config load_config(const std::filesystem::path& root, std::string* warning,
                     cfg.format.function.space_before_paren = *v;
                 if (auto v = (*fn)["space_inside_paren"].value<bool>())
                     cfg.format.function.space_inside_paren = *v;
+            }
+            if (auto fd = (*f)["function_declaration"].as_table()) {
+                if (auto v = (*fd)["layout"].value<std::string>())
+                    cfg.format.function_declaration.layout = *v;
+                if (auto v = (*fd)["line_length"].value<int64_t>())
+                    cfg.format.function_declaration.line_length = static_cast<int>(*v);
             }
             if (auto po = (*f)["port"].as_table()) {
                 if (auto v = (*po)["non_ansi_port_per_line_enabled"].value<bool>())

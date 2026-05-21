@@ -327,8 +327,29 @@ static std::vector<std::pair<int, int>> find_disabled(const std::string& src) {
                 ++i;
             continue;
         }
-        // Found `define at ls.  Consume lines with trailing backslash continuation.
-        size_t j = ls;
+        // Found `define at ls.  First skip past the macro name and any argument
+        // list.  The argument list `(...)` can span multiple lines WITHOUT
+        // backslash continuation (only the body needs `\`).
+        size_t j = ls + 7; // past "`define"
+        // Skip whitespace after `define
+        while (j < n && (src[j] == ' ' || src[j] == '\t'))
+            ++j;
+        // Skip macro name
+        while (j < n && (std::isalnum((unsigned char)src[j]) || src[j] == '_' || src[j] == '$'))
+            ++j;
+        // If there's an argument list, skip it (may span lines)
+        if (j < n && src[j] == '(') {
+            int depth = 1;
+            ++j;
+            while (j < n && depth > 0) {
+                if (src[j] == '(')
+                    ++depth;
+                else if (src[j] == ')')
+                    --depth;
+                ++j;
+            }
+        }
+        // Now consume lines with trailing backslash continuation (macro body).
         while (true) {
             while (j < n && src[j] != '\n')
                 ++j;
@@ -2751,9 +2772,19 @@ static bool find_simple_call(const std::string& line, size_t& name_start, size_t
         "class", "property", "sequence", "assert",      "assume",   "cover"};
     for (size_t i = 0; i < line.size(); ++i) {
         unsigned char ch = (unsigned char)line[i];
-        if (!(std::isalpha(ch) || line[i] == '_' || line[i] == '$'))
+        // Allow backtick-prefixed macro calls (e.g. `uvm_info(...))
+        bool has_backtick = (ch == '`');
+        if (has_backtick) {
+            if (i + 1 >= line.size())
+                continue;
+            ch = (unsigned char)line[i + 1];
+        }
+        if (!(std::isalpha(ch) || ch == '_' || ch == '$'))
             continue;
-        size_t s = i++;
+        size_t s = i;
+        if (has_backtick)
+            ++i; // skip backtick
+        ++i;
         while (i < line.size() &&
                (std::isalnum((unsigned char)line[i]) || line[i] == '_' || line[i] == '$'))
             ++i;
@@ -2810,6 +2841,26 @@ static std::vector<std::string> format_function_calls_pass(std::vector<std::stri
     std::string text = render_lines(lines);
     auto disabled = find_disabled(text);
 
+    // Helper: detect if a line starts a backtick macro call.
+    auto find_macro_call_start = [](const std::string& ln) -> size_t {
+        for (size_t i = 0; i < ln.size(); ++i) {
+            if (ln[i] == '`') {
+                size_t j = i + 1;
+                while (j < ln.size() &&
+                       (std::isalnum((unsigned char)ln[j]) || ln[j] == '_' || ln[j] == '$'))
+                    ++j;
+                if (j > i + 1) {
+                    size_t k = j;
+                    while (k < ln.size() && (ln[k] == ' ' || ln[k] == '\t'))
+                        ++k;
+                    if (k < ln.size() && ln[k] == '(')
+                        return i;
+                }
+            }
+        }
+        return std::string::npos;
+    };
+
     std::vector<std::string> out;
     int pos = 0;
     for (size_t li = 0; li < lines.size(); ++li) {
@@ -2820,8 +2871,109 @@ static std::vector<std::string> format_function_calls_pass(std::vector<std::stri
             out.push_back(lines[li]);
             continue;
         }
+        // For macro calls in disabled regions, join multi-line and format.
+        // But never reformat lines inside `define bodies (trailing '\').
         if (in_disabled(line_start, disabled)) {
-            out.push_back(lines[li]);
+            // Skip `define continuation lines entirely.
+            auto rtrim = trim_copy(line);
+            if (!rtrim.empty() && rtrim.back() == '\\') {
+                out.push_back(lines[li]);
+                continue;
+            }
+            size_t mcs = find_macro_call_start(line);
+            if (mcs == std::string::npos) {
+                out.push_back(lines[li]);
+                continue;
+            }
+            // Join lines until parens balance.
+            std::string joined = line;
+            int depth = 0;
+            bool balanced = false;
+            for (size_t ci = mcs; ci < joined.size(); ++ci) {
+                if (joined[ci] == '(') ++depth;
+                else if (joined[ci] == ')' && --depth == 0) { balanced = true; break; }
+            }
+            size_t consumed = 0;
+            while (!balanced && li + consumed + 1 < lines.size()) {
+                ++consumed;
+                joined += " " + trim_copy(lines[li + consumed]);
+                depth = 0;
+                balanced = false;
+                for (size_t ci = mcs; ci < joined.size(); ++ci) {
+                    if (joined[ci] == '(') ++depth;
+                    else if (joined[ci] == ')' && --depth == 0) { balanced = true; break; }
+                }
+            }
+            if (!balanced) {
+                out.push_back(lines[li]);
+                continue;
+            }
+            // Update pos for consumed lines
+            for (size_t c = 0; c < consumed; ++c)
+                pos += (int)lines[li + 1 + c].size() + 1;
+            li += consumed;
+
+            // Now format the joined macro call line through find_simple_call.
+            // Only reformat if the matched call is actually a backtick macro.
+            size_t ns = 0, ne = 0, op = 0, cl = 0;
+            if (!find_simple_call(joined, ns, ne, op, cl) ||
+                ns >= joined.size() || joined[ns] != '`') {
+                out.push_back(joined);
+                continue;
+            }
+            // Reuse the main formatting below by assigning to 'line' equivalent.
+            // (fall through by pushing to a local and continuing)
+            std::string args_text = joined.substr(op + 1, cl - op - 1);
+            auto raw_args = split_top_level(args_text);
+            std::vector<std::string> args;
+            bool has_empty_arg = false;
+            for (auto& a : raw_args) {
+                auto t = trim_copy(a);
+                if (!t.empty()) args.push_back(t);
+                else has_empty_arg = true;
+            }
+            if (has_empty_arg && !(raw_args.size() == 1 && args.empty())) {
+                out.push_back(joined);
+                continue;
+            }
+            std::string prefix = joined.substr(0, ns);
+            std::string name = joined.substr(ns, ne - ns);
+            std::string suffix = joined.substr(cl + 1);
+            std::string single = render_call_single(prefix, name, args, suffix, fo);
+            bool do_break = false;
+            if (fo.break_policy == "always") {
+                do_break = !args.empty();
+            } else if (fo.break_policy == "auto") {
+                do_break = ((int)single.size() > fo.line_length) ||
+                           (fo.arg_count >= 0 && (int)args.size() >= fo.arg_count);
+            }
+            if (!do_break || fo.break_policy == "never") {
+                out.push_back(single);
+                continue;
+            }
+            std::string open_text = prefix + name + (fo.space_before_paren ? " " : "") + "(";
+            if (fo.layout == "hanging") {
+                std::string hang(open_text.size(), ' ');
+                std::string r = open_text;
+                for (size_t i = 0; i < args.size(); ++i) {
+                    if (i) r += "\n" + hang;
+                    r += args[i];
+                    if (i + 1 < args.size()) r += ",";
+                }
+                r += ")" + suffix;
+                out.push_back(r);
+            } else {
+                std::string base_indent(prefix.size(), ' ');
+                std::string arg_indent = base_indent + std::string(std::max(0, opts.indent_size), ' ');
+                std::string r = open_text + "\n";
+                for (size_t i = 0; i < args.size(); ++i) {
+                    r += arg_indent + args[i];
+                    if (i + 1 < args.size()) r += ",";
+                    r += "\n";
+                }
+                r += base_indent + ")" + suffix;
+                out.push_back(r);
+            }
             continue;
         }
         size_t ns = 0, ne = 0, op = 0, cl = 0;
@@ -2940,7 +3092,8 @@ static std::vector<std::string> format_function_calls_pass(std::vector<std::stri
 static bool extract_single_line_module_header(const std::string& line, std::string& prefix,
                                               std::string& ports_str, std::string& suffix_str) {
     auto toks = significant_tokens(line);
-    if (toks.size() < 4 || (toks[0].lo != "module" && toks[0].lo != "macromodule"))
+    if (toks.size() < 4 ||
+        (toks[0].lo != "module" && toks[0].lo != "macromodule" && toks[0].lo != "interface"))
         return false;
 
     size_t i = 1;
@@ -2997,7 +3150,8 @@ static bool extract_single_line_module_header(const std::string& line, std::stri
 
 static bool is_module_header_start_tokenized(const std::string& line) {
     auto toks = significant_tokens(line);
-    return !toks.empty() && (toks[0].lo == "module" || toks[0].lo == "macromodule");
+    return !toks.empty() &&
+           (toks[0].lo == "module" || toks[0].lo == "macromodule" || toks[0].lo == "interface");
 }
 
 static bool could_start_module_header(const std::string& line) {
@@ -3015,7 +3169,7 @@ static bool could_start_module_header(const std::string& line) {
         return !std::isalnum((unsigned char)next) && next != '_' && next != '$';
     };
 
-    return matches_word("module") || matches_word("macromodule");
+    return matches_word("module") || matches_word("macromodule") || matches_word("interface");
 }
 
 struct ModuleHeaderScan {
@@ -3288,11 +3442,6 @@ static std::vector<std::string> format_portlist_pass(std::vector<std::string> li
             std::string port_block;
             if (opts.port.non_ansi_port_per_line_enabled && opts.port.non_ansi_port_per_line > 0) {
                 int n = opts.port.non_ansi_port_per_line;
-                if ((int)trimmed_ports.size() <= n) {
-                    push_original_lines(i, consumed_end);
-                    i = consumed_end;
-                    continue;
-                }
                 for (size_t gi = 0; gi < trimmed_ports.size(); gi += (size_t)n) {
                     size_t end_g = std::min(gi + (size_t)n, trimmed_ports.size());
                     std::string comma = (end_g < trimmed_ports.size()) ? "," : "";
@@ -3389,6 +3538,112 @@ static std::vector<std::string> run_line_group_alignment_phase(std::vector<std::
     return lines;
 }
 
+// ---------------------------------------------------------------------------
+// Function/task declaration formatting pass
+// ---------------------------------------------------------------------------
+static std::vector<std::string> format_function_declaration_pass(
+    std::vector<std::string> lines, const FormatOptions& opts) {
+    const auto& fd = opts.function_declaration;
+    std::string text = render_lines(lines);
+    auto disabled = find_disabled(text);
+
+    std::vector<std::string> out;
+    int pos = 0;
+    for (size_t li = 0; li < lines.size(); ++li) {
+        const std::string& line = lines[li];
+        int line_start = pos;
+        pos += (int)line.size() + 1;
+        if (in_disabled(line_start, disabled)) {
+            out.push_back(line);
+            continue;
+        }
+        // Detect function/task declaration: keyword at start of line
+        size_t p = 0;
+        while (p < line.size() && (line[p] == ' ' || line[p] == '\t'))
+            ++p;
+        size_t indent_end = p;
+        auto matches_kw = [&](const char* kw) {
+            size_t len = std::char_traits<char>::length(kw);
+            if (p + len > line.size() || line.compare(p, len, kw) != 0)
+                return false;
+            if (p + len == line.size())
+                return true;
+            char c = line[p + len];
+            return !std::isalnum((unsigned char)c) && c != '_';
+        };
+        if (!matches_kw("function") && !matches_kw("task")) {
+            out.push_back(line);
+            continue;
+        }
+        // Find opening paren
+        size_t open = line.find('(', p);
+        if (open == std::string::npos) {
+            out.push_back(line);
+            continue;
+        }
+        // Find matching close paren
+        int depth = 1;
+        size_t close = std::string::npos;
+        for (size_t k = open + 1; k < line.size(); ++k) {
+            if (line[k] == '(') ++depth;
+            else if (line[k] == ')' && --depth == 0) { close = k; break; }
+        }
+        if (close == std::string::npos) {
+            out.push_back(line);
+            continue;
+        }
+        // Check if worth breaking (short lines stay single-line)
+        if ((int)line.size() <= fd.line_length) {
+            out.push_back(line);
+            continue;
+        }
+        // Split ports
+        std::string args_text = line.substr(open + 1, close - open - 1);
+        auto raw_args = split_top_level(args_text);
+        std::vector<std::string> args;
+        for (auto& a : raw_args) {
+            auto t = trim_copy(a);
+            if (!t.empty())
+                args.push_back(t);
+        }
+        if (args.empty()) {
+            out.push_back(line);
+            continue;
+        }
+        std::string prefix = line.substr(0, open);
+        std::string suffix = line.substr(close + 1);
+        std::string base_indent = line.substr(0, indent_end);
+        std::string arg_indent = base_indent + std::string(std::max(0, opts.indent_size), ' ');
+
+        if (fd.layout == "hanging") {
+            std::string open_text = prefix + "(";
+            std::string hang(open_text.size(), ' ');
+            std::string r = open_text;
+            for (size_t i = 0; i < args.size(); ++i) {
+                if (i)
+                    r += "\n" + hang;
+                r += args[i];
+                if (i + 1 < args.size())
+                    r += ",";
+            }
+            r += ")" + suffix;
+            out.push_back(r);
+        } else {
+            // block layout
+            std::string r = prefix + "(\n";
+            for (size_t i = 0; i < args.size(); ++i) {
+                r += arg_indent + args[i];
+                if (i + 1 < args.size())
+                    r += ",";
+                r += "\n";
+            }
+            r += base_indent + ")" + suffix;
+            out.push_back(r);
+        }
+    }
+    return out;
+}
+
 static std::vector<std::string> run_structural_layout_phase(
     std::vector<std::string> lines, const FormatOptions& opts) {
     lines = format_enum_declaration_pass(std::move(lines), opts);
@@ -3399,11 +3654,67 @@ static std::vector<std::string> run_structural_layout_phase(
     return lines;
 }
 
+// ---------------------------------------------------------------------------
+// `define continuation backslash alignment pass
+// ---------------------------------------------------------------------------
+// Groups consecutive lines ending with '\' and aligns the '\' to a common
+// column (max content width + 1 space).
+
+static std::vector<std::string> align_define_continuation_pass(std::vector<std::string> lines,
+                                                                 const FormatOptions& opts) {
+    auto ends_with_bs = [](const std::string& ln) -> bool {
+        size_t e = ln.size();
+        while (e > 0 && (ln[e - 1] == ' ' || ln[e - 1] == '\t'))
+            --e;
+        return e > 0 && ln[e - 1] == '\\';
+    };
+    auto content_width = [](const std::string& ln) -> size_t {
+        size_t e = ln.size();
+        while (e > 0 && (ln[e - 1] == ' ' || ln[e - 1] == '\t'))
+            --e;
+        if (e > 0 && ln[e - 1] == '\\')
+            --e;
+        while (e > 0 && (ln[e - 1] == ' ' || ln[e - 1] == '\t'))
+            --e;
+        return e;
+    };
+
+    std::vector<std::string> out;
+    size_t i = 0;
+    while (i < lines.size()) {
+        if (!ends_with_bs(lines[i])) {
+            out.push_back(lines[i]);
+            ++i;
+            continue;
+        }
+        size_t start = i;
+        while (i < lines.size() && ends_with_bs(lines[i]))
+            ++i;
+        // lines[start..i) all end with '\'
+        size_t max_cw = 0;
+        for (size_t k = start; k < i; ++k)
+            max_cw = std::max(max_cw, content_width(lines[k]));
+        int bs_col = opts.tab_align
+                         ? snap_to_indent_grid((int)max_cw + 1, opts.indent_size)
+                         : (int)max_cw + 1;
+        for (size_t k = start; k < i; ++k) {
+            size_t cw = content_width(lines[k]);
+            int pad = bs_col - (int)cw;
+            if (pad < 1)
+                pad = 1;
+            out.push_back(lines[k].substr(0, cw) + std::string(pad, ' ') + "\\");
+        }
+    }
+    return out;
+}
+
 static std::vector<std::string> run_post_token_pipeline(std::vector<std::string> lines,
                                                           const FormatOptions& opts) {
     lines = run_module_header_layout_phase(std::move(lines), opts);
     lines = run_line_group_alignment_phase(std::move(lines), opts);
     lines = run_structural_layout_phase(std::move(lines), opts);
+    lines = format_function_declaration_pass(std::move(lines), opts);
+    lines = align_define_continuation_pass(std::move(lines), opts);
     return lines;
 }
 
@@ -3530,6 +3841,11 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
     //              If the next whitespace token contains a newline, we must
     //              emit pending_nl so the re-enabled code starts on its own line.
     bool after_dis = false;
+
+    // block_label_state — tracks `begin: label` / `fork: label` sequences.
+    //   0 = idle, 1 = just emitted begin/fork (expecting ':'), 2 = saw ':'
+    //   (expecting label name).  Used to keep `begin: label` on one line.
+    int block_label_state = 0;
 
     // struct_pend — true after we see `struct` or `union` keyword; the next
     //               `{` should be treated as a struct-brace (indented block)
@@ -3722,6 +4038,19 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
             } else {
                 dec = SD::Undecided;
             }
+        }
+
+        // --- Block label: keep `begin: label` on one line ---
+        if (block_label_state == 1 && !tok.whitespace && !tok.comment) {
+            if (tok.text == ":") {
+                dec = SD::MustAppend;
+                spaces = 0;
+                block_label_state = 2;
+            } else {
+                block_label_state = 0;
+            }
+        } else if (block_label_state == 2 && !tok.whitespace && !tok.comment) {
+            dec = SD::MustAppend;
         }
 
         // Suppress the pending newline if this comment is on the same source line.
@@ -3957,6 +4286,18 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
             // the end of the argument and schedule a newline.
             pending_nl = true;
             in_pp_cond = false;
+        }
+
+        // --- Block label post-emit: restore newline after label name ---
+        if (block_label_state == 2 && !tok.whitespace && !tok.comment && tok.text != ":") {
+            pending_nl = true;
+            block_label_state = 0;
+        }
+        if (!tok.whitespace && !tok.comment && is_keyword(tok) &&
+            (tok.lo == "begin" || tok.lo == "fork" ||
+             tok.lo == "end" || tok.lo == "join" ||
+             tok.lo == "join_any" || tok.lo == "join_none")) {
+            block_label_state = 1;
         }
 
         prev_at_procedural = tok.text == "@" && prev && is_procedural_event_keyword(*prev);

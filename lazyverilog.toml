@@ -109,9 +109,13 @@ section4_min_width = 16
 break_policy = "auto"      # never | always | auto
 line_length = 100
 arg_count = 3 # when auto: break if arg count >= this value; -1 disables arg-count breaking
-layout = "block"           # hanging | block
+layout = "hanging"           # hanging | block
 space_before_paren = false
 space_inside_paren = false
+
+[format.function_declaration]
+layout = "block"           # hanging | block — applies to function and task declarations
+line_length = 13          # declarations shorter than this stay single-line
 
 [format.port]
 non_ansi_port_per_line_enabled = true

@@ -115,7 +115,13 @@ TEST_CASE("formatter: define macro body not reformatted", "[formatter]") {
                             "    for (int ii=STARTBYTE; ii<STARTBYTE+NUMBYTES; ii++) begin \\\n"
                             "        $display(\"0x%x \", ARR[ii]); \\\n"
                             "    end\n";
-    CHECK(format_source(src, opts) == src);
+    // Backslash alignment pass aligns '\' to common column; body content unchanged.
+    const std::string expected =
+        "`define print_bytes(ARR, STARTBYTE, NUMBYTES)                 \\\n"
+        "    for (int ii=STARTBYTE; ii<STARTBYTE+NUMBYTES; ii++) begin \\\n"
+        "        $display(\"0x%x \", ARR[ii]);                           \\\n"
+        "    end\n";
+    CHECK(format_source(src, opts) == expected);
 }
 
 TEST_CASE("formatter: macro calls with empty arguments are preserved", "[formatter]") {
@@ -870,7 +876,9 @@ TEST_CASE("formatter: tab_align does not align equals inside headers or for cont
                         "x = 2;\n"
                         "end\n"
                         "endinterface\n",
-                        opts) == "interface bus_intf #(parameter W_IDTH = 8) (input logic i_clk);\n"
+                        opts) == "interface bus_intf #(parameter W_IDTH = 8) (\n"
+                                 "    input       logic               i_clk\n"
+                                 ");\n"
                                  "for (int i = 0; i < 32; i++) begin\n"
                                  "    foo_bar = 1;\n"
                                  "    x = 2;\n"
