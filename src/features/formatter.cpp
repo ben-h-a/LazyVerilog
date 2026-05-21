@@ -2829,6 +2829,22 @@ static std::vector<std::string> format_function_calls_pass(std::vector<std::stri
             out.push_back(lines[li]);
             continue;
         }
+        // Skip if the matched call is inside a // comment
+        {
+            bool in_str = false;
+            for (size_t ci = 0; ci < ns; ++ci) {
+                if (line[ci] == '"' && (ci == 0 || line[ci - 1] != '\\'))
+                    in_str = !in_str;
+                if (!in_str && ci + 1 < line.size() && line[ci] == '/' && line[ci + 1] == '/') {
+                    ns = std::string::npos;
+                    break;
+                }
+            }
+            if (ns == std::string::npos) {
+                out.push_back(lines[li]);
+                continue;
+            }
+        }
         std::string args_text = line.substr(op + 1, cl - op - 1);
         auto raw_args = split_top_level(args_text);
         std::vector<std::string> args;
@@ -3623,7 +3639,11 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
         // disabled region doesn't influence spacing after it.
         if (in_disabled(tok.pos, disabled)) {
             flush_nl();
-            out += tok.text;
+            if (at_bol && !tok.whitespace) {
+                emit(tok.text);
+            } else {
+                out += tok.text;
+            }
             at_bol = !tok.text.empty() && tok.text.back() == '\n';
             after_dis = !at_bol; // remember we just left a disabled region mid-line
             continue;            // don't update prev
