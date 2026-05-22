@@ -47,6 +47,17 @@ static std::vector<std::string> text_to_lines(const std::string& text) {
     return lines;
 }
 
+static std::vector<int> line_start_offsets(const std::vector<std::string>& lines) {
+    std::vector<int> starts;
+    starts.reserve(lines.size());
+    int pos = 0;
+    for (const auto& line : lines) {
+        starts.push_back(pos);
+        pos += (int)line.size() + 1;
+    }
+    return starts;
+}
+
 // ---------------------------------------------------------------------------
 // Formatting token helpers
 // ---------------------------------------------------------------------------
@@ -1471,12 +1482,32 @@ static std::vector<std::string> align_assign_pass(std::vector<std::string> lines
         }
         return false;
     };
+    auto starts_module_header = [](const std::string& line) -> bool {
+        auto toks = significant_tokens(line);
+        return !toks.empty() &&
+               (toks[0].lo == "module" || toks[0].lo == "interface" || toks[0].lo == "program") &&
+               line.find("#(") != std::string::npos;
+    };
+    auto is_module_header_parameter = [&](int line_idx) -> bool {
+        if (!starts_with_token(lines[(size_t)line_idx], "parameter"))
+            return false;
+        for (int k = line_idx - 1; k >= 0; --k) {
+            std::string trimmed = trim_left_copy(trim_right_copy(lines[(size_t)k]));
+            if (trimmed.empty())
+                continue;
+            if (starts_module_header(trimmed))
+                return true;
+            if (trimmed.find(';') != std::string::npos || trimmed.find(")(") != std::string::npos)
+                return false;
+        }
+        return false;
+    };
 
     std::vector<std::string> out;
     size_t i = 0;
     while (i < lines.size()) {
         auto [p0, op0] = find_op(lines[i]);
-        if (p0 < 0 || is_var((int)i) || starts_with_token(lines[i], "parameter")) {
+        if (p0 < 0 || is_var((int)i) || is_module_header_parameter((int)i)) {
             out.push_back(lines[i]);
             ++i;
             continue;
@@ -1492,7 +1523,7 @@ static std::vector<std::string> align_assign_pass(std::vector<std::string> lines
                 size_t ij = 0;
                 while (ij < lj.size() && (lj[ij] == ' ' || lj[ij] == '\t'))
                     ++ij;
-                if (ij != ind || is_var((int)j) || starts_with_token(lj, "parameter") ||
+                if (ij != ind || is_var((int)j) || is_module_header_parameter((int)j) ||
                     find_op(lj).first < 0)
                     break;
                 out.push_back(lines[j]);
@@ -1514,7 +1545,7 @@ static std::vector<std::string> align_assign_pass(std::vector<std::string> lines
             const auto& lj = lines[j];
             if (lj.empty())
                 break;
-            if (is_var((int)j) || starts_with_token(lj, "parameter"))
+            if (is_var((int)j) || is_module_header_parameter((int)j))
                 break;
             size_t ij = 0;
             while (ij < lj.size() && (lj[ij] == ' ' || lj[ij] == '\t'))
@@ -1929,6 +1960,7 @@ struct InstanceComments {
     std::vector<std::pair<std::string, std::string>> leading_port_comments;
     std::vector<std::pair<std::string, std::string>> port_comments;
     std::vector<std::string> footer_comments;
+    bool preserve_original{false};
 };
 
 static size_t find_line_comment_start(const std::string& line) {
@@ -2001,6 +2033,7 @@ static bool collect_instance(const std::vector<std::string>& lines, size_t start
     std::vector<std::string> parts;
     std::vector<std::string> pending_standalone_comments;
     int depth = 0;
+    int param_depth = 0;
     size_t j = start;
     while (j < lines.size()) {
         std::string stripped = lines[j];
@@ -2011,17 +2044,49 @@ static bool collect_instance(const std::vector<std::string>& lines, size_t start
 
         std::string code = stripped;
         size_t line_comment = find_line_comment_start(stripped);
-        if (line_comment != std::string::npos) {
+        if (line_comment != std::string::npos)
             code = stripped.substr(0, line_comment);
+
+        auto param_depth_after = [](int start_depth, const std::string& text) {
+            int pd = start_depth;
+            bool saw_hash = false;
+            for (char ch : text) {
+                if (pd > 0) {
+                    if (ch == '(')
+                        ++pd;
+                    else if (ch == ')' && pd > 0)
+                        --pd;
+                    continue;
+                }
+                if (ch == '#') {
+                    saw_hash = true;
+                } else if (saw_hash && ch == '(') {
+                    pd = 1;
+                    saw_hash = false;
+                } else if (saw_hash && ch != ' ' && ch != '\t') {
+                    saw_hash = false;
+                }
+            }
+            return pd;
+        };
+        int next_param_depth = param_depth_after(param_depth, code);
+
+        if (line_comment != std::string::npos) {
             std::string comment = stripped.substr(line_comment);
-            std::string port = last_named_port_before_comment(code);
-            if (!port.empty())
-                comments.port_comments.push_back({port, comment});
-            else if (code.find_first_not_of(" \t") == std::string::npos)
-                pending_standalone_comments.push_back(comment);
-            else if (code.find('(') != std::string::npos && comments.header.empty())
-                comments.header = comment;
+            if (param_depth > 0 || next_param_depth > 0) {
+                comments.preserve_original = true;
+            } else {
+                std::string port = last_named_port_before_comment(code);
+                if (!port.empty())
+                    comments.port_comments.push_back({port, comment});
+                else if (code.find_first_not_of(" \t") == std::string::npos)
+                    pending_standalone_comments.push_back(comment);
+                else if (code.find('(') != std::string::npos && comments.header.empty())
+                    comments.header = comment;
+            }
         }
+
+        param_depth = next_param_depth;
 
         std::string next_port = first_named_port_in_code(code);
         if (!next_port.empty() && !pending_standalone_comments.empty()) {
@@ -2296,6 +2361,10 @@ static bool split_inst_parts(const std::string& flat, std::string& module_type,
 
 static std::vector<std::string> expand_instances_pass(std::vector<std::string> lines,
                                                         const FormatOptions& opts) {
+    std::string text = render_lines(lines);
+    auto disabled = find_disabled(text);
+    auto line_starts = line_start_offsets(lines);
+
     const std::string port_indent(opts.instance.port_indent_level * opts.indent_size, ' ');
     int m_before = opts.instance.instance_port_name_width;
     int m_inside = opts.instance.instance_port_between_paren_width;
@@ -2305,6 +2374,12 @@ static std::vector<std::string> expand_instances_pass(std::vector<std::string> l
     size_t i = 0;
     while (i < lines.size()) {
         const std::string& line = lines[i];
+
+        if (in_disabled(line_starts[i], disabled)) {
+            out.push_back(lines[i]);
+            ++i;
+            continue;
+        }
 
         size_t first = line.find_first_not_of(" \t");
         if (first == std::string::npos || !(std::isalpha((unsigned char)line[first]) ||
@@ -2341,6 +2416,13 @@ static std::vector<std::string> expand_instances_pass(std::vector<std::string> l
         if (!collect_instance(lines, i, end_i, flat, comments)) {
             out.push_back(lines[i]);
             ++i;
+            continue;
+        }
+
+        if (comments.preserve_original) {
+            for (size_t k = i; k < end_i; ++k)
+                out.push_back(lines[k]);
+            i = end_i;
             continue;
         }
 
@@ -3190,6 +3272,31 @@ static bool extract_single_line_module_header(const std::string& line, std::stri
         ++i;
     }
 
+    while (i < toks.size() && toks[i].lo == "import") {
+        while (i < toks.size() && !tok_is(toks[i], ";", TokenKind::Semicolon))
+            ++i;
+        if (i >= toks.size())
+            return false;
+        ++i;
+    }
+
+    if (i < toks.size() && tok_is(toks[i], "#", TokenKind::Hash)) {
+        ++i;
+        if (i >= toks.size() || !tok_is(toks[i], "(", TokenKind::OpenParenthesis))
+            return false;
+        int depth = 1;
+        while (i + 1 < toks.size() && depth > 0) {
+            ++i;
+            if (tok_is(toks[i], "(", TokenKind::OpenParenthesis))
+                ++depth;
+            else if (tok_is(toks[i], ")", TokenKind::CloseParenthesis))
+                --depth;
+        }
+        if (depth != 0)
+            return false;
+        ++i;
+    }
+
     if (i >= toks.size() || !tok_is(toks[i], "(", TokenKind::OpenParenthesis))
         return false;
     size_t open_paren = (size_t)toks[i].pos;
@@ -3251,6 +3358,7 @@ struct ModuleHeaderScan {
     bool block_comment{false};
     bool string{false};
     bool escaped{false};
+    bool saw_paren{false};
 };
 
 static bool scan_module_header_line(ModuleHeaderScan& scan, const std::string& line) {
@@ -3288,8 +3396,10 @@ static bool scan_module_header_line(ModuleHeaderScan& scan, const std::string& l
             continue;
         }
 
-        if (ch == '(')
+        if (ch == '(') {
+            scan.saw_paren = true;
             ++scan.paren;
+        }
         else if (ch == ')' && scan.paren > 0)
             --scan.paren;
         else if (ch == '{')
@@ -3300,8 +3410,21 @@ static bool scan_module_header_line(ModuleHeaderScan& scan, const std::string& l
             ++scan.bracket;
         else if (ch == ']' && scan.bracket > 0)
             --scan.bracket;
-        else if (ch == ';' && scan.paren == 0 && scan.brace == 0 && scan.bracket == 0)
+        else if (ch == ';' && scan.paren == 0 && scan.brace == 0 && scan.bracket == 0) {
+            if (!scan.saw_paren) {
+                std::string before = line.substr(0, i);
+                bool is_import_semicolon = false;
+                for (const auto& tok : significant_tokens(before)) {
+                    if (tok.lo == "import") {
+                        is_import_semicolon = true;
+                        break;
+                    }
+                }
+                if (is_import_semicolon)
+                    continue;
+            }
             return true;
+        }
     }
     return false;
 }
@@ -3666,6 +3789,21 @@ static std::vector<std::string> format_portlist_pass(std::vector<std::string> li
                         }
                         aligned_lines.push_back(l);
                     }
+                }
+                for (size_t ai = aligned_lines.size(); ai > 0; --ai) {
+                    std::string& l = aligned_lines[ai - 1];
+                    if (is_standalone_comment_line(l))
+                        continue;
+                    size_t comment = find_line_comment_start(l);
+                    if (comment != std::string::npos) {
+                        size_t comma = l.find_last_not_of(" \t", comment - 1);
+                        if (comma != std::string::npos && l[comma] == ',') {
+                            size_t before = l.find_last_not_of(" \t", comma - 1);
+                            if (before != std::string::npos)
+                                l.erase(before + 1, comma - before);
+                        }
+                    }
+                    break;
                 }
                 port_lines.clear();
                 for (size_t ai = 0; ai < aligned_lines.size(); ++ai) {

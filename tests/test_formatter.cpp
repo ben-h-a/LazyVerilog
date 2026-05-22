@@ -1,5 +1,6 @@
 #include "features/formatter.hpp"
 #include "config.hpp"
+#include <cctype>
 #include <catch2/catch_test_macros.hpp>
 #include <fstream>
 #include <sstream>
@@ -117,6 +118,50 @@ TEST_CASE("formatter: multiline ANSI module header preserves line comments", "[f
                                  "endmodule\n");
 }
 
+TEST_CASE("formatter: ANSI module header after package import is aligned", "[formatter]") {
+    FormatOptions opts;
+    opts.safe_mode = true;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+    opts.port_declaration.align = true;
+    opts.port_declaration.align_adaptive = false;
+
+    CHECK(format_source("module m import p::*;\n"
+                        "(input logic clk_i, input logic rst_ni,\n"
+                        "\n"
+                        "// Input handshake signals\n"
+                        "input logic in_valid_i, output logic in_ready_o);\n"
+                        "endmodule\n",
+                        opts) == "module m import p::*;\n"
+                                 "(\n"
+                                 "    input     logic               clk_i,\n"
+                                 "    input     logic               rst_ni,\n"
+                                 "    // Input handshake signals\n"
+                                 "    input     logic               in_valid_i,\n"
+                                 "    output    logic               in_ready_o\n"
+                                 ");\n"
+                                 "endmodule\n");
+}
+
+TEST_CASE("formatter: final ANSI port with line comment does not gain comma", "[formatter]") {
+    FormatOptions opts;
+    opts.safe_mode = true;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+    opts.port_declaration.align = true;
+
+    CHECK(format_source("interface i (\n"
+                        "  input logic a, // a\n"
+                        "  input logic b  // b\n"
+                        ");\n"
+                        "endinterface\n",
+                        opts) == "interface i(\n"
+                                 "    input     logic               a, // a\n"
+                                 "    input     logic               b // b\n"
+                                 ");\n"
+                                 "endinterface\n");
+}
+
 TEST_CASE("formatter: function calls inside if conditions use configured layout", "[formatter]") {
     FormatOptions opts;
     opts.function.break_policy = "always";
@@ -183,6 +228,16 @@ TEST_CASE("formatter: user-defined type var decl not aligned by statement pass",
                                  "packet_t test_init2 = 8'hFF;\n");
 }
 
+TEST_CASE("formatter: parameter declarations are aligned by statement pass", "[formatter]") {
+    FormatOptions opts;
+    opts.statement.align = true;
+    opts.indent_size = 4;
+    opts.tab_align = true;
+
+    CHECK(format_source("parameter int DATA_WIDTH = 32;\n", opts) ==
+          "parameter int DATA_WIDTH    = 32;\n");
+}
+
 TEST_CASE("formatter: define macro body not reformatted", "[formatter]") {
     FormatOptions opts;
     opts.function.break_policy = "always";
@@ -197,6 +252,30 @@ TEST_CASE("formatter: define macro body not reformatted", "[formatter]") {
         "        $display(\"0x%x \", ARR[ii]);                           \\\n"
         "    end\n";
     CHECK(format_source(src, opts) == expected);
+}
+
+TEST_CASE("formatter: instance formatting skips define macro body", "[formatter]") {
+    FormatOptions opts;
+    opts.safe_mode = true;
+    opts.instance.align = true;
+
+    const std::string src = "`define CONNECT \\\n"
+                            "  alert_esc_if alert_if[N](.clk(clk), .rst_n(rst_n)); \\\n"
+                            "  logic done;\n";
+
+    std::string formatted;
+    REQUIRE_NOTHROW(formatted = format_source(src, opts));
+    CHECK(formatted.find("alert_if[N](.clk(clk), .rst_n(rst_n));") != std::string::npos);
+
+    auto strip_ws = [](const std::string& s) {
+        std::string r;
+        for (char c : s) {
+            if (!std::isspace((unsigned char)c))
+                r += c;
+        }
+        return r;
+    };
+    CHECK(strip_ws(formatted) == strip_ws(src));
 }
 
 TEST_CASE("formatter: macro calls with empty arguments are preserved", "[formatter]") {
@@ -656,6 +735,38 @@ TEST_CASE("formatter: autoinst comment does not block instance port expansion", 
                                  "    .chip_en  (tt          )\n"
                                  ");\n"
                                  "endmodule\n");
+}
+
+TEST_CASE("formatter: instance parameter line comments are preserved", "[formatter]") {
+    FormatOptions opts;
+    opts.safe_mode = true;
+    opts.instance.align = true;
+    opts.default_indent_level_inside_outmost_block = 0;
+
+    const std::string src = "module top;\n"
+                            "aes_ghash #(\n"
+                            "  .SecMasking(1),\n"
+                            "  .GFMultCycles(4) // comment A\n"
+                            "                   // comment B\n"
+                            ") u_aes_ghash (\n"
+                            "  .clk_i(clk_i)\n"
+                            ");\n"
+                            "endmodule\n";
+
+    std::string formatted;
+    REQUIRE_NOTHROW(formatted = format_source(src, opts));
+    CHECK(formatted.find("comment A") != std::string::npos);
+    CHECK(formatted.find("comment B") != std::string::npos);
+
+    auto strip_ws = [](const std::string& text) {
+        std::string out;
+        for (char c : text) {
+            if (!std::isspace((unsigned char)c))
+                out += c;
+        }
+        return out;
+    };
+    CHECK(strip_ws(formatted) == strip_ws(src));
 }
 
 TEST_CASE("formatter: line comments do not block instance port expansion", "[formatter]") {
