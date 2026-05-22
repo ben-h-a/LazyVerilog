@@ -4,11 +4,18 @@ typedef struct packed {
     logic               [ 31 : 0 ]          data                                ;
 } fifo_entry_t;
 
-function packet_t sum(input packet_t i_a, input i_b);
+function packet_t sum(
+    input packet_t i_a,
+    input i_b
+);
     return packet_t'( {40'b0, i_a}+i_b );
 endfunction
 
-task add_number(input int a, input int b, output int result);
+task add_number(
+    input int a,
+    input int b,
+    output int result
+);
     result  = a+b;
 endtask
 

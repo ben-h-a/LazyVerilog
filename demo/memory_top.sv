@@ -18,7 +18,7 @@ typedef struct {
     logic                                   valid                               ;
 } packet_ta;
 
-interface bus_intf #( parameter W_IDTH = 8 ) (
+interface bus_intf #(parameter W_IDTH = 8)(
     input   logic               i_clk
 );
 
@@ -55,23 +55,24 @@ endinterface
 
 parameter DEPTH = 8;
 
-module memory_top #( parameter int WIDTH = 4, parameter int DEPTH = 8 ) ( /*autoarg*/
+module memory_top #(parameter int WIDTH = 4,
+                    parameter int DEPTH = 8)( /*autoarg*/
     i_clk, i_rst_n, i_data,
     i_d
 );
-input                                               i_clk                                   ;
-input                                               i_rst_n                                 ;
-input   logic signed            [ 1 : 0 ]           i_data              [ 7 : 0 ]           ;
-input   var byte                                    i_data2                                 ;
-input                                               i_data3                                 ;
-input                                               i_dd                                    ;
-input                                               i_dd22222                               ;
-input                                               dd22222                                 ;
-input                                               i_d33333                                ;
-input                                               i_d44333                                , i_dd44321                               ;
-input                                               i_d44334                                ;
-output  logic unsigned          [ 0 : 0 ]           VDD                                     , VSS                                     ;
-output  packet_tttttttttttttt   [ 0 : 0 ]           test                                    , VSS                                     ;
+input                                           i_clk                                   ;
+input                                           i_rst_n                                 ;
+input   logic signed        [ 1 : 0 ]           i_data              [ 7 : 0 ]           ;
+input   var byte                                i_data2                                 ;
+input                                           i_data3                                 ;
+input                                           i_dd                                    ;
+input                                           i_dd22222                               ;
+input                                           dd22222                                 ;
+input                                           i_d33333                                ;
+input                                           i_d44333                                , i_dd44321                               ;
+input                                           i_d44334                                ;
+output  logic unsigned      [ 0 : 0 ]           VDD                                     , VSS                                     ;
+output  packet_tttttttttttttt   [ 0 : 0 ]       test                                    , VSS                                     ;
 
 logic               [ 7 : 0 ]           dout                = 8'hFF         ;
 logic               [ 8 : 0 ]           douteeeeeee         = 8'hFF         ;
