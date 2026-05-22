@@ -701,7 +701,7 @@ static SD break_dec(const Tok& L, const Tok& R, const FormatOptions& opts, bool 
             return SD::MustAppend;
         return SD::MustWrap;
     }
-    if (ll == "else" && rl == "begin")
+    if (ll == "else" && (rl == "begin" || rl == "if"))
         return SD::MustAppend;
     if (lx == ")" && rl == "begin")
         return SD::MustAppend;
@@ -1706,7 +1706,6 @@ static std::vector<std::string> align_assign_pass(std::vector<std::string> lines
             ++i;
             continue;
         }
-
         int mx = opts.statement.lhs_min_width;
         for (auto& e : grp)
             mx = std::max(mx, e.lw);
@@ -4937,7 +4936,14 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
                 (tok.lo == "while" && !do_while_tail) || tok.lo == "repeat")
                 control_expr_pending = true;
 
-            // `begin` cancels single_stmt_pending set by a preceding if/for/while,
+            // `else` bodies without begin/end should be formatted like other
+            // single-statement control bodies.
+            if (tok.lo == "else") {
+                single_stmt_pending = true;
+                pending_nl = true;
+            }
+
+            // `begin` cancels single_stmt_pending set by a preceding if/for/while/else,
             // because begin…end is its own indented block.
             if (tok.lo == "begin")
                 single_stmt_pending = false;

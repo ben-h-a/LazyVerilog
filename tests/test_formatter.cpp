@@ -1452,6 +1452,20 @@ TEST_CASE("formatter: ANSI port directives do not receive commas", "[formatter]"
     CHECK(formatted.find("extra_i,") != std::string::npos);
 }
 
+TEST_CASE("formatter: demo register else body splits to next line", "[formatter]") {
+    Config cfg = load_config(".");
+    std::ifstream file("demo/register.sv");
+    REQUIRE(file.good());
+    std::ostringstream ss;
+    ss << file.rdbuf();
+
+    std::string formatted;
+    REQUIRE_NOTHROW(formatted = format_source(ss.str(), cfg.format));
+    CHECK(formatted.find("\n    if (!rst_n)\n        q       <= '0;\n") != std::string::npos);
+    CHECK(formatted.find("\n    else\n        q       <= d;\n") != std::string::npos);
+    CHECK(format_source(formatted, cfg.format) == formatted);
+}
+
 TEST_CASE("formatter: demo memory_top formats with project config", "[formatter]") {
     Config cfg = load_config(".");
     std::ifstream file("demo/memory_top.sv");
