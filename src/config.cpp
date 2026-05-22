@@ -55,6 +55,9 @@ static std::vector<std::string> validate_config(const Config& cfg) {
     check_enum(cfg.format.spacing.procedural_event_control_at_spacing,
                "[format.spacing].procedural_event_control_at_spacing",
                {"none", "before", "after", "both"});
+    check_enum(cfg.format.spacing.assignment_operator_spacing,
+               "[format.spacing].assignment_operator_spacing",
+               {"none", "before", "after", "both"});
 
     return errors;
 }
@@ -265,6 +268,8 @@ Config load_config(const std::filesystem::path& root, std::string* warning,
                     cfg.format.spacing.procedural_event_control_at_spacing = *v;
                 if (auto v = (*sp)["space_inside_event_control_parens"].value<bool>())
                     cfg.format.spacing.space_inside_event_control_parens = *v;
+                if (auto v = (*sp)["assignment_operator_spacing"].value<std::string>())
+                    cfg.format.spacing.assignment_operator_spacing = *v;
             }
         }
 

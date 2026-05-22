@@ -113,9 +113,40 @@ TEST_CASE("formatter: multiline ANSI module header preserves line comments", "[f
                                  "    output    adc_ctrl_reg_pkg::adc_ctrl_reg2hw_t   reg2hw, // Write\n"
                                  "    input     adc_ctrl_reg_pkg::adc_ctrl_hw2reg_t   hw2reg, // Read\n"
                                  "    // Integrity check errors\n"
-                                 "    output    logic               intg_err_o\n"
+                                 "    output    logic                                 intg_err_o\n"
                                  ");\n"
                                  "endmodule\n");
+}
+
+TEST_CASE("formatter: imported parameterized ANSI header is idempotent", "[formatter]") {
+    FormatOptions opts;
+    opts.safe_mode = true;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+    opts.tab_align = true;
+    opts.port_declaration.align = true;
+    opts.port_declaration.align_adaptive = true;
+    opts.module.parameter_layout = "hanging";
+
+    const std::string src = "module m import p::*; #(parameter int W = 1) (\n"
+                            "  input logic clk_i,\n"
+                            "  input logic rst_ni,\n"
+                            "\n"
+                            "  // Global enable\n"
+                            "  input logic enable_i,\n"
+                            "\n"
+                            "  // Status\n"
+                            "  output logic done_o\n"
+                            ");\n"
+                            "endmodule\n";
+
+    std::string once;
+    REQUIRE_NOTHROW(once = format_source(src, opts));
+    CHECK(once.find("#(parameter int W = 1)(\n") != std::string::npos);
+    CHECK(once.find("\n    // Global enable\n") != std::string::npos);
+    CHECK(once.find("clk_i,") != std::string::npos);
+    CHECK(once.find("done_o") != std::string::npos);
+    CHECK(format_source(once, opts) == once);
 }
 
 TEST_CASE("formatter: ANSI module header after package import is aligned", "[formatter]") {
@@ -140,6 +171,23 @@ TEST_CASE("formatter: ANSI module header after package import is aligned", "[for
                                  "    input     logic               in_valid_i,\n"
                                  "    output    logic               in_ready_o\n"
                                  ");\n"
+                                 "endmodule\n");
+}
+
+TEST_CASE("formatter: module header closing line comment is preserved", "[formatter]") {
+    FormatOptions opts;
+    opts.safe_mode = true;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+    opts.port_declaration.align = true;
+
+    CHECK(format_source("module m (\n"
+                        "  output logic y\n"
+                        "); // instance\n"
+                        "endmodule\n",
+                        opts) == "module m(\n"
+                                 "    output    logic               y\n"
+                                 "); // instance\n"
                                  "endmodule\n");
 }
 
@@ -843,6 +891,33 @@ TEST_CASE("formatter: block comments do not block instance port expansion", "[fo
                                  "    .dataut   (          )\n"
                                  ");\n"
                                  "endmodule\n");
+}
+
+TEST_CASE("formatter: block comment between instance port and paren is safe", "[formatter]") {
+    FormatOptions opts;
+    opts.safe_mode = true;
+    opts.instance.align = true;
+    opts.default_indent_level_inside_outmost_block = 0;
+
+    const std::string src = "module top;\n"
+                            "i2c dut (\n"
+                            "    .clk_i(clk),\n"
+                            "    .racl_error_o /*har*/ ()\n"
+                            ");\n"
+                            "endmodule\n";
+
+    std::string formatted;
+    REQUIRE_NOTHROW(formatted = format_source(src, opts));
+
+    auto strip_ws = [](const std::string& text) {
+        std::string out;
+        for (char c : text) {
+            if (!std::isspace((unsigned char)c))
+                out += c;
+        }
+        return out;
+    };
+    CHECK(strip_ws(formatted) == strip_ws(src));
 }
 
 TEST_CASE("formatter: expands consecutive single-line instances after multiline instance",

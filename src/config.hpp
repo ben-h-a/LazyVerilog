@@ -102,6 +102,7 @@ struct SpacingOptions {
     std::string indexed_part_select_spacing{"both"};
     std::string procedural_event_control_at_spacing{"before"};
     bool space_inside_event_control_parens{false};
+    std::string assignment_operator_spacing{"both"};
 };
 
 struct FormatOptions {

@@ -517,8 +517,11 @@ static int spaces_req(const Tok& L, const Tok& R, const FormatOptions& opts, boo
                              : 1;
     if (is_unary_op(L) && rx == "{")
         return 0;
-    if (L_assign || R_assign)
-        return 1;
+    if (L_assign || R_assign) {
+        if (R_assign)
+            return binary_space_before(sp.assignment_operator_spacing) ? 1 : 0;
+        return binary_space_after(sp.assignment_operator_spacing) ? 1 : 0;
+    }
     if (in_dim && is_indexed_part_select_op(R))
         return binary_space_before(sp.indexed_part_select_spacing) ? 1 : 0;
     if (in_dim && is_indexed_part_select_op(L))
@@ -1184,6 +1187,19 @@ static std::vector<std::string> align_port_pass(std::vector<std::string> lines,
         return p < line.size() && line[p] == ';' &&
                line.find_first_not_of(" \t", p + 1) == std::string::npos;
     };
+    auto trim_line = [](const std::string& text) {
+        size_t a = 0;
+        while (a < text.size() && std::isspace((unsigned char)text[a]))
+            ++a;
+        size_t b = text.size();
+        while (b > a && std::isspace((unsigned char)text[b - 1]))
+            --b;
+        return text.substr(a, b - a);
+    };
+    auto is_standalone_comment = [&](const std::string& text) {
+        std::string trimmed = trim_line(text);
+        return trimmed.rfind("//", 0) == 0 || trimmed.rfind("/*", 0) == 0;
+    };
     while (i < lines.size()) {
         std::string trimmed_line = lines[i];
         size_t ta = trimmed_line.find_first_not_of(" \t");
@@ -1241,8 +1257,15 @@ static std::vector<std::string> align_port_pass(std::vector<std::string> lines,
         std::vector<PortBlkEntry> blk;
         size_t j = i;
         while (j < lines.size()) {
-            if (!is_port_decl_line((int)j))
+            if (!is_port_decl_line((int)j)) {
+                std::string trimmed = trim_line(lines[j]);
+                if (trimmed.empty() || is_standalone_comment(trimmed)) {
+                    blk.push_back({lines[j], lines[j], PortParsed{}});
+                    ++j;
+                    continue;
+                }
                 break;
+            }
             std::string fl = lines[j];
             std::string port_line = lines[j];
             ++j;
@@ -1960,6 +1983,7 @@ struct InstanceComments {
     std::vector<std::pair<std::string, std::string>> leading_port_comments;
     std::vector<std::pair<std::string, std::string>> port_comments;
     std::vector<std::string> footer_comments;
+    std::string trailing; // comment after closing );
     bool preserve_original{false};
 };
 
@@ -2076,13 +2100,27 @@ static bool collect_instance(const std::vector<std::string>& lines, size_t start
             if (param_depth > 0 || next_param_depth > 0) {
                 comments.preserve_original = true;
             } else {
-                std::string port = last_named_port_before_comment(code);
-                if (!port.empty())
-                    comments.port_comments.push_back({port, comment});
-                else if (code.find_first_not_of(" \t") == std::string::npos)
-                    pending_standalone_comments.push_back(comment);
-                else if (code.find('(') != std::string::npos && comments.header.empty())
-                    comments.header = comment;
+                // Check if this line closes the instance (; at depth 0)
+                bool line_closes = false;
+                {
+                    int d = depth;
+                    for (char ch : code) {
+                        if (ch == '(') ++d;
+                        else if (ch == ')') --d;
+                        else if (ch == ';' && d == 0) { line_closes = true; break; }
+                    }
+                }
+                if (line_closes) {
+                    comments.trailing = comment;
+                } else {
+                    std::string port = last_named_port_before_comment(code);
+                    if (!port.empty())
+                        comments.port_comments.push_back({port, comment});
+                    else if (code.find_first_not_of(" \t") == std::string::npos)
+                        pending_standalone_comments.push_back(comment);
+                    else if (code.find('(') != std::string::npos && comments.header.empty())
+                        comments.header = comment;
+                }
             }
         }
 
@@ -2192,6 +2230,7 @@ static void remove_block_comments_from_instance_port_list(std::string& port_list
     std::string code;
     bool in_string = false;
     bool escaped = false;
+    int paren_depth = 0;
     for (size_t i = 0; i < port_list.size();) {
         char ch = port_list[i];
         if (in_string) {
@@ -2212,11 +2251,22 @@ static void remove_block_comments_from_instance_port_list(std::string& port_list
             ++i;
             continue;
         }
-        if (i + 1 < port_list.size() && ch == '/' && port_list[i + 1] == '*') {
+        if (ch == '(') ++paren_depth;
+        else if (ch == ')' && paren_depth > 0) --paren_depth;
+        // Only extract block comments between ports (depth 0), not inside parens
+        if (paren_depth == 0 && i + 1 < port_list.size() && ch == '/' && port_list[i + 1] == '*') {
             size_t end = port_list.find("*/", i + 2);
             if (end == std::string::npos) {
                 code += port_list.substr(i);
                 break;
+            }
+            size_t after = end + 2;
+            while (after < port_list.size() && (port_list[after] == ' ' || port_list[after] == '\t'))
+                ++after;
+            if (after < port_list.size() && port_list[after] == '(') {
+                code += port_list.substr(i, end + 2 - i);
+                i = end + 2;
+                continue;
             }
             std::string comment = port_list.substr(i, end + 2 - i);
             std::string port = last_named_port_before_comment(code);
@@ -2258,6 +2308,15 @@ static bool parse_named_ports(const std::string& port_list,
         i = j;
         while (i < n && (port_list[i] == ' ' || port_list[i] == '\t'))
             ++i;
+        while (i + 1 < n && port_list[i] == '/' && port_list[i + 1] == '*') {
+            size_t end = port_list.find("*/", i + 2);
+            if (end == std::string::npos)
+                return false;
+            port_name += " " + port_list.substr(i, end + 2 - i);
+            i = end + 2;
+            while (i < n && (port_list[i] == ' ' || port_list[i] == '\t'))
+                ++i;
+        }
         if (i >= n || port_list[i] != '(')
             return false;
         ++i;
@@ -2516,7 +2575,10 @@ static std::vector<std::string> expand_instances_pass(std::vector<std::string> l
         }
         for (const auto& comment : comments.footer_comments)
             out.push_back(indent + port_indent + comment);
-        out.push_back(indent + ");");
+        std::string close_line = indent + ");";
+        if (!comments.trailing.empty())
+            close_line += " " + comments.trailing;
+        out.push_back(close_line);
         i = end_i;
     }
     return out;
@@ -3323,7 +3385,10 @@ static bool extract_single_line_module_header(const std::string& line, std::stri
 
     prefix = line.substr(0, open_paren + 1);
     ports_str = line.substr(open_paren + 1, close_paren - open_paren - 1);
-    suffix_str = line.substr(close_paren, semi_pos - close_paren + 1);
+    size_t suffix_end = line.find('\n', semi_pos);
+    suffix_str = line.substr(close_paren,
+                             (suffix_end == std::string::npos ? line.size() : suffix_end) -
+                                 close_paren);
     return true;
 }
 
@@ -3584,7 +3649,11 @@ static std::string format_module_parameter_prefix(const std::string& prefix,
     if (!find_module_parameter_block(prefix, hash_pos, param_open, param_close))
         return prefix;
 
-    std::string before_hash = trim_right_copy(prefix.substr(0, hash_pos)) + " ";
+    std::string before_hash = trim_right_copy(prefix.substr(0, hash_pos));
+    bool split_import_parameter_header =
+        before_hash.find('\n') != std::string::npos && before_hash.find("import") != std::string::npos;
+    if (!split_import_parameter_header)
+        before_hash += " ";
     std::string params_str = prefix.substr(param_open + 1, param_close - param_open - 1);
     std::string after_params = trim_copy(prefix.substr(param_close + 1));
     if (after_params != "(")
@@ -3602,10 +3671,48 @@ static std::string format_module_parameter_prefix(const std::string& prefix,
 
     if (opts.module.parameter_layout == "hanging") {
         std::string open = before_hash + "#(";
-        std::string hang(open.size(), ' ');
-        std::string out = open + trimmed_params[0];
+        size_t last_nl = open.rfind('\n');
+        size_t hang_width = (last_nl == std::string::npos) ? open.size() : open.size() - last_nl - 1;
+        std::string hang(hang_width, ' ');
+        // Re-indent a param's lines with hang, stripping previous indent.
+        // indent_first: whether to prepend hang to the first content line.
+        auto normalize_param = [&](const std::string& raw, bool indent_first) {
+            // Count leading \n's — first one is always the line break from
+            // the flattened input (not a real blank line).
+            size_t first_non_nl = raw.find_first_not_of('\n');
+            if (first_non_nl == std::string::npos)
+                return raw;
+            size_t blanks = first_non_nl > 0 ? first_non_nl - 1 : 0;
+            std::string leading_nls(blanks, '\n');
+
+            std::string content = raw.substr(first_non_nl);
+            // Split into lines, strip per-line indentation, re-indent
+            std::vector<std::string> lines;
+            std::istringstream ss(content);
+            std::string l;
+            while (std::getline(ss, l))
+                lines.push_back(l);
+            std::string result;
+            bool first_content = true;
+            for (auto& line : lines) {
+                std::string trimmed = trim_copy(line);
+                if (trimmed.empty()) {
+                    result += "\n";
+                } else {
+                    if (!result.empty())
+                        result += "\n";
+                    if (first_content && !indent_first)
+                        result += trimmed;
+                    else
+                        result += hang + trimmed;
+                    first_content = false;
+                }
+            }
+            return leading_nls + result;
+        };
+        std::string out = open + normalize_param(trimmed_params[0], false);
         for (size_t i = 1; i < trimmed_params.size(); ++i)
-            out += ",\n" + hang + trimmed_params[i];
+            out += ",\n" + normalize_param(trimmed_params[i], true);
         out += ")(";
         return out;
     }
@@ -3613,7 +3720,20 @@ static std::string format_module_parameter_prefix(const std::string& prefix,
     std::string param_indent = leading_ws + std::string(opts.indent_size, ' ');
     std::string out = before_hash + "#(\n";
     for (size_t i = 0; i < trimmed_params.size(); ++i) {
-        out += param_indent + trimmed_params[i];
+        std::string param = trimmed_params[i];
+        {
+            size_t pos = 0;
+            while ((pos = param.find('\n', pos)) != std::string::npos) {
+                size_t next = pos + 1;
+                if (next < param.size() && param[next] != '\n') {
+                    param.insert(next, param_indent);
+                    pos += 1 + param_indent.size();
+                } else {
+                    pos = next;
+                }
+            }
+        }
+        out += param_indent + param;
         if (i + 1 < trimmed_params.size())
             out += ",";
         out += "\n";
@@ -3681,18 +3801,41 @@ static std::vector<std::string> format_portlist_pass(std::vector<std::string> li
         std::vector<std::string> trimmed_ports;
         for (auto& p : ports) {
             std::string rest = trim_all_copy(p);
-            while (rest.rfind("//", 0) == 0) {
-                size_t line_end = rest.find('\n');
-                if (line_end == std::string::npos) {
-                    trimmed_ports.push_back(rest);
-                    rest.clear();
+            while (!rest.empty()) {
+                if (rest.rfind("//", 0) == 0) {
+                    size_t line_end = rest.find('\n');
+                    if (line_end == std::string::npos) {
+                        trimmed_ports.push_back(rest);
+                        rest.clear();
+                    } else {
+                        trimmed_ports.push_back(trim_all_copy(rest.substr(0, line_end)));
+                        rest = trim_all_copy(rest.substr(line_end + 1));
+                    }
+                    continue;
+                }
+
+                size_t standalone_comment = std::string::npos;
+                size_t search = 0;
+                while ((search = rest.find('\n', search)) != std::string::npos) {
+                    size_t p = search + 1;
+                    while (p < rest.size() && (rest[p] == ' ' || rest[p] == '\t'))
+                        ++p;
+                    if (p + 1 < rest.size() && rest[p] == '/' && rest[p + 1] == '/') {
+                        standalone_comment = search;
+                        break;
+                    }
+                    ++search;
+                }
+                if (standalone_comment == std::string::npos) {
+                    trimmed_ports.push_back(std::move(rest));
                     break;
                 }
-                trimmed_ports.push_back(trim_all_copy(rest.substr(0, line_end)));
-                rest = trim_all_copy(rest.substr(line_end + 1));
+
+                std::string code = trim_all_copy(rest.substr(0, standalone_comment));
+                if (!code.empty())
+                    trimmed_ports.push_back(std::move(code));
+                rest = trim_all_copy(rest.substr(standalone_comment + 1));
             }
-            if (!rest.empty())
-                trimmed_ports.push_back(std::move(rest));
         }
         if (trimmed_ports.empty()) {
             push_original_lines(i, consumed_end);
@@ -4455,6 +4598,19 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
         // Suppress the pending newline if this comment is on the same source line.
         if (inline_comment && pending_nl)
             pending_nl = false;
+        else if (tok.comment && tok.text.rfind("//", 0) == 0) {
+            size_t line_start = input.rfind('\n', (size_t)tok.pos);
+            line_start = (line_start == std::string::npos) ? 0 : line_start + 1;
+            bool standalone_comment = true;
+            for (size_t p = line_start; p < (size_t)tok.pos; ++p) {
+                if (input[p] != ' ' && input[p] != '\t') {
+                    standalone_comment = false;
+                    break;
+                }
+            }
+            if (standalone_comment)
+                dec = SD::MustWrap;
+        }
 
         // --- E. Emit newline / spacing based on break decision ---
         if (dec == SD::MustWrap) {
