@@ -869,7 +869,7 @@ void LazyVerilogServer::register_handlers() {
     });
 
     // ── workspace/executeCommand ──────────────────────────────────────────────
-    ep.registerHandler([&](const wp_executeCommand::request& req) {
+    ep.registerHandler([&, show_warning](const wp_executeCommand::request& req) {
         wp_executeCommand::response rsp;
         rsp.id = req.id;
         // executeCommand result is optional in the protocol, but LspCpp serializes an unset Any as
@@ -1111,6 +1111,8 @@ void LazyVerilogServer::register_handlers() {
                 null_result.SetJsonString("null", lsp::Any::kNullType);
                 rsp.result = std::move(null_result);
             }
+        } catch (const SafeModeError& e) {
+            show_warning(e.what());
         } catch (const std::exception& e) {
             std::cerr << "[lazyverilog] executeCommand error: " << e.what() << "\n";
         }
