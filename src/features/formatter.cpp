@@ -496,6 +496,8 @@ static int spaces_req(const Tok& L, const Tok& R, const FormatOptions& opts, boo
                              : ((lx == ":") ? 1 : 0);
     if (lx == ";")
         return in_for_header ? (binary_space_after(sp.semicolon_spacing) ? 1 : 0) : 1;
+    if (has(INDENT_CLOSE, L.lo) && rx == ":")
+        return 0;
     if (lx == "@")
         return procedural_at ? (binary_space_after(sp.procedural_event_control_at_spacing) ? 1 : 0)
                              : 0;
@@ -539,6 +541,8 @@ static int spaces_req(const Tok& L, const Tok& R, const FormatOptions& opts, boo
             return 0;
         if (lx == ")")
             return 1;
+        if (ll == "wait")
+            return 0;
         if (is_identifier(L))
             return 0;
         if (is_control_keyword(L))
@@ -608,6 +612,8 @@ static SD break_dec(const Tok& L, const Tok& R, const FormatOptions& opts, bool 
     if (L.comment && L.text.rfind("//", 0) == 0)
         return SD::MustWrap;
     if (is_unary_op(L))
+        return SD::MustAppend;
+    if (has(INDENT_CLOSE, ll) && rx == ":")
         return SD::MustAppend;
     if (has(INDENT_CLOSE, rl))
         return SD::MustWrap;
@@ -931,6 +937,19 @@ static std::vector<std::string> group_bracket_tokens(std::vector<std::string> to
     return out;
 }
 
+static std::vector<std::string> group_scope_resolution_tokens(std::vector<std::string> toks) {
+    std::vector<std::string> out;
+    for (size_t i = 0; i < toks.size(); ++i) {
+        std::string grouped = toks[i];
+        while (i + 2 < toks.size() && toks[i + 1] == "::") {
+            grouped += "::" + toks[i + 2];
+            i += 2;
+        }
+        out.push_back(std::move(grouped));
+    }
+    return out;
+}
+
 static std::vector<Tok> significant_tokens(const std::string& text) {
     std::vector<Tok> out;
     for (auto& tok : collect_lexer_tokens(text)) {
@@ -998,7 +1017,8 @@ static PortParsed parse_port(const std::string& raw, const FormatOptions& opts) 
             code.pop_back();
     }
 
-    std::vector<std::string> toks = group_bracket_tokens(code_tokens_for_alignment(code));
+    std::vector<std::string> toks =
+        group_scope_resolution_tokens(group_bracket_tokens(code_tokens_for_alignment(code)));
     if (toks.empty())
         return r;
 
@@ -1223,6 +1243,7 @@ static std::vector<std::string> align_port_pass(std::vector<std::string> lines,
         }
 
         int md = 0, ms2_content = 0, mdim = 0;
+        bool has_qualified_type = false;
         int np = 0;
         size_t max_slots = 0;
         for (auto& e : blk) {
@@ -1232,6 +1253,7 @@ static std::vector<std::string> align_port_pass(std::vector<std::string> lines,
             md = std::max(md, (int)e.parsed.direction.size());
             std::string s2 = e.parsed.dtype + (e.parsed.qualifier.empty() ? "" : " " + e.parsed.qualifier);
             ms2_content = std::max(ms2_content, (int)s2.size());
+            has_qualified_type = has_qualified_type || s2.find("::") != std::string::npos;
             mdim = std::max(mdim, (int)e.parsed.dim.size());
             max_slots = std::max(max_slots, e.parsed.names.size());
         }
@@ -1250,8 +1272,11 @@ static std::vector<std::string> align_port_pass(std::vector<std::string> lines,
         int pd_s5_min = tab_aligned_width(pd.section5_min_width, opts);
 
         int s1 = tab_aligned_width(std::max(pd_s1_min, md + 1), opts);
-        int s2 =
-            ms2_content > 0 ? tab_aligned_width(std::max(pd_s2_min, ms2_content + 1), opts) : 0;
+        int s2 = ms2_content > 0
+                     ? tab_aligned_width(std::max(pd_s2_min,
+                                                  ms2_content + (has_qualified_type ? 3 : 1)),
+                                         opts)
+                     : 0;
         int s3 = mdim > 0 ? tab_aligned_width(std::max(pd_s3_min, mdim + 1), opts) : 0;
         int s5_min = pd_s5_min;
 
@@ -2196,7 +2221,8 @@ static bool parse_named_ports(const std::string& port_list,
 
 // Split flat into (module_type, param_block, inst_name)
 static bool split_inst_parts(const std::string& flat, std::string& module_type,
-                             std::string& param_block, std::string& inst_name) {
+                             std::string& param_block, std::string& inst_name,
+                             std::string& inst_suffix) {
     size_t i = 0, n = flat.size();
     // Skip leading whitespace
     while (i < n && (flat[i] == ' ' || flat[i] == '\t'))
@@ -2240,6 +2266,31 @@ static bool split_inst_parts(const std::string& flat, std::string& module_type,
     if (i == s)
         return false;
     inst_name = flat.substr(s, i - s);
+
+    // Preserve unpacked instance dimensions between the instance name and
+    // port list, e.g. "u_if[NUM_CH] ( ... )".
+    size_t port_open = i;
+    int bracket_depth = 0;
+    while (port_open < n) {
+        char ch = flat[port_open];
+        if (ch == '[')
+            ++bracket_depth;
+        else if (ch == ']' && bracket_depth > 0)
+            --bracket_depth;
+        else if (ch == '(' && bracket_depth == 0)
+            break;
+        ++port_open;
+    }
+    if (port_open >= n)
+        return false;
+    inst_suffix = flat.substr(i, port_open - i);
+    size_t a = 0;
+    while (a < inst_suffix.size() && (inst_suffix[a] == ' ' || inst_suffix[a] == '\t'))
+        ++a;
+    size_t b = inst_suffix.size();
+    while (b > a && (inst_suffix[b - 1] == ' ' || inst_suffix[b - 1] == '\t'))
+        --b;
+    inst_suffix = inst_suffix.substr(a, b - a);
     return true;
 }
 
@@ -2293,8 +2344,8 @@ static std::vector<std::string> expand_instances_pass(std::vector<std::string> l
             continue;
         }
 
-        std::string module_type, param_block, inst_name;
-        if (!split_inst_parts(flat, module_type, param_block, inst_name)) {
+        std::string module_type, param_block, inst_name, inst_suffix;
+        if (!split_inst_parts(flat, module_type, param_block, inst_name, inst_suffix)) {
             for (size_t k = i; k < end_i; ++k)
                 out.push_back(lines[k]);
             i = end_i;
@@ -2344,7 +2395,7 @@ static std::vector<std::string> expand_instances_pass(std::vector<std::string> l
         std::string hdr = indent + module_type;
         if (!param_block.empty())
             hdr += " " + param_block;
-        hdr += " " + inst_name + " (";
+        hdr += " " + inst_name + inst_suffix + " (";
         if (!leading_comments.empty())
             hdr += " " + leading_comments;
         if (!comments.header.empty())
@@ -3283,6 +3334,64 @@ static std::vector<std::string> split_top_level_tokenized(const std::string& tex
     return parts;
 }
 
+static std::string trim_all_copy(const std::string& s) {
+    size_t a = 0;
+    while (a < s.size() && std::isspace((unsigned char)s[a]))
+        ++a;
+    size_t b = s.size();
+    while (b > a && std::isspace((unsigned char)s[b - 1]))
+        --b;
+    return s.substr(a, b - a);
+}
+
+static std::vector<std::string> split_module_ports_tokenized(const std::string& text) {
+    std::vector<std::string> parts;
+    int paren = 0;
+    int bracket = 0;
+    int brace = 0;
+    size_t start = 0;
+    for (const auto& tok : significant_tokens(text)) {
+        if (tok_is(tok, "(", TokenKind::OpenParenthesis))
+            ++paren;
+        else if (tok_is(tok, ")", TokenKind::CloseParenthesis) && paren > 0)
+            --paren;
+        else if (tok_is(tok, "[", TokenKind::OpenBracket))
+            ++bracket;
+        else if (tok_is(tok, "]", TokenKind::CloseBracket) && bracket > 0)
+            --bracket;
+        else if (tok_is(tok, "{", TokenKind::OpenBrace))
+            ++brace;
+        else if (tok_is(tok, "}", TokenKind::CloseBrace) && brace > 0)
+            --brace;
+        else if (tok_is(tok, ",", TokenKind::Comma) && paren == 0 && bracket == 0 && brace == 0) {
+            size_t end = (size_t)tok.pos;
+            size_t next = (size_t)tok.pos + tok.text.size();
+            size_t p = next;
+            while (p < text.size() && (text[p] == ' ' || text[p] == '\t'))
+                ++p;
+            if (p + 1 < text.size() && text[p] == '/' && text[p + 1] == '/') {
+                size_t line_end = text.find('\n', p + 2);
+                next = (line_end == std::string::npos) ? text.size() : line_end + 1;
+                parts.push_back(text.substr(start, end - start) + " " +
+                                text.substr(p, ((line_end == std::string::npos) ? text.size()
+                                                                                 : line_end) -
+                                                   p));
+                start = next;
+                continue;
+            }
+            parts.push_back(text.substr(start, end - start));
+            start = next;
+        }
+    }
+    parts.push_back(text.substr(start));
+    return parts;
+}
+
+static bool is_standalone_comment_line(const std::string& text) {
+    std::string trimmed = trim_all_copy(text);
+    return trimmed.rfind("//", 0) == 0 || trimmed.rfind("/*", 0) == 0;
+}
+
 static bool is_simple_identifier_tokenized(const std::string& text) {
     auto toks = significant_tokens(text);
     return toks.size() == 1 && is_identifier(toks[0]);
@@ -3422,7 +3531,9 @@ static std::vector<std::string> format_portlist_pass(std::vector<std::string> li
             size_t j = i + 1;
             for (; j < lines.size(); ++j) {
                 std::string trimmed = trim_copy(lines[j]);
-                flat += " " + trimmed;
+                // Preserve line boundaries so // comments in ANSI headers don't
+                // comment out following port declarations in the flattened text.
+                flat += "\n" + trimmed;
                 if (scan_module_header_line(header_scan, lines[j]))
                     break;
             }
@@ -3443,12 +3554,22 @@ static std::vector<std::string> format_portlist_pass(std::vector<std::string> li
         prefix = format_module_parameter_prefix(prefix, leading_ws, opts);
         prefix += take_leading_portlist_block_comments_tokenized(ports_str);
 
-        auto ports = split_top_level_tokenized(ports_str);
+        auto ports = split_module_ports_tokenized(ports_str);
         std::vector<std::string> trimmed_ports;
         for (auto& p : ports) {
-            std::string trimmed = trim_copy(p);
-            if (!trimmed.empty())
-                trimmed_ports.push_back(std::move(trimmed));
+            std::string rest = trim_all_copy(p);
+            while (rest.rfind("//", 0) == 0) {
+                size_t line_end = rest.find('\n');
+                if (line_end == std::string::npos) {
+                    trimmed_ports.push_back(rest);
+                    rest.clear();
+                    break;
+                }
+                trimmed_ports.push_back(trim_all_copy(rest.substr(0, line_end)));
+                rest = trim_all_copy(rest.substr(line_end + 1));
+            }
+            if (!rest.empty())
+                trimmed_ports.push_back(std::move(rest));
         }
         if (trimmed_ports.empty()) {
             push_original_lines(i, consumed_end);
@@ -3472,15 +3593,26 @@ static std::vector<std::string> format_portlist_pass(std::vector<std::string> li
 
         std::string new_lines_str;
         if (is_ansi) {
+            auto has_later_port = [&](size_t index) {
+                for (size_t pi = index + 1; pi < trimmed_ports.size(); ++pi) {
+                    if (!is_standalone_comment_line(trimmed_ports[pi]))
+                        return true;
+                }
+                return false;
+            };
             std::string port_lines;
             for (size_t k = 0; k < trimmed_ports.size(); ++k) {
-                std::string comma =
-                    (k + 1 < trimmed_ports.size() || opts.port_declaration.align) ? "," : "";
                 std::string port = trimmed_ports[k];
+                std::string comma =
+                    (!is_standalone_comment_line(port) &&
+                     (has_later_port(k) || opts.port_declaration.align))
+                        ? ","
+                        : "";
                 if (!comma.empty()) {
                     size_t comment = find_line_comment_start(port);
                     if (comment != std::string::npos)
-                        port.insert(comment, comma);
+                        port = trim_right_copy(port.substr(0, comment)) + comma + " " +
+                               trim_left_copy(port.substr(comment));
                     else
                         port += comma;
                 }
@@ -3496,6 +3628,37 @@ static std::vector<std::string> format_portlist_pass(std::vector<std::string> li
                     std::istringstream ss(port_lines);
                     std::string l;
                     while (std::getline(ss, l)) {
+                        while (true) {
+                            size_t first_comma = l.find(',');
+                            bool changed = false;
+                            while (first_comma != std::string::npos) {
+                                size_t p = first_comma + 1;
+                                while (p < l.size() && (l[p] == ' ' || l[p] == '\t'))
+                                    ++p;
+                                if (p < l.size() && l[p] == ',') {
+                                    size_t q = p + 1;
+                                    while (q < l.size() && (l[q] == ' ' || l[q] == '\t'))
+                                        ++q;
+                                    if (q + 1 < l.size() && l[q] == '/' && l[q + 1] == '/') {
+                                        l.erase(p, q - p);
+                                        changed = true;
+                                        break;
+                                    }
+                                }
+                                first_comma = l.find(',', first_comma + 1);
+                            }
+                            if (!changed)
+                                break;
+                        }
+                        size_t comment = find_line_comment_start(l);
+                        if (comment != std::string::npos) {
+                            size_t comma = l.find_last_not_of(" \t", comment - 1);
+                            if (comma != std::string::npos && l[comma] == ',') {
+                                size_t before = l.find_last_not_of(" \t", comma - 1);
+                                if (before != std::string::npos)
+                                    l.erase(before + 1, comma - before - 1);
+                            }
+                        }
                         size_t last = l.find_last_not_of(" \t");
                         if (last != std::string::npos && l[last] == ',') {
                             size_t before = l.find_last_not_of(" \t", last - 1);
@@ -4133,6 +4296,10 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
                 dec = SD::Undecided;
             }
         }
+        // In `disable <block_name>;`, the token after `disable` names the
+        // target block. It must not be treated as a structural keyword even
+        // when the target is `fork`.
+        bool disable_target = prev && prev->lo == "disable";
 
         // --- Block label: keep `begin: label` on one line ---
         if (block_label_state == 1 && !tok.whitespace && !tok.comment) {
@@ -4293,7 +4460,7 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
             if (tok.lo == "begin")
                 single_stmt_pending = false;
 
-            if (has(INDENT_OPEN, tok.lo)) {
+            if (has(INDENT_OPEN, tok.lo) && !disable_target) {
                 // Keywords that increase indentation for everything inside them.
                 // Outmost design blocks use a configurable delta (default 1);
                 // everything else adds exactly 1 level.
@@ -4385,7 +4552,8 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
         if (!tok.whitespace && !tok.comment && is_keyword(tok) &&
             (tok.lo == "begin" || tok.lo == "fork" ||
              tok.lo == "end" || tok.lo == "join" ||
-             tok.lo == "join_any" || tok.lo == "join_none")) {
+             tok.lo == "join_any" || tok.lo == "join_none") &&
+            !disable_target) {
             block_label_state = 1;
         }
 

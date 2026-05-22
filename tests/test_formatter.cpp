@@ -88,6 +88,35 @@ TEST_CASE("formatter: module parameter layout hanging", "[formatter]") {
           "endmodule\n");
 }
 
+TEST_CASE("formatter: multiline ANSI module header preserves line comments", "[formatter]") {
+    FormatOptions opts;
+    opts.safe_mode = true;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+    opts.port_declaration.align = true;
+    opts.port_declaration.align_adaptive = false;
+
+    CHECK(format_source("module adc_ctrl_reg_top(input clk_i, input rst_ni, "
+                        "input tlul_pkg::tl_h2d_t tl_i, output tlul_pkg::tl_d2h_t tl_o, // To HW\n"
+                        "output adc_ctrl_reg_pkg::adc_ctrl_reg2hw_t reg2hw, // Write\n"
+                        "input adc_ctrl_reg_pkg::adc_ctrl_hw2reg_t hw2reg, // Read\n"
+                        "\n"
+                        "// Integrity check errors\n"
+                        "output logic intg_err_o);\n"
+                        "endmodule\n",
+                        opts) == "module adc_ctrl_reg_top(\n"
+                                 "    input                                           clk_i,\n"
+                                 "    input                                           rst_ni,\n"
+                                 "    input     tlul_pkg::tl_h2d_t                    tl_i,\n"
+                                 "    output    tlul_pkg::tl_d2h_t                    tl_o, // To HW\n"
+                                 "    output    adc_ctrl_reg_pkg::adc_ctrl_reg2hw_t   reg2hw, // Write\n"
+                                 "    input     adc_ctrl_reg_pkg::adc_ctrl_hw2reg_t   hw2reg, // Read\n"
+                                 "    // Integrity check errors\n"
+                                 "    output    logic               intg_err_o\n"
+                                 ");\n"
+                                 "endmodule\n");
+}
+
 TEST_CASE("formatter: function calls inside if conditions use configured layout", "[formatter]") {
     FormatOptions opts;
     opts.function.break_policy = "always";
@@ -179,6 +208,40 @@ TEST_CASE("formatter: macro calls with empty arguments are preserved", "[formatt
                             "endmodule\n";
 
     REQUIRE_NOTHROW(format_source(src, opts));
+}
+
+TEST_CASE("formatter: labeled endtask stays on one line", "[formatter]") {
+    FormatOptions opts;
+    opts.safe_mode = true;
+    opts.default_indent_level_inside_outmost_block = 0;
+
+    CHECK(format_source("class c;\n"
+                        "task body();\n"
+                        "endtask: body\n"
+                        "endclass\n",
+                        opts) == "class c;\n"
+                                 "  task body();\n"
+                                 "  endtask: body\n"
+                                 "endclass\n");
+}
+
+TEST_CASE("formatter: disable statement target stays on one line", "[formatter]") {
+    FormatOptions opts;
+    opts.safe_mode = true;
+    opts.default_indent_level_inside_outmost_block = 0;
+
+    CHECK(format_source("class c;\n"
+                        "task body();\n"
+                        "disable my_block;\n"
+                        "disable fork;\n"
+                        "endtask\n"
+                        "endclass\n",
+                        opts) == "class c;\n"
+                                 "  task body();\n"
+                                 "    disable my_block;\n"
+                                 "    disable fork;\n"
+                                 "  endtask\n"
+                                 "endclass\n");
 }
 
 TEST_CASE("formatter: macro call indent follows surrounding block", "[formatter]") {
@@ -546,6 +609,28 @@ TEST_CASE("formatter: instance port name width is measured from dot to paren", "
                                  "    .address  (addr      ),\n"
                                  "    .data_in  (data      ),\n"
                                  "    .chip_en  (en        )\n"
+                                 ");\n"
+                                 "endmodule\n");
+}
+
+TEST_CASE("formatter: instance array dimensions are preserved", "[formatter]") {
+    FormatOptions opts;
+    opts.safe_mode = true;
+    opts.instance.align = true;
+    opts.instance.port_indent_level = 1;
+    opts.instance.instance_port_name_width = 10;
+    opts.instance.instance_port_between_paren_width = 10;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+
+    CHECK(format_source("module top;\n"
+                        "push_pull_if #(.DeviceDataWidth(WIDTH)) adc_if[CHANNELS](.clk(clk), "
+                        ".rst_n(rst_n));\n"
+                        "endmodule\n",
+                                 opts) == "module top;\n"
+                                 "push_pull_if #(.DeviceDataWidth(WIDTH)) adc_if[CHANNELS] (\n"
+                                 "    .clk      (clk       ),\n"
+                                 "    .rst_n    (rst_n     )\n"
                                  ");\n"
                                  "endmodule\n");
 }
@@ -1001,14 +1086,25 @@ TEST_CASE("formatter: spacing options control control parens and brackets", "[fo
     opts.spacing.range_colon_spacing = "both";
     opts.spacing.indexed_part_select_spacing = "none";
 
-    CHECK(format_source("module top;\nif(a <= b) x = (c + d);\nlogic [WIDTH-1:0] data;\nassign y = "
+    CHECK(format_source("module top;\nif(a <= b) x = (c + d);\nwait(done);\nlogic [WIDTH-1:0] data;\nassign y = "
                         "arr[i+1] + arr[base +: width];\nendmodule\n",
                         opts) == "module top;\n"
                                  "if( a<=b )\n"
                                  "  x = ( c+d );\n"
+                                 "wait( done );\n"
                                  "logic [ WIDTH - 1 : 0 ] data;\n"
                                  "assign y = arr[ i + 1 ]+arr[ base+:width ];\n"
                                  "endmodule\n");
+}
+
+TEST_CASE("formatter: wait has no space before paren", "[formatter]") {
+    FormatOptions opts;
+    opts.spacing.control_keyword_space = true;
+    opts.spacing.space_inside_parens = true;
+
+    CHECK(format_source("module top;\nwait(done);\nendmodule\n", opts) == "module top;\n"
+                                                                            "  wait( done );\n"
+                                                                            "endmodule\n");
 }
 
 TEST_CASE("formatter: event control and for semicolon spacing options", "[formatter]") {

@@ -1,10 +1,10 @@
 `include "params.svh"
 `define WIDTH 32
-`define print_bytes(ARR, STARTBYTE, NUMBYTES) \
-    for (int ii=STARTBYTE; ii<STARTBYTE+NUMBYTES; ii++) begin \
-        if ((ii != 0) && (ii % 16 == 0)) \
-            display("\n"); \
-        $display("0x%x ", ARR[ii]); \
+`define print_bytes(ARR, STARTBYTE, NUMBYTES)                   \
+    for (int ii=STARTBYTE; ii<STARTBYTE+NUMBYTES; ii++) begin   \
+        if ((ii != 0) && (ii % 16 == 0))                        \
+            display("\n");                                      \
+        $display("0x%x ", ARR[ii]);                             \
     end
 
 typedef struct {
@@ -18,7 +18,9 @@ typedef struct {
     logic                                   valid                               ;
 } packet_ta;
 
-interface bus_intf #( parameter W_IDTH = 8 ) ( input logic i_clk );
+interface bus_intf #( parameter W_IDTH = 8 ) (
+    input   logic               i_clk
+);
 
 logic                                   valid                               ;
 logic                                   ready                               ;
@@ -55,11 +57,7 @@ parameter DEPTH = 8;
 
 module memory_top #( parameter int WIDTH = 4, parameter int DEPTH = 8 ) ( /*autoarg*/
     i_clk, i_rst_n, i_data,
-    i_data2, i_data3, i_dd,
-    i_dd22222, dd22222, i_d33333,
-    i_d44333, i_dd44321, i_d44334,
-    VDD, VSS, test,
-    VSS
+    i_d
 );
 input                                               i_clk                                   ;
 input                                               i_rst_n                                 ;
@@ -235,11 +233,9 @@ always_comb begin
     end while ( i<5 );
 
     foreach ( arr[ i ] ) begin
-        $display(
-            "arr[%0d]  = %0d",
-            i,
-            arr[ i ]
-        );
+        $display("arr[%0d]  = %0d",
+                 i,
+                 arr[ i ]);
     end
 
     repeat ( 3 ) begin
@@ -258,34 +254,29 @@ always_comb begin
     // com
     sum(.i_a(1), .i_b(i_b));
     /**/
-    add_number(
-        .a(a3),
-        .b(b),
-        .result(result)
-    );
-    if ( add_number(
-             .a(a),
-             .b(b),
-             .result(result)
-         ) ) begin
+    add_number(.a(a3),
+               .b(b),
+               .result(result));
+    add_number(a,
+               add_number(a, b, c),
+               c);
+    if ( add_number(.a(a),
+                    .b(b),
+                    .result(result)) ) begin
         a       = 3;
         b       = 7+1;
     end
 
-    if ( add_number(
-             .a(a),
-             .b(b),
-             .result(result)
-         ) )
+    if ( add_number(.a(a),
+                    .b(b),
+                    .result(result)) )
         a       = 3;
     b       = 3;
 
     b       = 7;
-    add_number(
-        .a(a),
-        .b(b),
-        .result(result)
-    );
+    add_number(.a(a),
+               .b(b),
+               .result(result));
 end
 
 initial begin
@@ -307,7 +298,9 @@ end
 
 endmodule
 
-module inv(i_a, o_d);
+module inv(
+    i_a, o_d
+);
 
 `include "params.svh"
 
