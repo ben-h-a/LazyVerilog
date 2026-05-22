@@ -977,49 +977,42 @@ static bool tok_is(const Tok& tok, const std::string& text, TokenKind kind) {
     return tok.text == text || tok.kind == kind;
 }
 
+static bool tok_contains(const Tok& tok, char ch) {
+    if (!tok.text.empty() && tok.text[0] == '"')
+        return false;
+    if (tok.text.size() > 2)
+        return false;
+    return tok.text.find(ch) != std::string::npos;
+}
+
 // ---------------------------------------------------------------------------
 // Split by top-level comma (depth-0)
 // ---------------------------------------------------------------------------
 
 static std::vector<std::string> split_top_level(const std::string& text) {
     std::vector<std::string> parts;
-    int depth = 0;
     size_t start = 0;
-    for (size_t i = 0; i < text.size(); ++i) {
-        char c = text[i];
-        if (c == '"' ||
-            (c == '/' && i + 1 < text.size() &&
-             (text[i + 1] == '/' || text[i + 1] == '*'))) {
-            if (c == '"') {
-                ++i;
-                while (i < text.size()) {
-                    if (text[i] == '\\' && i + 1 < text.size()) {
-                        i += 2;
-                    } else if (text[i] == '"') {
-                        break;
-                    } else {
-                        ++i;
-                    }
-                }
-            } else if (text[i + 1] == '/') {
-                i += 2;
-                while (i < text.size() && text[i] != '\n')
-                    ++i;
-            } else {
-                size_t end = text.find("*/", i + 2);
-                if (end == std::string::npos)
-                    break;
-                i = end + 1;
-            }
+    int paren = 0;
+    int bracket = 0;
+    int brace = 0;
+    for (const auto& tok : collect_lexer_tokens(text)) {
+        if (tok.whitespace || tok.comment || tok.directive)
             continue;
-        }
-        if (c == '(' || c == '[' || c == '{')
-            ++depth;
-        else if (c == ')' || c == ']' || c == '}')
-            --depth;
-        else if (c == ',' && depth == 0) {
-            parts.push_back(text.substr(start, i - start));
-            start = i + 1;
+        if (tok_contains(tok, '('))
+            ++paren;
+        else if (tok_contains(tok, ')') && paren > 0)
+            --paren;
+        else if (tok_contains(tok, '['))
+            ++bracket;
+        else if (tok_contains(tok, ']') && bracket > 0)
+            --bracket;
+        else if (tok_contains(tok, '{'))
+            ++brace;
+        else if (tok_contains(tok, '}') && brace > 0)
+            --brace;
+        else if (tok_is(tok, ",", TokenKind::Comma) && paren == 0 && bracket == 0 && brace == 0) {
+            parts.push_back(text.substr(start, (size_t)tok.pos - start));
+            start = (size_t)tok.pos + tok.text.size();
         }
     }
     parts.push_back(text.substr(start));
@@ -2040,39 +2033,39 @@ static size_t find_line_comment_start(const std::string& line) {
 
 static std::string last_named_port_before_comment(const std::string& code) {
     std::string last;
-    for (size_t i = 0; i < code.size(); ++i) {
-        if (code[i] != '.')
+    auto toks = collect_lexer_tokens(code);
+    for (size_t i = 0; i + 2 < toks.size(); ++i) {
+        if (toks[i].whitespace || toks[i].comment || toks[i].directive || toks[i].text != ".")
             continue;
-        size_t j = i + 1;
-        if (j >= code.size() || !(std::isalpha((unsigned char)code[j]) || code[j] == '_'))
+        size_t name_i = i + 1;
+        while (name_i < toks.size() && toks[name_i].whitespace)
+            ++name_i;
+        if (name_i >= toks.size() || !is_identifier(toks[name_i]))
             continue;
-        ++j;
-        while (j < code.size() && (std::isalnum((unsigned char)code[j]) || code[j] == '_'))
-            ++j;
-        size_t k = j;
-        while (k < code.size() && (code[k] == ' ' || code[k] == '\t'))
-            ++k;
-        if (k < code.size() && code[k] == '(')
-            last = code.substr(i + 1, j - i - 1);
+        size_t open_i = name_i + 1;
+        while (open_i < toks.size() && toks[open_i].whitespace)
+            ++open_i;
+        if (open_i < toks.size() && tok_is(toks[open_i], "(", TokenKind::OpenParenthesis))
+            last = toks[name_i].text;
     }
     return last;
 }
 
 static std::string first_named_port_in_code(const std::string& code) {
-    for (size_t i = 0; i < code.size(); ++i) {
-        if (code[i] != '.')
+    auto toks = collect_lexer_tokens(code);
+    for (size_t i = 0; i + 2 < toks.size(); ++i) {
+        if (toks[i].whitespace || toks[i].comment || toks[i].directive || toks[i].text != ".")
             continue;
-        size_t j = i + 1;
-        if (j >= code.size() || !(std::isalpha((unsigned char)code[j]) || code[j] == '_'))
+        size_t name_i = i + 1;
+        while (name_i < toks.size() && toks[name_i].whitespace)
+            ++name_i;
+        if (name_i >= toks.size() || !is_identifier(toks[name_i]))
             continue;
-        ++j;
-        while (j < code.size() && (std::isalnum((unsigned char)code[j]) || code[j] == '_'))
-            ++j;
-        size_t k = j;
-        while (k < code.size() && (code[k] == ' ' || code[k] == '\t'))
-            ++k;
-        if (k < code.size() && code[k] == '(')
-            return code.substr(i + 1, j - i - 1);
+        size_t open_i = name_i + 1;
+        while (open_i < toks.size() && toks[open_i].whitespace)
+            ++open_i;
+        if (open_i < toks.size() && tok_is(toks[open_i], "(", TokenKind::OpenParenthesis))
+            return toks[name_i].text;
     }
     return "";
 }
@@ -2100,20 +2093,22 @@ static bool collect_instance(const std::vector<std::string>& lines, size_t start
         auto param_depth_after = [](int start_depth, const std::string& text) {
             int pd = start_depth;
             bool saw_hash = false;
-            for (char ch : text) {
+            for (const auto& tok : collect_lexer_tokens(text)) {
+                if (tok.whitespace || tok.comment || tok.directive)
+                    continue;
                 if (pd > 0) {
-                    if (ch == '(')
+                    if (tok_is(tok, "(", TokenKind::OpenParenthesis))
                         ++pd;
-                    else if (ch == ')' && pd > 0)
+                    else if (tok_is(tok, ")", TokenKind::CloseParenthesis) && pd > 0)
                         --pd;
                     continue;
                 }
-                if (ch == '#') {
+                if (tok_is(tok, "#", TokenKind::Hash)) {
                     saw_hash = true;
-                } else if (saw_hash && ch == '(') {
+                } else if (saw_hash && tok_is(tok, "(", TokenKind::OpenParenthesis)) {
                     pd = 1;
                     saw_hash = false;
-                } else if (saw_hash && ch != ' ' && ch != '\t') {
+                } else if (saw_hash) {
                     saw_hash = false;
                 }
             }
@@ -2130,10 +2125,17 @@ static bool collect_instance(const std::vector<std::string>& lines, size_t start
                 bool line_closes = false;
                 {
                     int d = depth;
-                    for (char ch : code) {
-                        if (ch == '(') ++d;
-                        else if (ch == ')') --d;
-                        else if (ch == ';' && d == 0) { line_closes = true; break; }
+                    for (const auto& tok : collect_lexer_tokens(code)) {
+                        if (tok.whitespace || tok.comment || tok.directive)
+                            continue;
+                        if (tok_is(tok, "(", TokenKind::OpenParenthesis))
+                            ++d;
+                        else if (tok_is(tok, ")", TokenKind::CloseParenthesis))
+                            --d;
+                        else if (tok_is(tok, ";", TokenKind::Semicolon) && d == 0) {
+                            line_closes = true;
+                            break;
+                        }
                     }
                 }
                 if (line_closes) {
@@ -2142,9 +2144,9 @@ static bool collect_instance(const std::vector<std::string>& lines, size_t start
                     std::string port = last_named_port_before_comment(code);
                     if (!port.empty())
                         comments.port_comments.push_back({port, comment});
-                    else if (code.find_first_not_of(" \t") == std::string::npos)
+                    else if (significant_tokens(code).empty())
                         pending_standalone_comments.push_back(comment);
-                    else if (code.find('(') != std::string::npos && comments.header.empty())
+                    else if (!significant_tokens(code).empty() && comments.header.empty())
                         comments.header = comment;
                 }
             }
@@ -2160,12 +2162,14 @@ static bool collect_instance(const std::vector<std::string>& lines, size_t start
         }
 
         parts.push_back(code);
-        for (char ch : code) {
-            if (ch == '(')
+        for (const auto& tok : collect_lexer_tokens(code)) {
+            if (tok.whitespace || tok.comment || tok.directive)
+                continue;
+            if (tok_is(tok, "(", TokenKind::OpenParenthesis))
                 ++depth;
-            else if (ch == ')')
+            else if (tok_is(tok, ")", TokenKind::CloseParenthesis))
                 --depth;
-            else if (ch == ';' && depth == 0) {
+            else if (tok_is(tok, ";", TokenKind::Semicolon) && depth == 0) {
                 end_i = j + 1;
                 comments.footer_comments = std::move(pending_standalone_comments);
                 flat = "";
@@ -2184,64 +2188,41 @@ static bool collect_instance(const std::vector<std::string>& lines, size_t start
 
 // Extract content of outermost (...) immediately before ;
 static bool extract_port_list(const std::string& flat, std::string& port_list) {
-    auto semi = flat.rfind(';');
-    if (semi == std::string::npos)
+    auto toks = significant_tokens(flat);
+    if (toks.size() < 3 || !tok_is(toks.back(), ";", TokenKind::Semicolon))
         return false;
-    int j = (int)semi - 1;
-    while (j >= 0 && (flat[j] == ' ' || flat[j] == '\t'))
-        --j;
-    if (j < 0 || flat[j] != ')')
+    if (!tok_is(toks[toks.size() - 2], ")", TokenKind::CloseParenthesis))
         return false;
-    int close = j;
+
+    size_t close_i = toks.size() - 2;
     int depth = 1;
-    --j;
-    while (j >= 0 && depth > 0) {
-        if (flat[j] == ')')
+    size_t open_i = close_i;
+    while (open_i > 0 && depth > 0) {
+        --open_i;
+        if (tok_is(toks[open_i], ")", TokenKind::CloseParenthesis))
             ++depth;
-        else if (flat[j] == '(')
+        else if (tok_is(toks[open_i], "(", TokenKind::OpenParenthesis))
             --depth;
-        --j;
     }
-    port_list = flat.substr(j + 2, close - (j + 2));
-    // trim
+    if (depth != 0)
+        return false;
+    size_t start = (size_t)toks[open_i].pos + toks[open_i].text.size();
+    size_t end = (size_t)toks[close_i].pos;
+    port_list = flat.substr(start, end - start);
     size_t a = 0;
-    while (a < port_list.size() &&
-           (port_list[a] == ' ' || port_list[a] == '\t' || port_list[a] == '\n'))
+    while (a < port_list.size() && std::isspace((unsigned char)port_list[a]))
         ++a;
     size_t b = port_list.size();
-    while (b > a &&
-           (port_list[b - 1] == ' ' || port_list[b - 1] == '\t' || port_list[b - 1] == '\n'))
+    while (b > a && std::isspace((unsigned char)port_list[b - 1]))
         --b;
     port_list = port_list.substr(a, b - a);
     return true;
 }
 
+static std::string take_leading_portlist_block_comments_tokenized(std::string& ports_str);
+
 static std::string take_leading_portlist_block_comments(std::string& ports_str) {
-    std::string comments;
-    size_t i = 0;
-    while (true) {
-        size_t ws_start = i;
-        while (i < ports_str.size() && (ports_str[i] == ' ' || ports_str[i] == '\t'))
-            ++i;
-        if (i + 1 >= ports_str.size() || ports_str[i] != '/' || ports_str[i + 1] != '*') {
-            i = ws_start;
-            break;
-        }
-
-        i += 2;
-        while (i + 1 < ports_str.size() && !(ports_str[i] == '*' && ports_str[i + 1] == '/'))
-            ++i;
-        if (i + 1 >= ports_str.size()) {
-            i = ws_start;
-            break;
-        }
-        i += 2;
-        comments += ports_str.substr(ws_start, i - ws_start);
-    }
-
-    if (!comments.empty())
-        ports_str.erase(0, i);
-    return comments;
+    return take_leading_portlist_block_comments_tokenized(ports_str);
 }
 
 static void append_comment(std::string& dst, const std::string& comment) {
@@ -2254,116 +2235,112 @@ static void append_comment(std::string& dst, const std::string& comment) {
 static void remove_block_comments_from_instance_port_list(std::string& port_list,
                                                           InstanceComments& comments) {
     std::string code;
-    bool in_string = false;
-    bool escaped = false;
     int paren_depth = 0;
-    for (size_t i = 0; i < port_list.size();) {
-        char ch = port_list[i];
-        if (in_string) {
-            code += ch;
-            if (escaped) {
-                escaped = false;
-            } else if (ch == '\\') {
-                escaped = true;
-            } else if (ch == '"') {
-                in_string = false;
-            }
-            ++i;
-            continue;
-        }
-        if (ch == '"') {
-            in_string = true;
-            code += ch;
-            ++i;
-            continue;
-        }
-        if (ch == '(') ++paren_depth;
-        else if (ch == ')' && paren_depth > 0) --paren_depth;
-        // Only extract block comments between ports (depth 0), not inside parens
-        if (paren_depth == 0 && i + 1 < port_list.size() && ch == '/' && port_list[i + 1] == '*') {
-            size_t end = port_list.find("*/", i + 2);
-            if (end == std::string::npos) {
-                code += port_list.substr(i);
-                break;
-            }
-            size_t after = end + 2;
-            while (after < port_list.size() && (port_list[after] == ' ' || port_list[after] == '\t'))
-                ++after;
-            if (after < port_list.size() && port_list[after] == '(') {
-                code += port_list.substr(i, end + 2 - i);
-                i = end + 2;
+    size_t cursor = 0;
+    auto toks = collect_lexer_tokens(port_list);
+    for (size_t ti = 0; ti < toks.size(); ++ti) {
+        const auto& tok = toks[ti];
+        size_t tok_start = (size_t)tok.pos;
+        size_t tok_end = tok_start + tok.text.size();
+        if (tok_start > cursor)
+            code += port_list.substr(cursor, tok_start - cursor);
+
+        if (tok.comment && tok.text.rfind("/*", 0) == 0 && paren_depth == 0) {
+            size_t next = ti + 1;
+            while (next < toks.size() && toks[next].whitespace)
+                ++next;
+            if (next < toks.size() && tok_is(toks[next], "(", TokenKind::OpenParenthesis)) {
+                code += tok.text;
+                cursor = tok_end;
                 continue;
             }
-            std::string comment = port_list.substr(i, end + 2 - i);
             std::string port = last_named_port_before_comment(code);
             if (!port.empty()) {
                 if (!comments.port_comments.empty() && comments.port_comments.back().first == port)
-                    append_comment(comments.port_comments.back().second, comment);
+                    append_comment(comments.port_comments.back().second, tok.text);
                 else
-                    comments.port_comments.push_back({port, comment});
+                    comments.port_comments.push_back({port, tok.text});
             } else {
-                append_comment(comments.header, comment);
+                append_comment(comments.header, tok.text);
             }
-            i = end + 2;
+            cursor = tok_end;
             continue;
         }
-        code += ch;
-        ++i;
+
+        code += tok.text;
+        cursor = tok_end;
+        if (tok.whitespace || tok.comment || tok.directive)
+            continue;
+        if (tok_is(tok, "(", TokenKind::OpenParenthesis))
+            ++paren_depth;
+        else if (tok_is(tok, ")", TokenKind::CloseParenthesis) && paren_depth > 0)
+            --paren_depth;
     }
+    if (cursor < port_list.size())
+        code += port_list.substr(cursor);
     port_list = code;
 }
 
 // Parse named port connections .name(signal), ...
 // Returns false if positional
+static std::string trim_copy(const std::string& s);
+
 static bool parse_named_ports(const std::string& port_list,
                               std::vector<std::pair<std::string, std::string>>& ports) {
-    size_t i = 0, n = port_list.size();
-    while (i < n) {
-        while (i < n && (port_list[i] == ' ' || port_list[i] == '\t' || port_list[i] == '\n' ||
-                         port_list[i] == ','))
+    auto toks = collect_lexer_tokens(port_list);
+    size_t i = 0;
+    auto skip_ws_commas = [&]() {
+        while (i < toks.size() &&
+               (toks[i].whitespace || tok_is(toks[i], ",", TokenKind::Comma)))
             ++i;
-        if (i >= n)
+    };
+
+    while (true) {
+        skip_ws_commas();
+        if (i >= toks.size())
             break;
-        if (port_list[i] != '.')
+        if (toks[i].comment || toks[i].directive)
+            return false;
+        if (toks[i].text != ".")
             return false; // positional
         ++i;
-        size_t j = i;
-        while (j < n && (std::isalnum((unsigned char)port_list[j]) || port_list[j] == '_'))
-            ++j;
-        std::string port_name = port_list.substr(i, j - i);
-        i = j;
-        while (i < n && (port_list[i] == ' ' || port_list[i] == '\t'))
+        while (i < toks.size() && toks[i].whitespace)
             ++i;
-        while (i + 1 < n && port_list[i] == '/' && port_list[i + 1] == '*') {
-            size_t end = port_list.find("*/", i + 2);
-            if (end == std::string::npos)
-                return false;
-            port_name += " " + port_list.substr(i, end + 2 - i);
-            i = end + 2;
-            while (i < n && (port_list[i] == ' ' || port_list[i] == '\t'))
+        if (i >= toks.size() || !is_identifier(toks[i]))
+            return false;
+        std::string port_name = toks[i].text;
+        ++i;
+        while (i < toks.size() && toks[i].whitespace)
+            ++i;
+        while (i < toks.size() && toks[i].comment && toks[i].text.rfind("/*", 0) == 0) {
+            port_name += " " + toks[i].text;
+            ++i;
+            while (i < toks.size() && toks[i].whitespace)
                 ++i;
         }
-        if (i >= n || port_list[i] != '(')
+        if (i >= toks.size() || !tok_is(toks[i], "(", TokenKind::OpenParenthesis))
             return false;
+        size_t sig_start = (size_t)toks[i].pos + toks[i].text.size();
         ++i;
         int depth = 1;
-        size_t sig_start = i;
-        while (i < n && depth > 0) {
-            if (port_list[i] == '(')
+        size_t close_pos = std::string::npos;
+        while (i < toks.size() && depth > 0) {
+            if (toks[i].whitespace || toks[i].comment || toks[i].directive) {
+                ++i;
+                continue;
+            }
+            if (tok_is(toks[i], "(", TokenKind::OpenParenthesis))
                 ++depth;
-            else if (port_list[i] == ')')
-                --depth;
+            else if (tok_is(toks[i], ")", TokenKind::CloseParenthesis) && --depth == 0) {
+                close_pos = (size_t)toks[i].pos;
+                ++i;
+                break;
+            }
             ++i;
         }
-        std::string sig = port_list.substr(sig_start, i - 1 - sig_start);
-        // trim sig
-        size_t a = 0;
-        while (a < sig.size() && (sig[a] == ' ' || sig[a] == '\t'))
-            ++a;
-        size_t b = sig.size();
-        while (b > a && (sig[b - 1] == ' ' || sig[b - 1] == '\t'))
-            --b;
-        sig = sig.substr(a, b - a);
+        if (close_pos == std::string::npos || close_pos < sig_start)
+            return false;
+        std::string sig = trim_copy(port_list.substr(sig_start, close_pos - sig_start));
         ports.push_back({port_name, sig});
     }
     return !ports.empty();
@@ -2373,67 +2350,58 @@ static bool parse_named_ports(const std::string& port_list,
 static bool split_inst_parts(const std::string& flat, std::string& module_type,
                              std::string& param_block, std::string& inst_name,
                              std::string& inst_suffix) {
-    size_t i = 0, n = flat.size();
-    // Skip leading whitespace
-    while (i < n && (flat[i] == ' ' || flat[i] == '\t'))
-        ++i;
-    // Read module_type (word)
-    size_t s = i;
-    while (i < n && (std::isalnum((unsigned char)flat[i]) || flat[i] == '_'))
-        ++i;
-    if (i == s)
+    auto toks = significant_tokens(flat);
+    size_t i = 0;
+    if (i >= toks.size() || !is_identifier(toks[i]))
         return false;
-    module_type = flat.substr(s, i - s);
-    while (i < n && (flat[i] == ' ' || flat[i] == '\t'))
-        ++i;
+    module_type = toks[i++].text;
 
     param_block = "";
-    if (i < n && flat[i] == '#') {
-        auto ki = flat.find('(', i);
-        if (ki == std::string::npos)
+        if (i < toks.size() && tok_is(toks[i], "#", TokenKind::Hash)) {
+            size_t hash_i = i++;
+            if (i >= toks.size() || !tok_is(toks[i], "(", TokenKind::OpenParenthesis))
+                return false;
+            int depth = 1;
+            size_t close_i = i;
+            while (++close_i < toks.size()) {
+                if (tok_contains(toks[close_i], '('))
+                    ++depth;
+                else if (tok_contains(toks[close_i], ')') && --depth == 0)
+                    break;
+            }
+        if (depth != 0)
             return false;
-        size_t k = ki + 1;
-        int depth = 1;
-        while (k < n && depth > 0) {
-            if (flat[k] == '(')
-                ++depth;
-            else if (flat[k] == ')')
-                --depth;
-            ++k;
-        }
-        param_block = flat.substr(i, k - i);
+        size_t start = (size_t)toks[hash_i].pos;
+        size_t end = (size_t)toks[close_i].pos + toks[close_i].text.size();
+        param_block = flat.substr(start, end - start);
         while (!param_block.empty() && (param_block.back() == ' ' || param_block.back() == '\t'))
             param_block.pop_back();
-        i = k;
-        while (i < n && (flat[i] == ' ' || flat[i] == '\t'))
-            ++i;
+        i = close_i + 1;
     }
 
-    // Read inst_name (word)
-    s = i;
-    while (i < n && (std::isalnum((unsigned char)flat[i]) || flat[i] == '_'))
-        ++i;
-    if (i == s)
+    if (i >= toks.size() || !is_identifier(toks[i]))
         return false;
-    inst_name = flat.substr(s, i - s);
+    size_t inst_i = i++;
+    inst_name = toks[inst_i].text;
 
     // Preserve unpacked instance dimensions between the instance name and
     // port list, e.g. "u_if[NUM_CH] ( ... )".
-    size_t port_open = i;
+    size_t open_i = i;
     int bracket_depth = 0;
-    while (port_open < n) {
-        char ch = flat[port_open];
-        if (ch == '[')
+    while (open_i < toks.size()) {
+        if (tok_is(toks[open_i], "[", TokenKind::OpenBracket))
             ++bracket_depth;
-        else if (ch == ']' && bracket_depth > 0)
+        else if (tok_is(toks[open_i], "]", TokenKind::CloseBracket) && bracket_depth > 0)
             --bracket_depth;
-        else if (ch == '(' && bracket_depth == 0)
+        else if (tok_is(toks[open_i], "(", TokenKind::OpenParenthesis) && bracket_depth == 0)
             break;
-        ++port_open;
+        ++open_i;
     }
-    if (port_open >= n)
+    if (open_i >= toks.size())
         return false;
-    inst_suffix = flat.substr(i, port_open - i);
+    size_t suffix_start = (size_t)toks[inst_i].pos + toks[inst_i].text.size();
+    size_t suffix_end = (size_t)toks[open_i].pos;
+    inst_suffix = flat.substr(suffix_start, suffix_end - suffix_start);
     size_t a = 0;
     while (a < inst_suffix.size() && (inst_suffix[a] == ' ' || inst_suffix[a] == '\t'))
         ++a;
@@ -2466,23 +2434,25 @@ static std::vector<std::string> expand_instances_pass(std::vector<std::string> l
             continue;
         }
 
-        size_t first = line.find_first_not_of(" \t");
-        if (first == std::string::npos || !(std::isalpha((unsigned char)line[first]) ||
-                                            line[first] == '_' || line[first] == '$')) {
+        auto line_toks = significant_tokens(line);
+        if (line_toks.empty() || !is_identifier(line_toks[0])) {
             out.push_back(lines[i]);
             ++i;
             continue;
         }
-        size_t word_end = first + 1;
-        while (word_end < line.size() && (std::isalnum((unsigned char)line[word_end]) ||
-                                          line[word_end] == '_' || line[word_end] == '$'))
-            ++word_end;
-        if (has(SV_KW, lower(line.substr(first, word_end - first)))) {
+        if (has(SV_KW, line_toks[0].lo)) {
             out.push_back(lines[i]);
             ++i;
             continue;
         }
-        if (line.find('(', word_end) == std::string::npos) {
+        bool has_paren = false;
+        for (size_t ti = 1; ti < line_toks.size(); ++ti) {
+            if (tok_is(line_toks[ti], "(", TokenKind::OpenParenthesis)) {
+                has_paren = true;
+                break;
+            }
+        }
+        if (!has_paren) {
             out.push_back(lines[i]);
             ++i;
             continue;
@@ -2642,20 +2612,28 @@ static bool collect_statement_lines(const std::vector<std::string>& lines, size_
                                     size_t& end_i, std::string& flat) {
     int paren = 0;
     int brace = 0;
+    int bracket = 0;
     std::vector<std::string> parts;
     for (size_t i = start; i < lines.size(); ++i) {
         std::string trimmed = trim_copy(lines[i]);
         parts.push_back(trimmed);
-        for (char ch : trimmed) {
-            if (ch == '(')
+        for (const auto& tok : collect_lexer_tokens(trimmed)) {
+            if (tok.whitespace || tok.comment || tok.directive)
+                continue;
+            if (tok_contains(tok, '('))
                 ++paren;
-            else if (ch == ')' && paren > 0)
+            else if (tok_contains(tok, ')') && paren > 0)
                 --paren;
-            else if (ch == '{')
+            else if (tok_contains(tok, '{'))
                 ++brace;
-            else if (ch == '}' && brace > 0)
+            else if (tok_contains(tok, '}') && brace > 0)
                 --brace;
-            else if (ch == ';' && paren == 0 && brace == 0) {
+            else if (tok_contains(tok, '['))
+                ++bracket;
+            else if (tok_contains(tok, ']') && bracket > 0)
+                --bracket;
+            else if (tok_is(tok, ";", TokenKind::Semicolon) && paren == 0 && brace == 0 &&
+                     bracket == 0) {
                 end_i = i;
                 flat.clear();
                 for (size_t k = 0; k < parts.size(); ++k) {
@@ -2680,22 +2658,23 @@ static size_t find_top_level_equal(const std::string& text) {
     int paren = 0;
     int bracket = 0;
     int brace = 0;
-    for (size_t i = 0; i < text.size(); ++i) {
-        char ch = text[i];
-        if (ch == '(')
+    for (const auto& tok : collect_lexer_tokens(text)) {
+        if (tok.whitespace || tok.comment || tok.directive)
+            continue;
+        if (tok_contains(tok, '('))
             ++paren;
-        else if (ch == ')' && paren > 0)
+        else if (tok_contains(tok, ')') && paren > 0)
             --paren;
-        else if (ch == '[')
+        else if (tok_contains(tok, '['))
             ++bracket;
-        else if (ch == ']' && bracket > 0)
+        else if (tok_contains(tok, ']') && bracket > 0)
             --bracket;
-        else if (ch == '{')
+        else if (tok_contains(tok, '{'))
             ++brace;
-        else if (ch == '}' && brace > 0)
+        else if (tok_contains(tok, '}') && brace > 0)
             --brace;
-        else if (ch == '=' && paren == 0 && bracket == 0 && brace == 0)
-            return i;
+        else if (tok_is(tok, "=", TokenKind::Unknown) && paren == 0 && bracket == 0 && brace == 0)
+            return (size_t)tok.pos;
     }
     return std::string::npos;
 }
@@ -2714,8 +2693,8 @@ static std::vector<std::string> format_enum_declaration_pass(std::vector<std::st
     std::vector<std::string> out;
     for (size_t i = 0; i < lines.size(); ++i) {
         const std::string& line = lines[i];
-        size_t first = line.find_first_not_of(" \t");
-        if (first == std::string::npos || !starts_with_word_at(line, first, "typedef")) {
+        auto first_line_toks = significant_tokens(line);
+        if (first_line_toks.empty() || first_line_toks[0].lo != "typedef") {
             out.push_back(lines[i]);
             continue;
         }
@@ -2727,32 +2706,49 @@ static std::vector<std::string> format_enum_declaration_pass(std::vector<std::st
             continue;
         }
 
-        std::string leading = line.substr(0, first);
-        size_t typedef_pos = flat.find("typedef");
-        size_t enum_pos = flat.find("enum", typedef_pos == std::string::npos ? 0 : typedef_pos + 7);
-        size_t open = flat.find('{', enum_pos == std::string::npos ? 0 : enum_pos + 4);
-        if (typedef_pos == std::string::npos || enum_pos == std::string::npos ||
-            open == std::string::npos) {
+        std::string leading = line.substr(0, (size_t)first_line_toks[0].pos);
+        auto toks = significant_tokens(flat);
+        size_t typedef_i = 0;
+        if (toks.empty() || toks[typedef_i].lo != "typedef") {
             out.push_back(lines[i]);
             continue;
         }
+        size_t enum_i = typedef_i + 1;
+        while (enum_i < toks.size() && toks[enum_i].lo != "enum")
+            ++enum_i;
+        if (enum_i >= toks.size()) {
+            out.push_back(lines[i]);
+            continue;
+        }
+        size_t open_i = enum_i + 1;
+        while (open_i < toks.size() && !tok_is(toks[open_i], "{", TokenKind::OpenBrace))
+            ++open_i;
+        if (open_i >= toks.size()) {
+            out.push_back(lines[i]);
+            continue;
+        }
+        size_t open = (size_t)toks[open_i].pos;
         int depth = 1;
-        size_t close = open + 1;
-        for (; close < flat.size(); ++close) {
-            if (flat[close] == '{')
+        size_t close_i = open_i;
+        while (++close_i < toks.size()) {
+            if (tok_contains(toks[close_i], '{'))
                 ++depth;
-            else if (flat[close] == '}' && --depth == 0)
+            else if (tok_contains(toks[close_i], '}') && --depth == 0)
                 break;
         }
-        if (close >= flat.size()) {
+        if (depth != 0 || close_i >= toks.size()) {
             out.push_back(lines[i]);
             continue;
         }
-        size_t semi = flat.find(';', close + 1);
-        if (semi == std::string::npos) {
+        size_t close = (size_t)toks[close_i].pos;
+        size_t semi_i = close_i + 1;
+        while (semi_i < toks.size() && !tok_is(toks[semi_i], ";", TokenKind::Semicolon))
+            ++semi_i;
+        if (semi_i >= toks.size()) {
             out.push_back(lines[i]);
             continue;
         }
+        size_t semi = (size_t)toks[semi_i].pos;
 
         std::string prefix = trim_copy(flat.substr(0, open));
         if (lower(prefix).find("typedef enum") == std::string::npos) {
@@ -2856,16 +2852,14 @@ struct ModportParsed {
 };
 
 static bool parse_modport_statement(const std::string& flat, std::vector<ModportParsed>& modports) {
-    size_t pos = 0;
-    while (pos < flat.size() && std::isspace((unsigned char)flat[pos]))
-        ++pos;
-    if (!starts_with_word_at(flat, pos, "modport"))
+    auto toks = significant_tokens(flat);
+    if (toks.empty() || toks[0].lo != "modport")
         return false;
-    pos += 7;
-    size_t semi = flat.rfind(';');
-    if (semi == std::string::npos)
+    if (!tok_is(toks.back(), ";", TokenKind::Semicolon))
         return false;
-    std::string rest = flat.substr(pos, semi - pos);
+    size_t rest_start = (size_t)toks[0].pos + toks[0].text.size();
+    size_t semi = (size_t)toks.back().pos;
+    std::string rest = flat.substr(rest_start, semi - rest_start);
     auto entries = split_top_level(rest);
     static const std::unordered_set<std::string> DIRS = {"input", "output", "inout",
                                                          "ref",   "import", "export"};
@@ -2874,41 +2868,41 @@ static bool parse_modport_statement(const std::string& flat, std::vector<Modport
         std::string entry = trim_copy(entry_raw);
         if (entry.empty())
             continue;
-        size_t name_start = 0;
-        while (name_start < entry.size() && std::isspace((unsigned char)entry[name_start]))
-            ++name_start;
-        size_t name_end = name_start;
-        while (name_end < entry.size() && is_ident_char(entry[name_end]))
-            ++name_end;
-        if (name_end == name_start)
+        auto entry_toks = significant_tokens(entry);
+        if (entry_toks.size() < 4 || !is_identifier(entry_toks[0]))
             return false;
-        size_t open = entry.find('(', name_end);
-        if (open == std::string::npos)
+        size_t open_i = 1;
+        while (open_i < entry_toks.size() &&
+               !tok_is(entry_toks[open_i], "(", TokenKind::OpenParenthesis))
+            ++open_i;
+        if (open_i >= entry_toks.size())
             return false;
         int depth = 1;
-        size_t close = open + 1;
-        for (; close < entry.size(); ++close) {
-            if (entry[close] == '(')
+        size_t close_i = open_i;
+        while (++close_i < entry_toks.size()) {
+            if (tok_contains(entry_toks[close_i], '('))
                 ++depth;
-            else if (entry[close] == ')' && --depth == 0)
+            else if (tok_contains(entry_toks[close_i], ')') && --depth == 0)
                 break;
         }
-        if (close >= entry.size())
+        if (depth != 0 || close_i >= entry_toks.size())
             return false;
 
         ModportParsed mp;
-        mp.name = entry.substr(name_start, name_end - name_start);
+        mp.name = entry_toks[0].text;
+        size_t open = (size_t)entry_toks[open_i].pos;
+        size_t close = (size_t)entry_toks[close_i].pos;
         auto items = split_top_level(entry.substr(open + 1, close - open - 1));
         for (auto& item_raw : items) {
             std::string item = trim_copy(item_raw);
             if (item.empty())
                 continue;
-            std::istringstream ss(item);
-            std::string dir;
-            ss >> dir;
-            std::string remainder;
-            std::getline(ss, remainder);
-            remainder = trim_copy(remainder);
+            auto item_toks = significant_tokens(item);
+            if (item_toks.empty())
+                return false;
+            std::string dir = item_toks[0].text;
+            size_t remainder_start = (size_t)item_toks[0].pos + item_toks[0].text.size();
+            std::string remainder = trim_copy(item.substr(remainder_start));
             if (dir.empty() || remainder.empty() || !has(DIRS, lower(dir)))
                 return false;
             mp.items.push_back({dir, remainder});
@@ -2928,8 +2922,8 @@ static std::vector<std::string> format_modport_pass(std::vector<std::string> lin
     std::vector<std::string> out;
     for (size_t i = 0; i < lines.size(); ++i) {
         const std::string& line = lines[i];
-        size_t first = line.find_first_not_of(" \t");
-        if (first == std::string::npos || !starts_with_word_at(line, first, "modport")) {
+        auto line_toks = significant_tokens(line);
+        if (line_toks.empty() || line_toks[0].lo != "modport") {
             out.push_back(lines[i]);
             continue;
         }
@@ -2947,7 +2941,7 @@ static std::vector<std::string> format_modport_pass(std::vector<std::string> lin
             continue;
         }
 
-        std::string leading = line.substr(0, first);
+        std::string leading = line.substr(0, (size_t)line_toks[0].pos);
         for (size_t mi = 0; mi < modports.size(); ++mi) {
             const auto& mp = modports[mi];
             int item_base_col = (int)leading.size() + opts.indent_size;
@@ -3012,49 +3006,42 @@ static bool find_simple_call(const std::string& line, size_t& name_start, size_t
         "if",    "for",      "foreach",  "while",       "repeat",   "wait", "case",
         "casex", "casez",    "module",   "macromodule", "function", "task", "covergroup",
         "class", "property", "sequence", "assert",      "assume",   "cover"};
-    for (size_t i = 0; i < line.size(); ++i) {
-        unsigned char ch = (unsigned char)line[i];
-        // Allow backtick-prefixed macro calls (e.g. `uvm_info(...))
-        bool has_backtick = (ch == '`');
-        if (has_backtick) {
-            if (i + 1 >= line.size())
-                continue;
-            ch = (unsigned char)line[i + 1];
-        }
-        if (!(std::isalpha(ch) || ch == '_' || ch == '$'))
+    auto toks = collect_lexer_tokens(line);
+    for (size_t i = 0; i < toks.size(); ++i) {
+        const auto& tok = toks[i];
+        if (tok.whitespace || tok.comment)
             continue;
-        size_t s = i;
-        if (has_backtick)
-            ++i; // skip backtick
-        ++i;
-        while (i < line.size() &&
-               (std::isalnum((unsigned char)line[i]) || line[i] == '_' || line[i] == '$'))
-            ++i;
-        size_t e = i;
-        size_t j = i;
-        while (j < line.size() && (line[j] == ' ' || line[j] == '\t'))
+        bool callable = is_identifier(tok) || tok.text.rfind("`", 0) == 0;
+        if (!callable)
+            continue;
+        size_t prev = i;
+        while (prev > 0 && toks[prev - 1].whitespace)
+            --prev;
+        if (prev > 0 && toks[prev - 1].text == ".")
+            continue;
+        size_t j = i + 1;
+        while (j < toks.size() && toks[j].whitespace)
             ++j;
-        if (j >= line.size() || line[j] != '(')
+        if (j >= toks.size() || !tok_is(toks[j], "(", TokenKind::OpenParenthesis))
             continue;
-        if (s > 0 && line[s - 1] == '.')
-            continue;
-        std::string name = line.substr(s, e - s);
-        if (has(SKIP, lower(name)))
+        if (has(SKIP, tok.lo))
             continue;
         int depth = 1;
-        size_t k = j + 1;
-        for (; k < line.size(); ++k) {
-            if (line[k] == '(')
+        size_t k = j;
+        while (++k < toks.size()) {
+            if (toks[k].whitespace || toks[k].comment || toks[k].directive)
+                continue;
+            if (tok_contains(toks[k], '('))
                 ++depth;
-            else if (line[k] == ')' && --depth == 0)
+            else if (tok_contains(toks[k], ')') && --depth == 0)
                 break;
         }
-        if (k >= line.size())
+        if (depth != 0 || k >= toks.size())
             return false;
-        name_start = s;
-        name_end = e;
-        open = j;
-        close = k;
+        name_start = (size_t)tok.pos;
+        name_end = (size_t)tok.pos + tok.text.size();
+        open = (size_t)toks[j].pos;
+        close = (size_t)toks[k].pos;
         return true;
     }
     return false;
@@ -3085,20 +3072,15 @@ static std::vector<std::string> format_function_calls_pass(std::vector<std::stri
 
     // Helper: detect if a line starts a backtick macro call.
     auto find_macro_call_start = [](const std::string& ln) -> size_t {
-        for (size_t i = 0; i < ln.size(); ++i) {
-            if (ln[i] == '`') {
-                size_t j = i + 1;
-                while (j < ln.size() &&
-                       (std::isalnum((unsigned char)ln[j]) || ln[j] == '_' || ln[j] == '$'))
-                    ++j;
-                if (j > i + 1) {
-                    size_t k = j;
-                    while (k < ln.size() && (ln[k] == ' ' || ln[k] == '\t'))
-                        ++k;
-                    if (k < ln.size() && ln[k] == '(')
-                        return i;
-                }
-            }
+        auto toks = collect_lexer_tokens(ln);
+        for (size_t i = 0; i < toks.size(); ++i) {
+            if (toks[i].whitespace || toks[i].comment || toks[i].text.rfind("`", 0) != 0)
+                continue;
+            size_t k = i + 1;
+            while (k < toks.size() && toks[k].whitespace)
+                ++k;
+            if (k < toks.size() && tok_is(toks[k], "(", TokenKind::OpenParenthesis))
+                return (size_t)toks[i].pos;
         }
         return std::string::npos;
     };
@@ -4165,38 +4147,28 @@ static std::vector<std::string> format_function_declaration_pass(
             out.push_back(line);
             continue;
         }
-        // Detect function/task declaration: keyword at start of line
-        size_t p = 0;
-        while (p < line.size() && (line[p] == ' ' || line[p] == '\t'))
-            ++p;
-        size_t indent_end = p;
-        auto matches_kw = [&](const char* kw) {
-            size_t len = std::char_traits<char>::length(kw);
-            if (p + len > line.size() || line.compare(p, len, kw) != 0)
-                return false;
-            if (p + len == line.size())
-                return true;
-            char c = line[p + len];
-            return !std::isalnum((unsigned char)c) && c != '_';
-        };
-        if (!matches_kw("function") && !matches_kw("task")) {
+        auto toks = significant_tokens(line);
+        if (toks.empty() || (toks[0].lo != "function" && toks[0].lo != "task")) {
             out.push_back(line);
             continue;
         }
-        // Find opening paren
-        size_t open = line.find('(', p);
-        if (open == std::string::npos) {
+        size_t indent_end = (size_t)toks[0].pos;
+        size_t open_i = 1;
+        while (open_i < toks.size() && !tok_is(toks[open_i], "(", TokenKind::OpenParenthesis))
+            ++open_i;
+        if (open_i >= toks.size()) {
             out.push_back(line);
             continue;
         }
-        // Find matching close paren
         int depth = 1;
-        size_t close = std::string::npos;
-        for (size_t k = open + 1; k < line.size(); ++k) {
-            if (line[k] == '(') ++depth;
-            else if (line[k] == ')' && --depth == 0) { close = k; break; }
+        size_t close_i = open_i;
+        while (++close_i < toks.size()) {
+            if (tok_contains(toks[close_i], '('))
+                ++depth;
+            else if (tok_contains(toks[close_i], ')') && --depth == 0)
+                break;
         }
-        if (close == std::string::npos) {
+        if (depth != 0 || close_i >= toks.size()) {
             out.push_back(line);
             continue;
         }
@@ -4206,6 +4178,8 @@ static std::vector<std::string> format_function_declaration_pass(
             continue;
         }
         // Split ports
+        size_t open = (size_t)toks[open_i].pos;
+        size_t close = (size_t)toks[close_i].pos;
         std::string args_text = line.substr(open + 1, close - open - 1);
         auto raw_args = split_top_level(args_text);
         std::vector<std::string> args;
@@ -4271,15 +4245,24 @@ static std::vector<std::string> run_structural_layout_phase(
 static std::vector<std::string> align_define_continuation_pass(std::vector<std::string> lines,
                                                                  const FormatOptions& opts) {
     auto ends_with_bs = [](const std::string& ln) -> bool {
-        size_t e = ln.size();
-        while (e > 0 && (ln[e - 1] == ' ' || ln[e - 1] == '\t'))
-            --e;
-        return e > 0 && ln[e - 1] == '\\';
+        for (auto toks = collect_lexer_tokens(ln); !toks.empty();) {
+            Tok tok = toks.back();
+            toks.pop_back();
+            if (tok.whitespace)
+                continue;
+            std::string text = tok.text;
+            while (!text.empty() && (text.back() == ' ' || text.back() == '\t'))
+                text.pop_back();
+            return !text.empty() && text.back() == '\\';
+        }
+        return false;
     };
     auto content_width = [](const std::string& ln) -> size_t {
-        size_t e = ln.size();
-        while (e > 0 && (ln[e - 1] == ' ' || ln[e - 1] == '\t'))
-            --e;
+        size_t e = 0;
+        for (const auto& tok : collect_lexer_tokens(ln)) {
+            if (!tok.whitespace)
+                e = (size_t)tok.pos + tok.text.size();
+        }
         if (e > 0 && ln[e - 1] == '\\')
             --e;
         while (e > 0 && (ln[e - 1] == ' ' || ln[e - 1] == '\t'))
