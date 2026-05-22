@@ -71,15 +71,16 @@ enable_format_on_save = true
 
 [format.spacing]
 control_keyword_space = true
-space_inside_parens = true
-space_inside_dimension_brackets = true
+space_inside_parens = false
+space_inside_dimension_brackets = false
 binary_operator_spacing = "none"                    # none | before | after | both
-dimension_binary_operator_spacing = "both"          # none | before | after | both
+dimension_binary_operator_spacing = "none"          # none | before | after | both
 semicolon_spacing = "both"                         # none | before | after | both; for-loop headers
-range_colon_spacing = "both"                        # none | before | after | both; ranges inside []
-indexed_part_select_spacing = "both"                # none | before | after | both; +: and -:
+range_colon_spacing = "none"                        # none | before | after | both; ranges inside []
+indexed_part_select_spacing = "none"                # none | before | after | both; +: and -:
 procedural_event_control_at_spacing = "both"      # none | before | after | both; always @(...)
 space_inside_event_control_parens = true
+assignment_operator_spacing = "none"                  # none | before | after | both; = and <= operators
 
 [format.statement]
 align = true              # align = and <= operators in consecutive assignments
@@ -89,7 +90,7 @@ wrap_end_else_clauses = true
 
 [format.port_declaration]
 align = true
-align_adaptive = false
+align_adaptive = true
 section1_min_width = 6
 section2_min_width = 20
 section3_min_width = 20

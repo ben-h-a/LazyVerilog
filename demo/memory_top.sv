@@ -8,25 +8,25 @@
     end
 
 typedef struct {
-    logic               [ 7 : 0 ]           addr                                ;
+    logic               [7:0]               addr                                ;
     logic                                   valid                               ;
 } packet_wo_data_t;
 
 typedef struct {
-    logic signed        [ 7 : 0 ]           addr                                ;
-    logic               [ 31 : 0 ]          data                                ;
+    logic signed        [7:0]               addr                                ;
+    logic               [31:0]              data                                ;
     logic                                   valid                               ;
 } packet_ta;
 
-interface bus_intf #(parameter W_IDTH = 8)(
+interface bus_intf #(parameter W_IDTH=8)(
     input   logic               i_clk
 );
 
 logic                                   valid                               ;
 logic                                   ready                               ;
-logic               [ `WIDTH - 1123 : 0 ]   addr                                ;
-logic               [ `WIDTH - 1 : 0 ]  wdata                               ;
-logic               [ `WIDTH - 1 : 0 ]  rdata                               ;
+logic               [`WIDTH-1123:0]     addr                                ;
+logic               [`WIDTH-1:0]        wdata                               ;
+logic               [`WIDTH-1:0]        rdata                               ;
 logic                                   write                               ;
 
 // DUT view
@@ -55,14 +55,14 @@ endinterface
 
 parameter DEPTH = 8;
 
-module memory_top #(parameter int WIDTH = 4,
-                    parameter int DEPTH = 8)( /*autoarg*/
+module memory_top #(parameter int WIDTH=4,
+                    parameter int DEPTH=8)( /*autoarg*/
     i_clk, i_rst_n, i_data,
     i_d
 );
 input                                           i_clk                                   ;
 input                                           i_rst_n                                 ;
-input   logic signed        [ 1 : 0 ]           i_data              [ 7 : 0 ]           ;
+input   logic signed        [1:0]               i_data              [7:0]               ;
 input   var byte                                i_data2                                 ;
 input                                           i_data3                                 ;
 input                                           i_dd                                    ;
@@ -71,59 +71,59 @@ input                                           dd22222                         
 input                                           i_d33333                                ;
 input                                           i_d44333                                , i_dd44321                               ;
 input                                           i_d44334                                ;
-output  logic unsigned      [ 0 : 0 ]           VDD                                     , VSS                                     ;
-output  packet_tttttttttttttt   [ 0 : 0 ]       test                                    , VSS                                     ;
+output  logic unsigned      [0:0]               VDD                                     , VSS                                     ;
+output  packet_tttttttttttttt   [0:0]           test                                    , VSS                                     ;
 
-logic               [ 7 : 0 ]           dout                = 8'hFF         ;
-logic               [ 8 : 0 ]           douteeeeeee         = 8'hFF         ;
-packet_tttttttttttttt   [ 1 : 0 ]       test_init           = 8'hFF         ;
+logic               [7:0]               dout                = 8'hFF         ;
+logic               [8:0]               douteeeeeee         = 8'hFF         ;
+packet_tttttttttttttt   [1:0]           test_init           = 8'hFF         ;
 packet_t                                test_init2          = 8'hFF         ;
-logic               [ `WIDTH - 1 : 0 ]  data                                ;
+logic               [`WIDTH-1:0]        data                                ;
 
-packet_ttttttttttteeettt    [ 1 : 0 ]   dp                                  ;
+packet_ttttttttttteeettt    [1:0]       dp                                  ;
 // test
-logic               [ 2 : 0 ]           a                                   , b                                   ;
+logic               [2:0]               a                                   , b                                   ;
 //dd
 /* ehlo */ // a, b, c
 //
 //
 //
 //
-logic               [ 7 : 0 ]           data_out                            ;
+logic               [7:0]               data_out                            ;
 logic                                   tt                                  ;
-reg signed          [ 7 : 0 ]           kj                                  ;
+reg signed          [7:0]               kj                                  ;
 // logic                                               c                           ;
 
 // b
 /* ehlo */ // logic           [2:0]                   d                           ;
 
-automatic int       [ 3 : 0 ]           b                                   ;
+automatic int       [3:0]               b                                   ;
 
-wire                [ 1 : 0 ]           addr                                ;
+wire                [1:0]               addr                                ;
 logic                                   address                             ;
 logic                                   test                                , r_test                              ; // test
 logic                                   test3                               , r_test2                             ;
 /* */
 logic                                   r_test4                             ;
-logic               [ 7 : 0 ]           ddtt                                ;
-logic               [ 7 : 0 ]           dd                                  ;
-logic               [ 7 : 0 ]           holyshit                            ;
-logic               [ 7 : 0 ]           zzzry                               ;
-logic               [ 7 : 0 ]           testxrp                             ;
-logic               [ 7 : 0 ]           threeshit                           ;
-logic               [ 3 : 0 ]           www333                              ;
-logic               [ 3 : 0 ]           zzfuk                               ;
-logic               [ 3 : 0 ]           o_d                                 ;
+logic               [7:0]               ddtt                                ;
+logic               [7:0]               dd                                  ;
+logic               [7:0]               holyshit                            ;
+logic               [7:0]               zzzry                               ;
+logic               [7:0]               testxrp                             ;
+logic               [7:0]               threeshit                           ;
+logic               [3:0]               www333                              ;
+logic               [3:0]               zzfuk                               ;
+logic               [3:0]               o_d                                 ;
 logic                                   d                                   ;
-logic               [ 7 : 0 ]           intercontest                        ;
-logic               [ 7 +: 1 ]          intercontest                        ;
+logic               [7:0]               intercontest                        ;
+logic               [7+:1]              intercontest                        ;
 
 assign d    = a+1;
 assign d    = a+2;
 assign d    = a+2;
 assign daaa = a+2;
 
-memory #( .MEM_SIZE(3) ) u_memory ( /*autoinst*/
+memory #(.MEM_SIZE(3)) u_memory ( /*autoinst*/
     .address    (addr           ),
     .data_in    (intercontest   ),
     .read_write (read_wsssrite  ),
@@ -193,7 +193,7 @@ inv u_intq (
 );
 
 always @ ( * ) begin
-    if ( a ) begin
+    if (a) begin
         a2      <= 3; /* ttt*/
     end
 end
@@ -202,27 +202,27 @@ always_comb begin
     // tte
     a       <= 3; /* ttt*/
 
-    if ( a==3 ) begin
+    if (a==3) begin
         a       += 1;
         //test
     end
 
-    case ( a )
+    case (a)
         1: begin
         end
     endcase
 
-    for ( int i = 0 ; i<32 ; i++ ) begin
+    for (int i=0 ; i<32 ; i++) begin
     end
 
-    while ( i<5 ) begin
+    while (i<5) begin
         $display("i = %0d", i);
         /* test*/
         i++;
     end
 
-    for ( int i = 0 ; i<32 ; i++ ) begin
-        while ( i<5 ) begin
+    for (int i=0 ; i<32 ; i++) begin
+        while (i<5) begin
             $display("i = %0d", i);
             i++;
         end
@@ -231,15 +231,15 @@ always_comb begin
     do begin
         $display("i = %0d", i);
         i++;
-    end while ( i<5 );
+    end while (i<5);
 
-    foreach ( arr[ i ] ) begin
+    foreach (arr[i]) begin
         $display("arr[%0d]  = %0d",
                  i,
-                 arr[ i ]);
+                 arr[i]);
     end
 
-    repeat ( 3 ) begin
+    repeat (3) begin
         $display("Hello");
     end
 
@@ -261,16 +261,16 @@ always_comb begin
     add_number(a,
                add_number(a, b, c),
                c);
-    if ( add_number(.a(a),
-                    .b(b),
-                    .result(result)) ) begin
+    if (add_number(.a(a),
+                   .b(b),
+                   .result(result))) begin
         a       = 3;
         b       = 7+1;
     end
 
-    if ( add_number(.a(a),
-                    .b(b),
-                    .result(result)) )
+    if (add_number(.a(a),
+                   .b(b),
+                   .result(result)))
         a       = 3;
     b       = 3;
 
@@ -287,7 +287,7 @@ end
 
 // Standard D-FF with synchronous active-low reset
 always_ff @ ( posedge i_clk or negedge i_rst_n ) begin
-    if ( !i_rst_n ) begin
+    if (!i_rst_n) begin
         data    <= 32'b0;
         r_test  <= '0;
     end
@@ -308,8 +308,8 @@ module inv(
 logic               i_d                                 ;
 logic               i_e                                 ;
 
-input   fifo_entry_t        [ 3 : 0 ]           i_a                                     ;
-output  fifo_entry_t        [ 3 : 0 ]           o_d                                     ;
+input   fifo_entry_t        [3:0]               i_a                                     ;
+output  fifo_entry_t        [3:0]               o_d                                     ;
 
 assign i_d  = ~i_a;
 assign i_e  = i_a;

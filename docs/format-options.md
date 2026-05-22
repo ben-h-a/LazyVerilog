@@ -99,6 +99,7 @@ range_colon_spacing = "none"
 indexed_part_select_spacing = "both"
 procedural_event_control_at_spacing = "before"
 space_inside_event_control_parens = false
+assignment_operator_spacing = "both"
 ```
 
 Spacing mode values are `"none"`, `"before"`, `"after"`, and `"both"`.
@@ -115,6 +116,7 @@ Spacing mode values are `"none"`, `"before"`, `"after"`, and `"both"`.
 | `indexed_part_select_spacing` | `"both"` | Spacing around indexed part-select operators as one unit: `arr[i +: 4]`. |
 | `procedural_event_control_at_spacing` | `"before"` | Spacing around `@` in procedural event controls after `always`, `always_ff`, `always_comb`, or `always_latch`. Standalone event controls are excluded. |
 | `space_inside_event_control_parens` | `false` | Space just inside procedural event-control parentheses: `always @( posedge clk )`. Normal parentheses are excluded. |
+| `assignment_operator_spacing` | `"both"` | Spacing around assignment operators (`=`, `<=`): `a = b` vs `a=b`. |
 
 Examples:
 
