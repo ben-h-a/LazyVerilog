@@ -546,6 +546,43 @@ TEST_CASE("formatter: import declarations do not indent on function or task", "[
           "import \"DPI-C\" function void usbdpi_close(input chandle ctx);\n");
 }
 
+TEST_CASE("formatter: extern class method declarations do not indent following declarations",
+          "[formatter]") {
+    FormatOptions opts;
+    opts.safe_mode = true;
+    opts.default_indent_level_inside_outmost_block = 0;
+
+    const std::string formatted = format_source(
+        "class esc_monitor;\n"
+        "`uvm_component_utils(esc_monitor)\n"
+        "extern function new (string name, uvm_component parent);\n"
+        "extern virtual task run_phase(uvm_phase phase);\n"
+        "extern virtual function bit get_esc();\n"
+        "endclass: esc_monitor\n",
+        opts);
+
+    CHECK(formatted == "class esc_monitor;\n"
+                       "  `uvm_component_utils(esc_monitor)\n"
+                       "  extern function new (string name, uvm_component parent);\n"
+                       "  extern virtual task run_phase(uvm_phase phase);\n"
+                       "  extern virtual function bit get_esc();\n"
+                       "endclass: esc_monitor\n");
+    CHECK(format_source(formatted, opts) == formatted);
+}
+
+TEST_CASE("formatter: inside expression keeps required word-operator spaces", "[formatter]") {
+    FormatOptions opts;
+    opts.safe_mode = true;
+    opts.spacing.binary_operator_spacing = "none";
+
+    const std::string formatted =
+        format_source("if (!(req.esc_handshake_sta inside {A, B})) begin\nend\n", opts);
+
+    CHECK(formatted.find("req.esc_handshake_sta inside {A, B}") != std::string::npos);
+    CHECK(formatted.find("req.esc_handshake_stainside") == std::string::npos);
+    CHECK(format_source(formatted, opts) == formatted);
+}
+
 TEST_CASE("formatter: typedef class forward declarations do not indent following declarations",
           "[formatter]") {
     FormatOptions opts;
@@ -579,6 +616,25 @@ TEST_CASE("formatter: labeled endtask stays on one line", "[formatter]") {
                         opts) == "class c;\n"
                                  "  task body();\n"
                                  "  endtask: body\n"
+                                 "endclass\n");
+}
+
+TEST_CASE("formatter: labeled endtask keeps following task on next line", "[formatter]") {
+    FormatOptions opts;
+    opts.safe_mode = true;
+    opts.default_indent_level_inside_outmost_block = 0;
+
+    CHECK(format_source("class c;\n"
+                        "task a();\n"
+                        "endtask: a\n"
+                        "task b();\n"
+                        "endtask: b\n"
+                        "endclass\n",
+                        opts) == "class c;\n"
+                                 "  task a();\n"
+                                 "  endtask: a\n"
+                                 "  task b();\n"
+                                 "  endtask: b\n"
                                  "endclass\n");
 }
 
@@ -1549,6 +1605,51 @@ TEST_CASE("formatter: wait has no space before paren", "[formatter]") {
     CHECK(format_source("module top;\nwait(done);\nendmodule\n", opts) == "module top;\n"
                                                                             "  wait( done );\n"
                                                                             "endmodule\n");
+}
+
+TEST_CASE("formatter: wait fork does not open a fork block", "[formatter]") {
+    FormatOptions opts;
+
+    const std::string input = "class c;\n"
+                              "  task a();\n"
+                              "    fork begin : isolation_fork\n"
+                              "      wait fork;\n"
+                              "    end join\n"
+                              "  endtask\n"
+                              "\n"
+                              "  task b();\n"
+                              "    x();\n"
+                              "  endtask\n"
+                              "endclass\n";
+
+    const std::string formatted = format_source(input, opts);
+    CHECK(formatted == format_source(formatted, opts));
+    CHECK(formatted.find("wait fork;\n") != std::string::npos);
+    CHECK(formatted.find("wait fork\n") == std::string::npos);
+    CHECK(formatted.find("\n  task b();\n") != std::string::npos);
+}
+
+TEST_CASE("formatter: expression macros in nested call arguments are idempotent", "[formatter]") {
+    Config cfg = load_config(".");
+
+    const std::string input =
+        "class c;\n"
+        "  task body();\n"
+        "    repeat (20) begin\n"
+        "      csr_rd_check(.ptr(a), .compare_value(0),\n"
+        "                   .err_msg(called_from(`__FILE__, `__LINE__)));\n"
+        "      ral.adc_en_ctl.adc_enable.set(1);\n"
+        "      ral.adc_en_ctl.oneshot_mode.set(1);\n"
+        "      csr_wr(ral.adc_en_ctl, ral.adc_en_ctl.get());\n"
+        "    end\n"
+        "  endtask\n"
+        "endclass\n";
+
+    std::string formatted;
+    REQUIRE_NOTHROW(formatted = format_source(input, cfg.format));
+    CHECK(format_source(formatted, cfg.format) == formatted);
+    CHECK(formatted.find("ral.adc_en_ctl.oneshot_mode.set(1);") != std::string::npos);
+    CHECK(formatted.find("\nral.adc_en_ctl.oneshot_mode.set(1);") == std::string::npos);
 }
 
 TEST_CASE("formatter: event control and for semicolon spacing options", "[formatter]") {

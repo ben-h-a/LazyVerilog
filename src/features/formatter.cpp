@@ -2,7 +2,9 @@
 #include <algorithm>
 #include <cctype>
 #include <slang/parsing/Lexer.h>
+#include <slang/parsing/LexerFacts.h>
 #include <slang/parsing/Token.h>
+#include <slang/syntax/SyntaxKind.h>
 #include <slang/text/SourceManager.h>
 #include <slang/util/BumpAllocator.h>
 #include <sstream>
@@ -73,6 +75,7 @@ struct Tok {
     bool whitespace{false};
     bool comment{false};
     bool directive{false};
+    syntax::SyntaxKind directive_kind{syntax::SyntaxKind::Unknown};
 };
 
 using TokenCache = std::unordered_map<std::string, std::vector<Tok>>;
@@ -89,81 +92,6 @@ struct ScopedTokenCache {
 enum class SD { MustAppend, MustWrap, Preserve, Undecided };
 
 // ---------------------------------------------------------------------------
-// Keyword sets
-// ---------------------------------------------------------------------------
-
-static const std::unordered_set<std::string> SV_KW = {
-    "module",      "macromodule", "endmodule",    "interface",    "endinterface",  "program",
-    "endprogram",  "package",     "endpackage",   "class",        "endclass",      "function",
-    "endfunction", "task",        "endtask",      "begin",        "end",           "fork",
-    "join",        "join_any",    "join_none",    "case",         "casex",         "casez",
-    "caseinside",  "endcase",     "generate",     "endgenerate",  "covergroup",    "endgroup",
-    "property",    "endproperty", "sequence",     "endsequence",  "checker",       "endchecker",
-    "clocking",    "endclocking", "config",       "endconfig",    "primitive",     "endprimitive",
-    "specify",     "endspecify",  "table",        "endtable",     "input",         "output",
-    "inout",       "ref",         "logic",        "wire",         "reg",           "bit",
-    "byte",        "shortint",    "int",          "longint",      "integer",       "real",
-    "realtime",    "shortreal",   "time",         "string",       "chandle",       "event",
-    "always",      "always_comb", "always_ff",    "always_latch", "initial",       "final",
-    "assign",      "if",          "else",         "for",          "foreach",       "while",
-    "do",          "repeat",      "forever",      "return",       "break",         "continue",
-    "typedef",     "struct",      "union",        "enum",         "packed",        "unpacked",
-    "parameter",   "localparam",  "defparam",     "virtual",      "static",        "automatic",
-    "const",       "var",         "default",      "void",         "type",          "signed",
-    "unsigned",    "modport",     "genvar",       "import",       "export",        "extern",
-    "protected",   "local",       "posedge",      "negedge",      "edge",          "or",
-    "and",         "not",         "assert",       "assume",       "cover",         "restrict",
-    "unique",      "unique0",     "priority",     "inside",       "dist",          "rand",
-    "randc",       "constraint",  "super",        "this",         "null",          "new",
-    "expect",      "wait",        "wait_order",   "disable",      "force",         "release",
-    "deassign",    "pullup",      "pulldown",     "supply0",      "supply1",       "tri",
-    "tri0",        "tri1",        "triand",       "trior",        "trireg",        "wand",
-    "wor",         "uwire",       "with",         "bind",         "let",           "cross",
-    "bins",        "binsof",      "extends",      "implements",   "throughout",    "within",
-    "iff",         "intersect",   "first_match",  "matches",      "tagged",        "wildcard",
-    "solve",       "before",      "pure",         "context",      "timeprecision", "timeunit",
-    "forkjoin",    "randcase",    "randsequence", "randomize",    "coverpoint",    "strong",
-    "weak",
-};
-
-static const std::unordered_set<std::string> TYPE_KW = {
-    "logic",   "wire",    "reg",  "bit",      "byte",      "shortint", "int",
-    "longint", "integer", "real", "realtime", "shortreal", "time",     "string",
-    "chandle", "event",   "void", "signed",   "unsigned",  "packed",
-};
-
-static const std::unordered_set<std::string> INDENT_OPEN = {
-    "module",   "macromodule", "interface", "program",    "package",  "class",
-    "function", "task",        "begin",     "fork",       "case",     "casex",
-    "casez",    "caseinside",  "generate",  "covergroup", "property", "sequence",
-    "checker",  "clocking",    "config",    "primitive",  "specify",
-};
-
-static const std::unordered_set<std::string> BLOCK_OPEN = {
-    "begin",    "fork",     "case",    "casex",    "casez",  "caseinside", "generate", "covergroup",
-    "property", "sequence", "checker", "clocking", "config", "primitive",  "specify",
-};
-
-static const std::unordered_set<std::string> INDENT_CLOSE = {
-    "endmodule",   "endinterface", "endprogram",  "endpackage",  "endclass",   "endfunction",
-    "endtask",     "end",          "join",        "join_any",    "join_none",  "endcase",
-    "endgenerate", "endgroup",     "endproperty", "endsequence", "endchecker", "endclocking",
-    "endconfig",   "endprimitive", "endspecify",  "endtable",
-};
-
-static const std::unordered_set<std::string> ALWAYS_UNARY = {
-    "~", "!", "~&", "~|", "~^", "^~", "++", "--",
-};
-
-static const std::unordered_set<std::string> ALWAYS_BINARY = {
-    "===", "!==", "==", "!=", ">=", "->", "<->", "&&",  "||",   "**",   "##", "|->", "+=", "-=",
-    "*=",  "/=",  "%=", "&=", "|=", "^=", "<<=", ">>=", "<<<=", ">>>=", "*",  "/",   "%",
-};
-
-static const std::unordered_set<std::string> PP_COND_WITH = {"`ifdef", "`ifndef", "`elsif"};
-static const std::unordered_set<std::string> PP_COND_BARE = {"`else", "`endif"};
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -178,8 +106,138 @@ static bool has(const std::unordered_set<std::string>& s, const std::string& k) 
     return s.count(k) > 0;
 }
 
+static bool is_type_keyword(TokenKind kind) {
+    switch (kind) {
+        case TokenKind::LogicKeyword:
+        case TokenKind::WireKeyword:
+        case TokenKind::RegKeyword:
+        case TokenKind::BitKeyword:
+        case TokenKind::ByteKeyword:
+        case TokenKind::ShortIntKeyword:
+        case TokenKind::IntKeyword:
+        case TokenKind::LongIntKeyword:
+        case TokenKind::IntegerKeyword:
+        case TokenKind::RealKeyword:
+        case TokenKind::RealTimeKeyword:
+        case TokenKind::ShortRealKeyword:
+        case TokenKind::TimeKeyword:
+        case TokenKind::StringKeyword:
+        case TokenKind::CHandleKeyword:
+        case TokenKind::EventKeyword:
+        case TokenKind::VoidKeyword:
+        case TokenKind::SignedKeyword:
+        case TokenKind::UnsignedKeyword:
+        case TokenKind::PackedKeyword:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool is_indent_open(TokenKind kind) {
+    switch (kind) {
+        case TokenKind::ModuleKeyword:
+        case TokenKind::MacromoduleKeyword:
+        case TokenKind::InterfaceKeyword:
+        case TokenKind::ProgramKeyword:
+        case TokenKind::PackageKeyword:
+        case TokenKind::ClassKeyword:
+        case TokenKind::FunctionKeyword:
+        case TokenKind::TaskKeyword:
+        case TokenKind::BeginKeyword:
+        case TokenKind::ForkKeyword:
+        case TokenKind::CaseKeyword:
+        case TokenKind::CaseXKeyword:
+        case TokenKind::CaseZKeyword:
+        case TokenKind::GenerateKeyword:
+        case TokenKind::CoverGroupKeyword:
+        case TokenKind::PropertyKeyword:
+        case TokenKind::SequenceKeyword:
+        case TokenKind::CheckerKeyword:
+        case TokenKind::ClockingKeyword:
+        case TokenKind::ConfigKeyword:
+        case TokenKind::PrimitiveKeyword:
+        case TokenKind::SpecifyKeyword:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool is_block_open(TokenKind kind) {
+    switch (kind) {
+        case TokenKind::BeginKeyword:
+        case TokenKind::ForkKeyword:
+        case TokenKind::CaseKeyword:
+        case TokenKind::CaseXKeyword:
+        case TokenKind::CaseZKeyword:
+        case TokenKind::GenerateKeyword:
+        case TokenKind::CoverGroupKeyword:
+        case TokenKind::PropertyKeyword:
+        case TokenKind::SequenceKeyword:
+        case TokenKind::CheckerKeyword:
+        case TokenKind::ClockingKeyword:
+        case TokenKind::ConfigKeyword:
+        case TokenKind::PrimitiveKeyword:
+        case TokenKind::SpecifyKeyword:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool is_indent_close(TokenKind kind) {
+    switch (kind) {
+        case TokenKind::EndModuleKeyword:
+        case TokenKind::EndInterfaceKeyword:
+        case TokenKind::EndProgramKeyword:
+        case TokenKind::EndPackageKeyword:
+        case TokenKind::EndClassKeyword:
+        case TokenKind::EndFunctionKeyword:
+        case TokenKind::EndTaskKeyword:
+        case TokenKind::EndKeyword:
+        case TokenKind::JoinKeyword:
+        case TokenKind::JoinAnyKeyword:
+        case TokenKind::JoinNoneKeyword:
+        case TokenKind::EndCaseKeyword:
+        case TokenKind::EndGenerateKeyword:
+        case TokenKind::EndGroupKeyword:
+        case TokenKind::EndPropertyKeyword:
+        case TokenKind::EndSequenceKeyword:
+        case TokenKind::EndCheckerKeyword:
+        case TokenKind::EndClockingKeyword:
+        case TokenKind::EndConfigKeyword:
+        case TokenKind::EndPrimitiveKeyword:
+        case TokenKind::EndSpecifyKeyword:
+        case TokenKind::EndTableKeyword:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool is_pp_cond_with(syntax::SyntaxKind kind) {
+    return kind == syntax::SyntaxKind::IfDefDirective ||
+           kind == syntax::SyntaxKind::IfNDefDirective ||
+           kind == syntax::SyntaxKind::ElsIfDirective;
+}
+
+static bool is_pp_cond_bare(syntax::SyntaxKind kind) {
+    return kind == syntax::SyntaxKind::ElseDirective ||
+           kind == syntax::SyntaxKind::EndIfDirective;
+}
+
+static bool is_macro_usage(const Tok& t) {
+    return t.kind == TokenKind::MacroUsage ||
+           (t.kind == TokenKind::Directive && t.directive_kind == syntax::SyntaxKind::MacroUsage);
+}
+
+static bool is_line_directive(const Tok& t) {
+    return t.directive && !is_macro_usage(t);
+}
+
 static bool is_keyword(const Tok& t) {
-    return !t.directive && !t.comment && !t.whitespace && has(SV_KW, t.lo);
+    return !t.directive && !t.comment && !t.whitespace && LexerFacts::isKeyword(t.kind);
 }
 
 static bool is_constraint_keyword(const Tok& t) {
@@ -267,7 +325,21 @@ static bool is_close_group(const Tok& t) { return t.text == ")" || t.text == "]"
 
 static bool is_hierarchy(const Tok& t) { return t.text == "." || t.text == "::"; }
 
-static bool is_unary_op(const Tok& t) { return has(ALWAYS_UNARY, t.text); }
+static bool is_unary_op(const Tok& t) {
+    switch (t.kind) {
+        case TokenKind::Tilde:
+        case TokenKind::Exclamation:
+        case TokenKind::TildeAnd:
+        case TokenKind::TildeOr:
+        case TokenKind::TildeXor:
+        case TokenKind::XorTilde:
+        case TokenKind::DoublePlus:
+        case TokenKind::DoubleMinus:
+            return true;
+        default:
+            return false;
+    }
+}
 
 static bool is_combined_operator_token(TokenKind kind) {
     switch (kind) {
@@ -330,29 +402,105 @@ static bool is_combined_operator_token(TokenKind kind) {
 }
 
 static bool is_control_keyword(const Tok& t) {
-    return is_keyword(t) &&
-           (t.lo == "if" || t.lo == "for" || t.lo == "foreach" || t.lo == "while" ||
-            t.lo == "repeat" || t.lo == "case" || t.lo == "casex" || t.lo == "casez");
+    switch (t.kind) {
+        case TokenKind::IfKeyword:
+        case TokenKind::ForKeyword:
+        case TokenKind::ForeachKeyword:
+        case TokenKind::WhileKeyword:
+        case TokenKind::RepeatKeyword:
+        case TokenKind::CaseKeyword:
+        case TokenKind::CaseXKeyword:
+        case TokenKind::CaseZKeyword:
+            return is_keyword(t);
+        default:
+            return false;
+    }
 }
 
 static bool is_procedural_event_keyword(const Tok& t) {
-    return is_keyword(t) && (t.lo == "always" || t.lo == "always_ff" || t.lo == "always_comb" ||
-                             t.lo == "always_latch");
+    switch (t.kind) {
+        case TokenKind::AlwaysKeyword:
+        case TokenKind::AlwaysFFKeyword:
+        case TokenKind::AlwaysCombKeyword:
+        case TokenKind::AlwaysLatchKeyword:
+            return is_keyword(t);
+        default:
+            return false;
+    }
 }
 
 static bool is_binary_op(const Tok& t) {
-    static const std::unordered_set<std::string> EXTRA_BINARY = {
-        "+",   "-",   "^",  "&",  "|", "<=", "<",   ">",   "?",      "<<", ">>",
-        "<<<", ">>>", "->", "<->", "|->", "inside", "&&&"};
-    return has(ALWAYS_BINARY, t.text) || has(EXTRA_BINARY, t.text);
+    switch (t.kind) {
+        case TokenKind::TripleEquals:
+        case TokenKind::ExclamationDoubleEquals:
+        case TokenKind::DoubleEquals:
+        case TokenKind::ExclamationEquals:
+        case TokenKind::GreaterThanEquals:
+        case TokenKind::MinusArrow:
+        case TokenKind::MinusDoubleArrow:
+        case TokenKind::DoubleAnd:
+        case TokenKind::DoubleOr:
+        case TokenKind::DoubleStar:
+        case TokenKind::DoubleHash:
+        case TokenKind::OrMinusArrow:
+        case TokenKind::PlusEqual:
+        case TokenKind::MinusEqual:
+        case TokenKind::StarEqual:
+        case TokenKind::SlashEqual:
+        case TokenKind::PercentEqual:
+        case TokenKind::AndEqual:
+        case TokenKind::OrEqual:
+        case TokenKind::XorEqual:
+        case TokenKind::LeftShiftEqual:
+        case TokenKind::RightShiftEqual:
+        case TokenKind::TripleLeftShiftEqual:
+        case TokenKind::TripleRightShiftEqual:
+        case TokenKind::Star:
+        case TokenKind::Slash:
+        case TokenKind::Percent:
+        case TokenKind::Plus:
+        case TokenKind::Minus:
+        case TokenKind::Xor:
+        case TokenKind::And:
+        case TokenKind::Or:
+        case TokenKind::LessThanEquals:
+        case TokenKind::LessThan:
+        case TokenKind::GreaterThan:
+        case TokenKind::Question:
+        case TokenKind::LeftShift:
+        case TokenKind::RightShift:
+        case TokenKind::TripleLeftShift:
+        case TokenKind::TripleRightShift:
+        case TokenKind::TripleAnd:
+        case TokenKind::InsideKeyword:
+            return true;
+        default:
+            return false;
+    }
 }
 
 static bool is_assignment_op(const Tok& t, bool in_parens = false) {
-    if (t.text == "<=" && in_parens)
+    if (t.kind == TokenKind::LessThanEquals && in_parens)
         return false;
-    static const std::unordered_set<std::string> ASSIGN = {
-        "=", "<=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "<<<=", ">>>="};
-    return has(ASSIGN, t.text);
+    switch (t.kind) {
+        case TokenKind::Equals:
+        case TokenKind::LessThanEquals:
+        case TokenKind::PlusEqual:
+        case TokenKind::MinusEqual:
+        case TokenKind::StarEqual:
+        case TokenKind::SlashEqual:
+        case TokenKind::PercentEqual:
+        case TokenKind::AndEqual:
+        case TokenKind::OrEqual:
+        case TokenKind::XorEqual:
+        case TokenKind::LeftShiftEqual:
+        case TokenKind::RightShiftEqual:
+        case TokenKind::TripleLeftShiftEqual:
+        case TokenKind::TripleRightShiftEqual:
+            return true;
+        default:
+            return false;
+    }
 }
 
 static bool binary_space_before(const std::string& mode) {
@@ -538,10 +686,7 @@ static std::vector<std::pair<int, int>> find_disabled(const std::string& src) {
         while (j < n && (src[j] == ' ' || src[j] == '\t'))
             ++j;
         if (j >= n || src[j] != '(') {
-            while (j < n && src[j] != '\n')
-                ++j;
-            out.push_back({(int)line_start, (int)j});
-            i = j;
+            i = name_end - 1;
             continue;
         }
 
@@ -606,7 +751,7 @@ static int spaces_req(const Tok& L, const Tok& R, const FormatOptions& opts, boo
     bool L_assign = is_assignment_op(L, in_parens);
     bool R_assign = is_assignment_op(R, in_parens);
 
-    if (L.directive || R.directive)
+    if (is_line_directive(L) || is_line_directive(R))
         return 0;
     if (R.comment)
         return 1;
@@ -645,7 +790,7 @@ static int spaces_req(const Tok& L, const Tok& R, const FormatOptions& opts, boo
                              : ((lx == ":") ? 1 : 0);
     if (lx == ";")
         return in_for_header ? (binary_space_after(sp.semicolon_spacing) ? 1 : 0) : 1;
-    if (has(INDENT_CLOSE, L.lo) && rx == ":")
+    if (is_indent_close(L.kind) && rx == ":")
         return 0;
     if (lx == "@")
         return procedural_at ? (binary_space_after(sp.procedural_event_control_at_spacing) ? 1 : 0)
@@ -671,6 +816,8 @@ static int spaces_req(const Tok& L, const Tok& R, const FormatOptions& opts, boo
     if (in_dim && (lx == ":" || rx == ":"))
         return (lx == ":") ? (binary_space_after(sp.range_colon_spacing) ? 1 : 0)
                            : (binary_space_before(sp.range_colon_spacing) ? 1 : 0);
+    if (L.kind == TokenKind::InsideKeyword || R.kind == TokenKind::InsideKeyword)
+        return 1;
     if ((is_binary_op(L) && !L_assign) || (is_binary_op(R) && !R_assign)) {
         if (is_binary_op(L) && is_unary_op(R))
             return 1;
@@ -695,7 +842,7 @@ static int spaces_req(const Tok& L, const Tok& R, const FormatOptions& opts, boo
             return 0;
         if (lx == ")")
             return 1;
-        if (ll == "wait")
+        if (L.kind == TokenKind::WaitKeyword)
             return 0;
         if (is_identifier(L))
             return 0;
@@ -708,7 +855,7 @@ static int spaces_req(const Tok& L, const Tok& R, const FormatOptions& opts, boo
     if (lx == ":")
         return in_dim ? 0 : 1;
     if (rx == ":") {
-        if (ll == "default")
+        if (L.kind == TokenKind::DefaultKeyword)
             return 0;
         if (in_dim)
             return 0;
@@ -723,7 +870,7 @@ static int spaces_req(const Tok& L, const Tok& R, const FormatOptions& opts, boo
     if (rx == "[") {
         if (lx == "]")
             return 0;
-        if (is_keyword(L) && has(TYPE_KW, ll))
+        if (is_type_keyword(L.kind))
             return 1;
         return 0;
     }
@@ -759,7 +906,7 @@ static SD break_dec(const Tok& L, const Tok& R, const FormatOptions& opts, bool 
 
     if (in_dim && lx != ":" && lx != "[" && lx != "]" && rx != ":" && rx != "[" && rx != "]")
         return SD::Preserve;
-    if (R.directive || L.directive)
+    if (is_line_directive(R) || is_line_directive(L))
         return SD::MustWrap;
     if (L.comment && L.text.find('\n') != std::string::npos)
         return SD::MustWrap;
@@ -767,12 +914,12 @@ static SD break_dec(const Tok& L, const Tok& R, const FormatOptions& opts, bool 
         return SD::MustWrap;
     if (is_unary_op(L))
         return SD::MustAppend;
-    if (has(INDENT_CLOSE, ll) && rx == ":")
+    if (is_indent_close(L.kind) && rx == ":")
         return SD::MustAppend;
-    if (has(INDENT_CLOSE, rl))
+    if (is_indent_close(R.kind))
         return SD::MustWrap;
     if (is_else_keyword(R)) {
-        if (ll == "end")
+        if (L.kind == TokenKind::EndKeyword)
             return opts.statement.wrap_end_else_clauses ? SD::MustWrap : SD::MustAppend;
         if (L.kind == TokenKind::CloseBrace)
             return opts.statement.wrap_end_else_clauses ? SD::MustWrap : SD::MustAppend;
@@ -791,7 +938,8 @@ static SD break_dec(const Tok& L, const Tok& R, const FormatOptions& opts, bool 
 }
 
 static void push_tok(std::vector<Tok>& toks, TokenKind kind, std::string text, int pos,
-                     bool whitespace = false, bool comment = false, bool directive = false) {
+                     bool whitespace = false, bool comment = false, bool directive = false,
+                     syntax::SyntaxKind directive_kind = syntax::SyntaxKind::Unknown) {
     Tok t;
     t.kind = kind;
     t.lo = lower(text);
@@ -800,6 +948,7 @@ static void push_tok(std::vector<Tok>& toks, TokenKind kind, std::string text, i
     t.whitespace = whitespace;
     t.comment = comment;
     t.directive = directive;
+    t.directive_kind = directive_kind;
     toks.push_back(std::move(t));
 }
 
@@ -996,15 +1145,8 @@ static std::vector<Tok> collect_lexer_tokens(const std::string& source) {
             size_t first = line_start;
             while (first < off && (source[first] == ' ' || source[first] == '\t'))
                 ++first;
-            size_t name_end = off + 1;
-            while (name_end < source.size() &&
-                   (std::isalnum((unsigned char)source[name_end]) || source[name_end] == '_' ||
-                    source[name_end] == '$'))
-                ++name_end;
-            std::string name = source.substr(off, name_end - off);
-            static const std::unordered_set<std::string> DIRECTIVES = {
-                "`include", "`define", "`ifdef", "`ifndef", "`elsif", "`else", "`endif"};
-            if (first == off && has(DIRECTIVES, name)) {
+            if (token.kind == TokenKind::Directive &&
+                token.directiveKind() != syntax::SyntaxKind::MacroUsage && first == off) {
                 size_t end = off;
                 do {
                     while (end < source.size() && source[end] != '\n')
@@ -1015,7 +1157,7 @@ static std::vector<Tok> collect_lexer_tokens(const std::string& source) {
                         ++end;
                 } while (end < source.size());
                 push_tok(toks, token.kind, source.substr(off, end - off), (int)off, false, false,
-                         true);
+                         true, token.directiveKind());
                 cursor = std::max(cursor, end);
                 continue;
             }
@@ -1040,8 +1182,12 @@ static std::vector<Tok> collect_lexer_tokens(const std::string& source) {
             cursor = std::max(cursor, off + 1);
             continue;
         }
-        if (!raw.empty())
-            push_tok(toks, token.kind, raw, (int)off);
+        if (!raw.empty()) {
+            syntax::SyntaxKind directive_kind = syntax::SyntaxKind::Unknown;
+            if (token.kind == TokenKind::Directive)
+                directive_kind = token.directiveKind();
+            push_tok(toks, token.kind, raw, (int)off, false, false, false, directive_kind);
+        }
         cursor = std::max(cursor, off + raw.size());
     }
     if (cursor < source.size())
@@ -3731,7 +3877,7 @@ static PortListEntryKind classify_portlist_entry(const std::string& text) {
             continue;
         if (tok.comment)
             return PortListEntryKind::Comment;
-        if (tok.directive)
+        if (is_line_directive(tok))
             return PortListEntryKind::Directive;
         if (is_port_direction_token(tok))
             return PortListEntryKind::Port;
@@ -3974,7 +4120,7 @@ static std::vector<std::string> format_portlist_pass(std::vector<std::string> li
                 for (const auto& tok : collect_lexer_tokens(rest)) {
                     if (tok.whitespace)
                         continue;
-                    if (tok.directive && tok.pos == 0) {
+                    if (is_line_directive(tok) && tok.pos == 0) {
                         trimmed_ports.push_back(trim_all_copy(tok.text));
                         rest = trim_all_copy(rest.substr(tok.text.size()));
                         consumed_directive = true;
@@ -4629,8 +4775,8 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
     out.reserve(input.size() + input.size() / 4); // pre-allocate ~25% extra
 
     // indent_level — current nesting depth (in units of indent_unit).
-    // indent_stack — stack of how much each INDENT_OPEN keyword added, so
-    //               the matching INDENT_CLOSE can pop the exact same amount.
+    // indent_stack — stack of how much each indent-opening keyword added, so
+    //               the matching indent-closing keyword can pop the exact same amount.
     //               (outmost module/interface/package blocks add
     //                opts.default_indent_level_inside_outmost_block, everything else adds 1.)
     int indent_level = 0;
@@ -4688,7 +4834,7 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
     int constraint_depth = 0;
 
     // case_expr_pending / case_expr_depth
-    //   After `case`/`casex`/`casez`/`caseinside` we expect a `(expr)`.
+    //   After `case`/`casex`/`casez` we expect a `(expr)`.
     //   pending goes true at the keyword; depth records the paren nesting level
     //   of the opening `(`.  When we see the matching `)`, we schedule a newline
     //   (the case items start on the next line).
@@ -4718,6 +4864,7 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
     // Import/export declarations can contain `function` / `task` keywords, but
     // those keywords are part of the declaration and do not open SV blocks.
     bool in_import_export_decl = false;
+    bool in_extern_decl = false;
 
     // brace_stk — stack that records whether each open `{` is a struct/union
     //             brace (value "struct") or something else ("other").
@@ -4776,7 +4923,7 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
     //   D. Handle inline comments (don't let pending_nl split them off).
     //   E. Flush pending newlines or append-space depending on break decision.
     //   F. Handle single-statement indent (no `begin` after if/for/while).
-    //   G. Decrement indent BEFORE emitting INDENT_CLOSE keywords (end, endmodule, …)
+    //   G. Decrement indent BEFORE emitting indent-closing keywords (end, endmodule, …)
     //      so the closing keyword aligns with the matching open keyword.
     //   H. Emit the token text.
     //   I. Record orig→fmt line mapping.
@@ -4893,7 +5040,7 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
         // We must append it to the same line as `end` (MustAppend) and must
         // NOT treat it as a new control-expression header.
         do_while_tail = false;
-        if (prev && prev->lo == "end" && is_keyword(tok) && tok.lo == "while") {
+        if (prev && prev->kind == TokenKind::EndKeyword && tok.kind == TokenKind::WhileKeyword) {
             if (do_depth > 0) {
                 dec = SD::MustAppend;
                 --do_depth;
@@ -4905,7 +5052,9 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
         // In `disable <block_name>;`, the token after `disable` names the
         // target block. It must not be treated as a structural keyword even
         // when the target is `fork`.
-        bool disable_target = prev && prev->lo == "disable";
+        bool disable_target = prev && prev->kind == TokenKind::DisableKeyword;
+        bool wait_fork_target = prev && prev->kind == TokenKind::WaitKeyword &&
+                                tok.kind == TokenKind::ForkKeyword;
 
         // --- Block label: keep `begin: label` on one line ---
         if (block_label_state == 1 && !tok.whitespace && !tok.comment) {
@@ -4969,13 +5118,13 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
         // condition.  We wait until we are truly at the start of a new line
         // (at_bol) to decide:
         //   • If the next token is `begin` → no extra indent needed (begin
-        //     will open its own indented block via INDENT_OPEN).
+        //     will open its own indented block as an indent-opening keyword).
         //   • Otherwise → bump indent_level by 1 for this single statement.
         if (single_stmt_pending && at_bol) {
             if (constraint_depth > 0 && tok_is(tok, "{", TokenKind::OpenBrace)) {
                 // Constraint if/else bodies use braces instead of begin/end; let the
                 // brace handler below create the indentation scope.
-            } else if (is_keyword(tok) && tok.lo == "begin") {
+            } else if (tok.kind == TokenKind::BeginKeyword) {
                 single_stmt_pending = false; // begin handles its own indent
             } else {
                 ++indent_level;
@@ -4986,12 +5135,12 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
 
         // --- G. Indent-close: decrement indent BEFORE emitting the token ---
         // Keywords like `end`, `endmodule`, `endfunction`, `join`, etc. are
-        // in INDENT_CLOSE.  They should appear at the SAME indentation level
+        // indent-closing keywords.  They should appear at the SAME indentation level
         // as the matching open keyword, so we reduce indent_level first.
         //
         // Closing `}` of a struct/union block works the same way — the `}`
         // should align with the `struct {` line.
-        if (is_keyword(tok) && has(INDENT_CLOSE, tok.lo)) {
+        if (is_indent_close(tok.kind)) {
             int delta = indent_stack.empty() ? 1 : indent_stack.back();
             if (!indent_stack.empty())
                 indent_stack.pop_back();
@@ -5022,8 +5171,8 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
             ++paren_depth;
             paren_stack.push_back(prev ? classify_paren(*prev, prev_at_procedural)
                                        : ParenKind::Ordinary);
-            for_header_stack.push_back(prev && is_keyword(*prev) &&
-                                       (prev->lo == "for" || prev->lo == "foreach"));
+            for_header_stack.push_back(prev && (prev->kind == TokenKind::ForKeyword ||
+                                                prev->kind == TokenKind::ForeachKeyword));
             if (case_expr_pending) {
                 case_expr_depth = paren_depth; // remember which ')' ends the case expr
                 case_expr_pending = false;
@@ -5056,55 +5205,67 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
 
         // --- K. Post-emit housekeeping ---
         // After emitting a token, update state for the NEXT token:
-        //   • Open new indent levels for INDENT_OPEN keywords.
+        //   • Open new indent levels for indent-opening keywords.
         //   • Schedule newlines (pending_nl) after block-opening keywords, `;`, etc.
         //   • Set flags for upcoming special tokens (case expr, control expr, struct).
         if (is_keyword(tok)) {
             // Count `do` depth so `end while` can be recognized as do…while tail.
-            if (tok.lo == "do")
+            if (tok.kind == TokenKind::DoKeyword)
                 ++do_depth;
 
-            if (tok.lo == "import" || tok.lo == "export")
+            if (tok.kind == TokenKind::ImportKeyword || tok.kind == TokenKind::ExportKeyword)
                 in_import_export_decl = true;
+            if (tok.kind == TokenKind::ExternKeyword)
+                in_extern_decl = true;
 
-            // After `case`/`casex`/`casez`/`caseinside`, expect `(expr)`.
+            // After `case`/`casex`/`casez`, expect `(expr)`.
             // When the `)` arrives we'll emit a newline before the case items.
-            if (tok.lo == "case" || tok.lo == "casex" || tok.lo == "casez" ||
-                tok.lo == "caseinside")
+            if (tok.kind == TokenKind::CaseKeyword || tok.kind == TokenKind::CaseXKeyword ||
+                tok.kind == TokenKind::CaseZKeyword)
                 case_expr_pending = true;
 
             // After `if`/`for`/`foreach`/`while`/`repeat`, expect `(cond)`.
             // When the `)` arrives we'll decide single-statement indentation.
             // `while` that closes a do…while (do_while_tail) is excluded.
-            if (tok.lo == "if" || tok.lo == "for" || tok.lo == "foreach" ||
-                (tok.lo == "while" && !do_while_tail) || tok.lo == "repeat")
+            if (tok.kind == TokenKind::IfKeyword || tok.kind == TokenKind::ForKeyword ||
+                tok.kind == TokenKind::ForeachKeyword ||
+                (tok.kind == TokenKind::WhileKeyword && !do_while_tail) ||
+                tok.kind == TokenKind::RepeatKeyword)
                 control_expr_pending = true;
 
             // `else` bodies without begin/end should be formatted like other
             // single-statement control bodies.
-            if (tok.lo == "else") {
+            if (tok.kind == TokenKind::ElseKeyword) {
                 single_stmt_pending = true;
                 pending_nl = true;
             }
 
             // `begin` cancels single_stmt_pending set by a preceding if/for/while/else,
             // because begin…end is its own indented block.
-            if (tok.lo == "begin")
+            if (tok.kind == TokenKind::BeginKeyword)
                 single_stmt_pending = false;
 
             if (is_constraint_keyword(tok))
                 constraint_pend = true;
 
             bool import_export_function_or_task = in_import_export_decl &&
-                                                  (tok.lo == "function" || tok.lo == "task");
-            bool typedef_class_forward_decl = tok.lo == "class" && prev && prev->lo == "typedef";
-            if (has(INDENT_OPEN, tok.lo) && !disable_target && !import_export_function_or_task &&
+                                                  (tok.kind == TokenKind::FunctionKeyword ||
+                                                   tok.kind == TokenKind::TaskKeyword);
+            bool extern_function_or_task = in_extern_decl &&
+                                           (tok.kind == TokenKind::FunctionKeyword ||
+                                            tok.kind == TokenKind::TaskKeyword);
+            bool typedef_class_forward_decl = tok.kind == TokenKind::ClassKeyword && prev &&
+                                              prev->kind == TokenKind::TypedefKeyword;
+            if (is_indent_open(tok.kind) && !disable_target && !wait_fork_target &&
+                !import_export_function_or_task && !extern_function_or_task &&
                 !typedef_class_forward_decl) {
                 // Keywords that increase indentation for everything inside them.
                 // Outmost design blocks use a configurable delta (default 1);
                 // everything else adds exactly 1 level.
-                int delta = (tok.lo == "module" || tok.lo == "macromodule" ||
-                             tok.lo == "interface" || tok.lo == "package")
+                int delta = (tok.kind == TokenKind::ModuleKeyword ||
+                             tok.kind == TokenKind::MacromoduleKeyword ||
+                             tok.kind == TokenKind::InterfaceKeyword ||
+                             tok.kind == TokenKind::PackageKeyword)
                                 ? opts.default_indent_level_inside_outmost_block
                                 : 1;
                 indent_level += delta;
@@ -5112,14 +5273,14 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
                 // Block-opening keywords (begin, fork, …) also schedule a newline
                 // so the first statement inside appears on the next line.
                 // `case` is handled separately via case_expr_pending.
-                if (has(BLOCK_OPEN, tok.lo) && tok.lo != "case" && tok.lo != "casex" &&
-                    tok.lo != "casez" && tok.lo != "caseinside")
+                if (is_block_open(tok.kind) && tok.kind != TokenKind::CaseKeyword &&
+                    tok.kind != TokenKind::CaseXKeyword && tok.kind != TokenKind::CaseZKeyword)
                     pending_nl = true;
-            } else if (has(INDENT_CLOSE, tok.lo)) {
+            } else if (is_indent_close(tok.kind)) {
                 // After emitting `end`/`endmodule`/etc. schedule a newline so
                 // the next statement starts on a fresh line.
                 pending_nl = true;
-            } else if (tok.lo == "struct" || tok.lo == "union") {
+            } else if (tok.kind == TokenKind::StructKeyword || tok.kind == TokenKind::UnionKeyword) {
                 // Next `{` should be treated as a struct/union brace (indented).
                 struct_pend = true;
             }
@@ -5153,6 +5314,7 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
             }
         } else if (tok_is(tok, ";", TokenKind::Semicolon)) {
             in_import_export_decl = false;
+            in_extern_decl = false;
             // Semicolon = end of statement.
             // At top-level (paren_depth==0) schedule a newline after it.
             // Inside `for (init; cond; incr)` paren_depth > 0 → no newline.
@@ -5164,28 +5326,28 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
                 indent_level = std::max(0, indent_level - 1);
                 single_stmt_active = false;
             }
-        } else if (tok.directive) {
+        } else if (is_line_directive(tok)) {
             // Compiler directives (`define, `include, `ifdef, …) always end
             // their logical line → schedule a newline after them.
             pending_nl = true;
+            if (is_pp_cond_bare(tok.directive_kind) || is_pp_cond_with(tok.directive_kind))
+                in_pp_cond = false;
         } else if (tok.comment) {
             // A comment that is followed by a newline in the original whitespace
             // → schedule a newline (the comment ends the line).
             if (i + 1 < tokens.size() && tokens[i + 1].whitespace &&
                 tokens[i + 1].text.find('\n') != std::string::npos)
                 pending_nl = true;
-        } else if (is_identifier(tok)) {
-            // Preprocessor conditionals:
-            //   PP_COND_BARE: `else, `endif → no argument, newline immediately.
-            //   PP_COND_WITH: `ifdef, `ifndef, `elsif → argument follows on same
-            //                 line; set in_pp_cond so we newline after the arg.
-            //   in_pp_cond + any other identifier → that was the argument → newline.
-            if (has(PP_COND_BARE, tok.lo)) {
+        } else if (tok.kind == TokenKind::Directive) {
+            if (is_pp_cond_bare(tok.directive_kind)) {
                 pending_nl = true;
                 in_pp_cond = false;
-            } else if (has(PP_COND_WITH, tok.lo))
+            } else if (is_pp_cond_with(tok.directive_kind)) {
                 in_pp_cond = true;
-            else if (in_pp_cond) {
+            }
+        } else if (is_identifier(tok)) {
+            // Preprocessor condition argument after a split `ifdef-style directive.
+            if (in_pp_cond) {
                 pending_nl = true;
                 in_pp_cond = false;
             }
@@ -5202,10 +5364,9 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
             block_label_state = 0;
         }
         if (!tok.whitespace && !tok.comment && is_keyword(tok) &&
-            (tok.lo == "begin" || tok.lo == "fork" ||
-             tok.lo == "end" || tok.lo == "join" ||
-             tok.lo == "join_any" || tok.lo == "join_none") &&
-            !disable_target) {
+            (tok.kind == TokenKind::BeginKeyword || tok.kind == TokenKind::ForkKeyword ||
+             is_indent_close(tok.kind)) &&
+            !disable_target && !wait_fork_target) {
             block_label_state = 1;
         }
 
