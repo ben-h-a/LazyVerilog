@@ -1,568 +1,1088 @@
-# LazyVerilog Formatter Options
+# Formatter Options
 
-All formatter options live under `[format]` or one of its child sections in
-`lazyverilog.toml`.
+All options live under `[format]` in `lazyverilog.toml`.
 
-This document covers the formatter configuration currently implemented in the
-C++ server.
+---
 
-## `[format]`
+## Top-level options
 
 ### `indent_size`
 
-| type | default |
-|------|---------|
-| int | `2` |
-
 Number of spaces per indentation level.
 
-### `compact_indexing_and_selections`
+```toml
+[format]
+indent_size = 4
+```
 
-| type | default |
-|------|---------|
-| bool | `true` |
+```systemverilog
+// indent_size = 2
+module m_top;
+  logic a;
+endmodule
 
-Legacy option retained for compatibility. New configs should prefer `[format.spacing].dimension_binary_operator_spacing`.
+// indent_size = 4
+module m_top;
+    logic a;
+endmodule
+```
+
+---
 
 ### `blank_lines_between_items`
 
-| type | default |
-|------|---------|
-| int | `1` |
+Maximum number of blank lines preserved between top-level items (modules, always blocks, assigns, etc.). Extra blank lines beyond this value are collapsed.
 
-Maximum number of blank lines preserved between items.
+```toml
+[format]
+blank_lines_between_items = 1
+```
+
+```systemverilog
+// blank_lines_between_items = 1
+module m_top;
+  assign a = b;
+
+  assign c = d;
+endmodule
+
+// blank_lines_between_items = 0   (all blank lines removed)
+module m_top;
+  assign a = b;
+  assign c = d;
+endmodule
+```
+
+---
 
 ### `default_indent_level_inside_outmost_block`
 
-| type | default |
-|------|---------|
-| int | `1` |
+How many indent levels to add inside the outermost `module`, `interface`, or `package` block. Set to `0` to keep module body at column 0.
 
-Extra indentation levels applied inside outmost `module`, `interface`, and `package` blocks.
+```toml
+[format]
+default_indent_level_inside_outmost_block = 1
+```
+
+```systemverilog
+// default_indent_level_inside_outmost_block = 1
+module m_top;
+  logic a;
+endmodule
+
+// default_indent_level_inside_outmost_block = 0
+module m_top;
+logic a;
+endmodule
+```
+
+---
 
 ### `tab_align`
 
-| type | default |
-|------|---------|
-| bool | `false` |
+When `true`, alignment column widths are snapped to the nearest multiple of `indent_size`. Produces cleaner tab-stop-aligned columns across port declarations, variable declarations, instances, enums, and modports.
 
-When enabled, alignment columns are snapped up to the next multiple of
-`indent_size`. This affects aligned statements, port declarations, variable
-declarations, enum declarations, modports, and fixed-mode instance port
-connections. It still uses spaces; no literal tab characters are inserted.
+```toml
+[format]
+tab_align = true
+indent_size = 4
+```
 
-### `align_punctuation`
+```systemverilog
+// tab_align = false, indent_size = 4
+input  logic [7:0] data,
+output logic       valid
 
-| type | default |
-|------|---------|
-| bool | `false` |
+// tab_align = true, indent_size = 4  (columns snap to multiples of 4)
+input   logic   [7:0]   data,
+output  logic            valid
+```
 
-Stored in config. This codebase currently parses the option, but the formatter
-pass documented here focuses on statement, declaration, instance, port-list,
-and function/task-call formatting.
+---
+
 
 ### `enable_format_on_save`
 
-| type | default |
-|------|---------|
-| bool | `false` |
+When `true`, the LSP server responds to `textDocument/formatting` requests (triggered by editor save). When `false`, formatting requests return no edits.
 
-Editor integration setting.
+```toml
+[format]
+enable_format_on_save = true
+```
+
+---
 
 ### `safe_mode`
 
-| type | default |
-|------|---------|
-| bool | `false` |
+When `true`, the formatter verifies that no non-whitespace content changed after formatting. If a formatting bug would corrupt code, it throws `SafeModeError` and aborts instead of returning broken output.
 
-When `true`, formatting aborts if non-whitespace content changes.
+```toml
+[format]
+safe_mode = true
+```
 
-### `trailing_newline`
-
-| type | default |
-|------|---------|
-| bool | `true` |
-
-Controls whether formatted output ends with a trailing newline.
+---
 
 ## `[format.spacing]`
+
+Controls whitespace around operators, keywords, and delimiters.
+
+### `control_keyword_space`
+
+Insert a space between control keywords (`if`, `for`, `while`, etc.) and the opening parenthesis.
 
 ```toml
 [format.spacing]
 control_keyword_space = true
+```
+
+```systemverilog
+// control_keyword_space = true
+if (a) begin
+
+// control_keyword_space = false
+if(a) begin
+```
+
+---
+
+### `space_inside_parens`
+
+Insert spaces inside ordinary parentheses.
+
+```toml
+[format.spacing]
 space_inside_parens = false
+```
+
+```systemverilog
+// space_inside_parens = false
+assign a = foo(bar);
+
+// space_inside_parens = true
+assign a = foo( bar );
+```
+
+---
+
+### `space_inside_dimension_brackets`
+
+Insert spaces inside dimension brackets `[ ]`.
+
+```toml
+[format.spacing]
 space_inside_dimension_brackets = false
+```
+
+```systemverilog
+// space_inside_dimension_brackets = false
+logic [7:0] data;
+
+// space_inside_dimension_brackets = true
+logic [ 7:0 ] data;
+```
+
+---
+
+### `binary_operator_spacing`
+
+Controls spaces around binary operators (`+`, `-`, `*`, `==`, etc.) outside dimension brackets.
+
+Values: `"none"` | `"before"` | `"after"` | `"both"`
+
+```toml
+[format.spacing]
 binary_operator_spacing = "both"
+```
+
+```systemverilog
+// "both"
+assign c = a + b;
+// "none"
+assign c = a+b;
+// "before"
+assign c = a +b;
+// "after"
+assign c = a+ b;
+```
+
+---
+
+### `dimension_binary_operator_spacing`
+
+Controls spaces around binary operators **inside** dimension brackets `[...]`.
+
+Values: `"none"` | `"before"` | `"after"` | `"both"`
+
+```toml
+[format.spacing]
 dimension_binary_operator_spacing = "none"
+```
+
+```systemverilog
+// "none"
+logic [WIDTH-1:0] data;
+// "both"
+logic [WIDTH - 1:0] data;
+```
+
+---
+
+### `semicolon_spacing`
+
+Controls spaces around semicolons in `for`-loop headers.
+
+Values: `"none"` | `"before"` | `"after"` | `"both"`
+
+```toml
+[format.spacing]
 semicolon_spacing = "after"
+```
+
+```systemverilog
+// "after"
+for (int i = 0; i < 8; i++)
+// "both"
+for (int i = 0 ; i < 8 ; i++)
+// "none"
+for (int i = 0;i < 8;i++)
+```
+
+---
+
+### `range_colon_spacing`
+
+Controls spaces around the colon in range expressions inside `[...]`.
+
+Values: `"none"` | `"before"` | `"after"` | `"both"`
+
+```toml
+[format.spacing]
 range_colon_spacing = "none"
+```
+
+```systemverilog
+// "none"
+logic [7:0] data;
+// "both"
+logic [7 : 0] data;
+```
+
+---
+
+### `indexed_part_select_spacing`
+
+Controls spaces around indexed part-select operators `+:` and `-:`.
+
+Values: `"none"` | `"before"` | `"after"` | `"both"`
+
+```toml
+[format.spacing]
 indexed_part_select_spacing = "both"
+```
+
+```systemverilog
+// "both"
+data[offset +: WIDTH]
+// "none"
+data[offset+:WIDTH]
+```
+
+---
+
+### `procedural_event_control_at_spacing`
+
+Controls spaces around `@` in procedural event control (`always @(...)`).
+
+Values: `"none"` | `"before"` | `"after"` | `"both"`
+
+```toml
+[format.spacing]
 procedural_event_control_at_spacing = "before"
+```
+
+```systemverilog
+// "before"
+always @(posedge clk)
+// "after"
+always@ (posedge clk)
+// "both"
+always @ (posedge clk)
+// "none"
+always@(posedge clk)
+```
+
+---
+
+### `space_inside_event_control_parens`
+
+Insert spaces inside event control parentheses `@(...)`.
+
+```toml
+[format.spacing]
 space_inside_event_control_parens = false
+```
+
+```systemverilog
+// false
+always @(posedge clk)
+// true
+always @( posedge clk )
+```
+
+---
+
+### `assignment_operator_spacing`
+
+Controls spaces around assignment operators `=` and `<=`.
+
+Values: `"none"` | `"before"` | `"after"` | `"both"`
+
+```toml
+[format.spacing]
 assignment_operator_spacing = "both"
 ```
 
-Spacing mode values are `"none"`, `"before"`, `"after"`, and `"both"`.
-
-| option | default | effect |
-|--------|---------|--------|
-| `control_keyword_space` | `true` | Space between control-flow keywords and their header paren: `if (a)` vs `if(a)`. Applies to `if`, `else if`, `for`, `foreach`, `while`, `repeat`, `case`, `casex`, and `casez`; not function/task/system calls. |
-| `space_inside_parens` | `false` | Space just inside ordinary/control/grouping parentheses: `( a + b )`. Function/task/system call parens are excluded. |
-| `space_inside_dimension_brackets` | `false` | Space just inside packed/unpacked dimensions and select brackets: `[ WIDTH-1:0 ]`, `arr[ i ]`. |
-| `binary_operator_spacing` | `"both"` | Spacing around binary operators outside `[]`, excluding assignment and unary operators. |
-| `dimension_binary_operator_spacing` | `"none"` | Spacing around binary operators inside dimensions/selects, excluding range colons, indexed part-select operators, and unary operators. |
-| `semicolon_spacing` | `"after"` | Spacing around semicolons in `for`/`foreach` headers only. Statement terminators are not affected. |
-| `range_colon_spacing` | `"none"` | Spacing around range/select colons inside `[]`: `[hi:lo]`. Indexed part-select `+:`/`-:` is excluded. |
-| `indexed_part_select_spacing` | `"both"` | Spacing around indexed part-select operators as one unit: `arr[i +: 4]`. |
-| `procedural_event_control_at_spacing` | `"before"` | Spacing around `@` in procedural event controls after `always`, `always_ff`, `always_comb`, or `always_latch`. Standalone event controls are excluded. |
-| `space_inside_event_control_parens` | `false` | Space just inside procedural event-control parentheses: `always @( posedge clk )`. Normal parentheses are excluded. |
-| `assignment_operator_spacing` | `"both"` | Spacing around assignment operators (`=`, `<=`): `a = b` vs `a=b`. |
-
-Examples:
-
 ```systemverilog
-// defaults
-if (a + b)
-logic [WIDTH-1:0] data;
-arr[i+: 4]
-always @(posedge clk)
-
-// selected alternatives
-if( a+b )
-logic [ WIDTH - 1 : 0 ] data;
-arr[ i +: 4 ]
-always @ ( posedge clk )
+// "both"
+assign a = b;
+q <= d;
+// "none"
+assign a=b;
+q<=d;
 ```
 
+---
 
 ## `[format.statement]`
 
-```toml
-[format.statement]
-align = false
-align_adaptive = false
-lhs_min_width = 1
-wrap_end_else_clauses = false
-```
+Controls formatting of consecutive assignment statements.
 
 ### `align`
 
-| type | default |
-|------|---------|
-| bool | `false` |
+Align `=` and `<=` operators across consecutive assignment lines.
 
-Aligns consecutive assignment operators such as `=` and `<=`.
+```toml
+[format.statement]
+align = true
+```
+
+```systemverilog
+// align = true
+a      = 1;
+data   = 2;
+result = 3;
+
+// align = false
+a = 1;
+data = 2;
+result = 3;
+```
+
+---
 
 ### `align_adaptive`
 
-| type | default |
-|------|---------|
-| bool | `false` |
+When `true`, each line computes its own alignment width (minimum of `lhs_min_width` or the line's LHS width). When `false`, all consecutive lines in a group share the same column.
 
-When `false`, a group of aligned assignments shares one operator column.
+```toml
+[format.statement]
+align_adaptive = false
+```
 
-When `true`, each line uses at least `lhs_min_width`, but long left-hand sides
-do not force the whole group wider.
+```systemverilog
+// align = true
+// align_adaptive = false
+a               = 1;
+data            = 2;
+result          = 3;
+very_long_text  = 4;
+
+// align = true
+// align_adaptive = true
+a           = 1;
+data        = 2;
+result      = 3;
+very_long_text  = 4;
+
+---
 
 ### `lhs_min_width`
 
-| type | default |
-|------|---------|
-| int | `1` |
+Minimum character width of the left-hand side column before the assignment operator when `align` is `true`.
 
-Minimum left-hand-side width used by statement alignment.
+```toml
+[format.statement]
+lhs_min_width = 6
+```
+
+```systemverilog
+// lhs_min_width = 6
+a      = 1;
+data   = 2;
+
+// lhs_min_width = 1
+a    = 1;
+data = 2;
+```
+
+---
 
 ### `wrap_end_else_clauses`
 
-| type | default |
-|------|---------|
-| bool | `false` |
+When `true`, `else` after `end` is placed on a new line. When `false`, `end else` stays on the same line.
 
-Controls whether `end else` stays on one line or breaks across lines.
+```toml
+[format.statement]
+wrap_end_else_clauses = true
+```
+
+```systemverilog
+// wrap_end_else_clauses = true
+end
+else begin
+  ...
+end
+
+// wrap_end_else_clauses = false
+end else begin
+  ...
+end
+```
+
+---
 
 ## `[format.port_declaration]`
+
+Controls alignment of
+- ANSI port declarations inside module header.
+- non-ANSI port declarations inside module body.
+
+Port declarations are split into 5 sections:
+1. Direction (`input`, `output`, `inout`)
+2. Type + qualifier (`logic`, `wire signed`, etc.)
+3. Packed dimension (`[7:0]`)
+4. Port name
+5. Trailing (unpacked dimensions, `= default`, etc.)
+
+### `align`
+
+Enable column alignment of the 5 sections across consecutive port declarations.
 
 ```toml
 [format.port_declaration]
 align = true
-align_adaptive = false
-section1_min_width = 10
-section2_min_width = 20
-section3_min_width = 20
-section4_min_width = 30
-section5_min_width = 30
 ```
 
-Port declarations are aligned in contiguous blocks across five sections:
+```systemverilog
+// align = true
+input  logic [7:0]  data,
+output logic        valid
 
-| Section | Content |
-|---------|---------|
-| 1 | direction keyword |
-| 2 | type and signing |
-| 3 | packed dimension |
-| 4 | identifier |
-| 5 | unpacked dimension and default value |
+// align = false
+input logic [7:0] data,
+output logic valid
+```
 
-### `align`
-
-| type | default |
-|------|---------|
-| bool | `true` |
-
-Enables the port declaration alignment pass.
+---
 
 ### `align_adaptive`
 
-| type | default |
-|------|---------|
-| bool | `false` |
+When `true`, each port line computes column widths independently using its own content and the minimum widths, rather than aligning to the widest value across the entire port group.
 
-When `false`, a block uses shared maximum widths so columns line up vertically.
+```toml
+[format.port_declaration]
+align_adaptive = false
+```
 
-When `true`, each line uses the configured minimum widths independently. Long
-content keeps only the minimum required separating spaces instead of widening
-the whole block.
+---
 
-### `section1_min_width` ... `section5_min_width`
+### `section1_min_width` .. `section5_min_width`
 
-| type | default |
-|------|---------|
-| int | see example above |
+Minimum character width for each alignment section. When `tab_align` is `true`, these are snapped to indent grid.
 
-Minimum widths for the five port-declaration sections.
-
-Example:
+```toml
+[format.port_declaration]
+section1_min_width = 10   # direction column
+section2_min_width = 20   # type column
+section3_min_width = 20   # dimension column
+section4_min_width = 30   # port name column
+section5_min_width = 30   # trailing column
+```
 
 ```systemverilog
-input      logic        [7:0]        i_data;
-output     logic signed [15:0]       o_result;
-input      i_clk;
+// align = true
+// align_adaptive = true
+// section1_min_width = 10
+// section2_min_width = 11
+// section3_min_width = 12
+// section4_min_width = 13
+// section5_min_width = 14
+// tab_align = false
+input                            i_clk                      ;
+input                            i_rst_n                    ;
+input     logic      [1:0]       i_data       [7:0]         ;
+input     var byte               i_data2                    ;
+|        |           |           |            |             |
+ section1   section2    section3   section4       section5
 ```
+
+---
 
 ## `[format.var_declaration]`
 
-```toml
-[format.var_declaration]
-align = false
-align_adaptive = false
-section1_min_width = 0
-section2_min_width = 30
-section3_min_width = 30
-section4_min_width = 0
-```
+Controls alignment of variable/signal declarations (`logic`, `wire`, `reg`, etc.) in module body.
 
-Variable declarations are aligned in contiguous blocks across four sections:
-
-| Section | Content |
-|---------|---------|
-| 1 | type and optional signing |
-| 2 | packed dimension |
-| 3 | declarator |
-| 4 | unpacked dimension and initializer |
+Declarations are split into 4 sections:
+1. Type + qualifier (`logic`, `wire signed`, etc.)
+2. Packed dimension (`[7:0]`)
+3. Signal name
+4. Trailing (unpacked dimensions, initializers, etc.)
 
 ### `align`
 
-| type | default |
-|------|---------|
-| bool | `false` |
+Enable column alignment across consecutive variable declarations.
 
-Enables the variable declaration alignment pass.
+```toml
+[format.var_declaration]
+align = true
+```
+
+```systemverilog
+// align = true
+logic [7:0]  data;
+logic        valid;
+
+// align = false
+logic [7:0] data;
+logic valid;
+```
+
+---
 
 ### `align_adaptive`
 
-| type | default |
-|------|---------|
-| bool | `false` |
-
-Uses the same adaptive idea as port declarations: configured minimum widths are
-applied per line, and oversized content does not force the rest of the block to
-shift.
-
-### `section1_min_width` ... `section4_min_width`
-
-| type | default |
-|------|---------|
-| int | see example above |
-
-Minimum widths for the four variable-declaration sections.
-
-## `[format.function_call]`
-
-Formats function and task calls.
+Per-line adaptive alignment (same concept as port declarations).
 
 ```toml
-[format.function_call]
-break_policy = "auto"      # never | always | auto
-line_length = 100
-arg_count = null
-layout = "block"           # hanging | block
-indent_width = 4
-space_before_paren = false
-space_inside_paren = false
+[format.var_declaration]
+align_adaptive = false
 ```
 
-### `break_policy`
+---
 
-| type | default | values |
-|------|---------|--------|
-| string | `"auto"` | `"never"`, `"always"`, `"auto"` |
+### `section1_min_width` .. `section4_min_width`
 
-- `"never"` keeps calls on one line.
-- `"always"` breaks every recognized function/task call.
-- `"auto"` breaks when either `line_length` or `arg_count` says to break.
+Minimum character width for each section.
 
-### `line_length`
-
-| type | default |
-|------|---------|
-| int | `100` |
-
-Used only when `break_policy = "auto"`. If the rendered call would exceed this
-length, it breaks.
-
-### `arg_count`
-
-| type | default |
-|------|---------|
-| int or `null` | `null` |
-
-Used only when `break_policy = "auto"`. If not `null`, calls break when the
-argument count is greater than or equal to this value.
-
-In the current loader, `null` means "disabled".
-
-### `layout`
-
-| type | default | values |
-|------|---------|--------|
-| string | `"block"` | `"block"`, `"hanging"` |
-
-Block style:
+```toml
+[format.var_declaration]
+section1_min_width = 16    # type column
+section2_min_width = 12   # dimension column
+section3_min_width = 20   # signal name column
+section4_min_width = 16    # trailing column (0 disables trailing alignment)
+```
 
 ```systemverilog
-result = my_func(
-    arg1,
-    arg2,
-    arg3
-);
+logic           [7:0]       dout                = 8'hFF         ;
+logic           [8:0]       din                 = 8'hFF         ;
+packet_t        [1:0]       test_init           = 8'hFF         ;
+packet_t                    test_init2          = 8'hFF         ;
+|               |           |                   |               |
+    section1      section2          section3        section4
 ```
 
-Hanging style:
-
-```systemverilog
-result = my_func(arg1,
-                 arg2,
-                 arg3);
-```
-
-### `indent_width`
-
-| type | default |
-|------|---------|
-| int | `4` |
-
-Used only by `layout = "block"`. Controls indentation for broken argument
-lines.
-
-### `space_before_paren`
-
-| type | default |
-|------|---------|
-| bool | `false` |
-
-Controls `my_func(` vs `my_func (`.
-
-### `space_inside_paren`
-
-| type | default |
-|------|---------|
-| bool | `false` |
-
-Controls `my_func(a, b)` vs `my_func( a, b )` for unbroken calls.
+---
 
 ## `[format.instance]`
 
-```toml
-[format.instance]
-align = false
-port_indent_level = 1
-instance_port_name_width = 1
-instance_port_between_paren_width = 0
-align_adaptive = false
-```
-
-Formats named instance port connections into aligned multi-line blocks.
+Controls formatting of module instantiation port connections.
 
 ### `align`
 
-| type | default |
-|------|---------|
-| bool | `false` |
+Align port connections across lines in an instance.
 
-Enables instance port formatting for named connections.
+```toml
+[format.instance]
+align = true
+```
+
+```systemverilog
+// align = true
+m_fifo u_fifo (
+  .clk   (clk  ),
+  .data  (data ),
+  .valid (valid)
+);
+
+// align = false
+m_fifo u_fifo (
+  .clk(clk),
+  .data(data),
+  .valid(valid)
+);
+```
+
+---
 
 ### `port_indent_level`
 
-| type | default |
-|------|---------|
-| int | `1` |
+Number of indent levels for port lines relative to the instantiation line.
 
-Indent levels added for each port line inside the instance block.
+```toml
+[format.instance]
+port_indent_level = 1
+```
+
+```systemverilog
+// port_indent_level = 1, indent_size = 4
+m_fifo u_fifo (
+    .clk(clk)
+);
+
+// port_indent_level = 2, indent_size = 4
+m_fifo u_fifo (
+        .clk(clk)
+);
+```
+
+---
 
 ### `instance_port_name_width`
 
-| type | default |
-|------|---------|
-| int | `1` |
+Total field width from `.` to `(` — controls spacing between the port name and the opening parenthesis.
 
-Minimum width used for the port name section.
+```toml
+[format.instance]
+instance_port_name_width = 10
+```
+
+```systemverilog
+// instance_port_name_width = 10
+m_fifo u_fifo (
+    .clk       (clk  ),
+    .data      (data ),
+);
+```
+
+---
 
 ### `instance_port_between_paren_width`
 
-| type | default |
-|------|---------|
-| int | `0` |
+Total field width from `(` to `)` — controls spacing between the signal name and the closing parenthesis.
 
-Minimum width used for the signal text inside parentheses.
+```toml
+[format.instance]
+instance_port_between_paren_width = 10
+```
+
+```systemverilog
+// instance_port_between_paren_width = 10
+m_fifo u_fifo (
+    .clk  (clk       ),
+    .data (data      ),
+);
+```
+
+---
 
 ### `align_adaptive`
 
-| type | default |
-|------|---------|
-| bool | `false` |
+When `true`, each port line computes its own gap. When `false`, all ports in the instance share common alignment columns.
 
-When `false`, all named ports in the instance align to common columns.
+```toml
+[format.instance]
+```
 
-When `true`, each line falls back to the configured minimum widths
-independently, so unusually long names do not widen the whole instance.
+```systemverilog
+// align_adaptive = false
+m_fifo u_fifo (
+    .clk            (clk           ),
+    .data           (data          ),
+    .very_long_text (              ),
+    .din            (very_long_text)
+);
+// align_adaptive = true
+m_fifo u_fifo (
+    .clk   (clk       ),
+    .data  (data      ),
+    .very_long_text (data      ),
+    .din   (very_long_text)
+);
+```
 
-Compatibility note:
+---
 
-- Old configs may still use `align_instance_port_adaptive`.
-- New configs should use `align_adaptive`.
+## `[format.function_call]`
+
+Controls formatting of function/task calls.
+
+### `break_policy`
+
+When to break function call arguments onto separate lines.
+
+- `"never"` — always single-line
+- `"always"` — always break (if args exist)
+- `"auto"` — break when line exceeds `line_length` or argument count exceeds `arg_count`
+
+```toml
+[format.function_call]
+break_policy = "auto"
+```
+
+---
+
+### `line_length`
+
+When `break_policy = "auto"`, break if the single-line rendering exceeds this character width.
+
+```toml
+[format.function_call]
+line_length = 100
+```
+
+---
+
+### `arg_count`
+
+When `break_policy = "auto"`, break if the number of arguments is >= this value. Set to `-1` to disable arg-count breaking.
+
+```toml
+[format.function_call]
+arg_count = 3
+```
+
+```systemverilog
+// arg_count = 3, 2 args → stays single-line
+foo(a, b);
+
+// arg_count = 3, 3 args → breaks
+foo(
+  a,
+  b,
+  c
+);
+```
+
+---
+
+### `layout`
+
+How to indent broken arguments.
+
+- `"block"` — arguments indented one level from the call
+- `"hanging"` — arguments aligned to the opening parenthesis
+
+```toml
+[format.function_call]
+layout = "block"
+```
+
+```systemverilog
+// layout = "block"
+foo(
+  a,
+  b,
+  c
+);
+
+// layout = "hanging"
+foo(a,
+    b,
+    c);
+```
+
+---
+
+### `space_before_paren`
+
+Insert a space between the function name and the opening `(`.
+
+```toml
+[format.function_call]
+space_before_paren = false
+```
+
+```systemverilog
+// false
+foo(a, b);
+// true
+foo (a, b);
+```
+
+---
+
+### `space_inside_paren`
+
+Insert spaces inside function call parentheses.
+
+```toml
+[format.function_call]
+space_inside_paren = false
+```
+
+```systemverilog
+// false
+foo(a, b);
+// true
+foo( a, b );
+```
+
+---
+
+## `[format.function_declaration]`
+
+Controls formatting of `function` and `task` declaration port lists.
+
+### `layout`
+
+How to indent broken port arguments.
+
+- `"block"` — ports indented one level from the declaration
+- `"hanging"` — ports aligned to the opening parenthesis
+
+```toml
+[format.function_declaration]
+layout = "block"
+```
+
+```systemverilog
+// layout = "block"
+function void foo(
+  input logic a,
+  input logic b
+);
+
+// layout = "hanging"
+function void foo(input logic a,
+                  input logic b);
+```
+
+---
+
+### `line_length`
+
+Declarations shorter than this stay single-line. Declarations exceeding this are broken according to `layout`.
+
+```toml
+[format.function_declaration]
+line_length = 100
+```
+
+```systemverilog
+// line_length = 100, short declaration stays single-line
+function void foo(input logic a, input logic b);
+
+// line_length = 40, same declaration breaks
+function void foo(
+  input logic a,
+  input logic b
+);
+```
+
+---
 
 ## `[format.module]`
+
+Controls module header formatting.
+
+### `parameter_layout`
+
+How to lay out `#(...)` parameter lists when broken.
+
+- `"block"` — parameters indented one level
+- `"hanging"` — parameters aligned to `#(`
 
 ```toml
 [format.module]
 parameter_layout = "block"
-non_ansi_port_per_line_enabled = false
-non_ansi_port_per_line = 1
-non_ansi_port_max_line_length_enabled = false
+```
+
+```systemverilog
+// parameter_layout = "block"
+module m_top #(
+  parameter WIDTH = 8,
+  parameter DEPTH = 16
+)(
+  ...
+);
+
+// parameter_layout = "hanging"
+module m_top #(parameter WIDTH = 8,
+               parameter DEPTH = 16)(
+  ...
+);
+```
+
+---
+
+### `non_ansi_port_per_line_enabled` / `non_ansi_port_per_line`
+
+When enabled, non-ANSI port lists are wrapped with a fixed number of ports per line.
+
+```toml
+[format.module]
+non_ansi_port_per_line_enabled = true
+non_ansi_port_per_line = 3
+```
+
+```systemverilog
+// non_ansi_port_per_line = 3
+module m_top(
+  a, b, c,
+  d, e, f,
+  g
+);
+```
+
+---
+
+### `non_ansi_port_max_line_length_enabled` / `non_ansi_port_max_line_length`
+
+When enabled, non-ANSI port lists are wrapped based on maximum line length instead of a fixed port count. Mutually exclusive with `non_ansi_port_per_line` — if both are enabled, `non_ansi_port_per_line` takes priority.
+
+```toml
+[format.module]
+non_ansi_port_max_line_length_enabled = true
 non_ansi_port_max_line_length = 80
 ```
 
-Controls formatting of module parameter lists and non-ANSI module header port lists.
-
-### `parameter_layout`
-
-| type | default | values |
-|------|---------|--------|
-| string | `"block"` | `"block"`, `"hanging"` |
-
-Controls formatting of `#(...)` module parameter lists.
-
-`"block"` puts each parameter on its own indented line:
-
-```systemverilog
-module register #(
-    parameter type T = logic [7:0],
-    parameter int DEPTH = 8
-)(
-```
-
-`"hanging"` aligns subsequent parameters under the first parameter:
-
-```systemverilog
-module register #(parameter type T = logic [7:0],
-                  parameter int DEPTH = 8)(
-```
-
-### `non_ansi_port_per_line_enabled`
-### `non_ansi_port_per_line`
-
-When enabled, emits a fixed number of ports per line.
-
-### `non_ansi_port_max_line_length_enabled`
-### `non_ansi_port_max_line_length`
-
-When enabled, packs non-ANSI ports until the configured maximum line length
-would be exceeded.
+---
 
 ## `[format.enum_declaration]`
 
+Controls alignment of enum member declarations.
+
+### `align`
+
+Align enum names and values across members.
+
 ```toml
 [format.enum_declaration]
-align = false
+align = true
+```
+
+```systemverilog
+// align = true
+typedef enum logic [1:0] {
+  IDLE    = 2'b00,
+  ACTIVE  = 2'b01,
+  DONE    = 2'b10
+} state_t;
+
+// align = false
+typedef enum logic [1:0] {
+  IDLE = 2'b00,
+  ACTIVE = 2'b01,
+  DONE = 2'b10
+} state_t;
+```
+
+---
+
+### `align_adaptive`
+
+Per-member adaptive alignment instead of block-wide alignment.
+
+```toml
+[format.enum_declaration]
 align_adaptive = false
+```
+
+---
+
+### `enum_name_min_width`
+
+Minimum character width for the enum member name column.
+
+```toml
+[format.enum_declaration]
 enum_name_min_width = 1
+```
+
+---
+
+### `enum_value_min_width`
+
+Minimum character width for the enum value column. Set to `0` to disable value-column alignment.
+
+```toml
+[format.enum_declaration]
 enum_value_min_width = 0
 ```
 
-Formats `typedef enum ... { ... } name;` declarations into one enumerator per
-line. Enumerator lines are always indented by one formatter indent level.
-
-When `align = false`, enumerators are left-aligned with compact assignments:
-
-```systemverilog
-IDLE,
-BUSY = 2'd1,
-DONE
-```
-
-When `align = true`, `enum_name_min_width` and `enum_value_min_width` define
-minimum columns for enumerator names and assigned values. With
-`align_adaptive = false`, long names or values widen the whole enum block. With
-`align_adaptive = true`, long entries only affect their own line. If
-`[format].tab_align = true`, aligned enum columns are snapped to the
-`indent_size` grid.
+---
 
 ## `[format.modport]`
 
+Controls alignment of modport declarations inside interfaces.
+
+### `align`
+
+Align direction and signal columns across modport members.
+
 ```toml
 [format.modport]
-align = false
+align = true
+```
+
+```systemverilog
+// align = true
+modport master (
+  input  clk,
+  input  rst_n,
+  output valid
+);
+
+// align = false
+modport master (
+  input clk,
+  input rst_n,
+  output valid
+);
+```
+
+---
+
+### `align_adaptive`
+
+Per-line adaptive alignment for modport entries.
+
+```toml
+[format.modport]
 align_adaptive = false
+```
+
+---
+
+### `direction_min_width`
+
+Minimum character width for the direction column (`input`, `output`).
+
+```toml
+[format.modport]
 direction_min_width = 1
+```
+
+---
+
+### `signal_min_width`
+
+Minimum character width for the signal name column.
+
+```toml
+[format.modport]
 signal_min_width = 0
 ```
 
-Formats interface `modport` declarations into multi-line port lists. Port lines
-are always indented by one formatter indent level.
+---
 
-When `align = false`, modport items are left-aligned:
+## Disable regions
+
+The formatter respects inline disable comments. Everything between `// verilog_format: off` and `// verilog_format: on` is passed through verbatim. `` `define `` macro bodies are also passed through unchanged.
 
 ```systemverilog
-input clk,
-output data
+// verilog_format: off
+assign weird_spacing   =    preserved;
+// verilog_format: on
 ```
-
-When `align = true`, `direction_min_width` and `signal_min_width` define minimum
-columns for directions and signal names. With `align_adaptive = false`, long
-strings widen the whole modport block. With `align_adaptive = true`, long
-strings only affect their own line. If `[format].tab_align = true`, aligned
-modport columns are snapped to the `indent_size` grid.
-
-## Currently unsupported or limited SystemVerilog formatter syntax
-
-The formatter is intentionally conservative. The following constructs are not
-fully syntax-aware yet and may be left mostly as token-spaced text, or should be
-wrapped in `// verilog_format: off` / `on` if the exact layout matters:
-
-- UVM class-heavy code: macros such as `` `uvm_component_utils``, factory calls,
-  constraints, and long phase/task bodies.
-- Classes, covergroups, constraints, properties, sequences, checkers, and SVA
-  assertion expressions beyond basic indentation/token spacing.
-- Complex preprocessor macro bodies and generated code; `` `define`` bodies are
-  deliberately preserved.
-- Parameter/localparam declaration alignment beyond the generic token and
-  assignment passes.
-- Struct/union field alignment beyond generic variable declaration handling.
-- Multi-line comments/docblocks: preserved, not reflowed.
-- Advanced module/interface/program headers with complex parameter-port lists or
-  preprocessor conditionals inside the header.
-- Positional instance ports and complex named connections containing comments or
-  preprocessor conditionals.
-- `generate`/`genvar` formatting is basic indentation only.
-- Specify blocks, primitives, UDP tables, configs, clocking blocks, net aliases,
-  bind statements, and package import/export grouping are not specially aligned.
