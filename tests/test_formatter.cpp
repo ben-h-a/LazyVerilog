@@ -494,6 +494,35 @@ TEST_CASE("formatter: comments with parentheses are not treated as calls", "[for
     REQUIRE_NOTHROW(format_source(src, opts));
 }
 
+TEST_CASE("formatter: verilog_format on marker does not gain blank line", "[formatter]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.function.break_policy = "always";
+
+    const std::string src = "module top;\n"
+                            "// verilog_format: off\n"
+                            "sum(.i_a(i_a2),\n"
+                            "    .i_b(i_b));\n"
+                            "\n"
+                            "\n"
+                            "\n"
+                            "// verilog_format: on\n"
+                            "sum(.i_a(1),\n"
+                            "    .i_b(2));\n"
+                            "endmodule\n";
+
+    std::string formatted;
+    REQUIRE_NOTHROW(formatted = format_source(src, opts));
+    CHECK(formatted.find("// verilog_format: off\n"
+                         "sum(.i_a(i_a2),\n"
+                         "    .i_b(i_b));\n"
+                         "\n"
+                         "\n"
+                         "\n"
+                         "// verilog_format: on\n") != std::string::npos);
+    CHECK(format_source(formatted, opts) == formatted);
+}
+
 TEST_CASE("formatter: calls with empty positional arguments are preserved", "[formatter]") {
     FormatOptions opts;
     opts.safe_mode = true;

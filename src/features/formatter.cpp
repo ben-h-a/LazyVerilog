@@ -366,7 +366,7 @@ static std::vector<std::pair<int, int>> find_disabled(const std::string& src) {
         for (size_t j = off_end; j < n; ++j) {
             size_t on_end = match_fmt_comment(src, j, "on");
             if (on_end != std::string::npos) {
-                end = (int)j;
+                end = (int)on_end;
                 break;
             }
         }
