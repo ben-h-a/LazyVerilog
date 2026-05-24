@@ -5673,7 +5673,6 @@ static std::vector<std::string> run_structural_layout_phase(
     lines = format_modport_pass(std::move(lines), opts);
     if (opts.instance.align)
         lines = expand_instances_pass(std::move(lines), opts);
-        for (int i = 0  ;  i <lines.size() ; ++i)
     pp = build_pp_context(lines);
     lines = format_pp_conditional_function_calls_pass(std::move(lines), opts, pp);
     lines = format_multiline_macro_arg_calls_pass(std::move(lines), opts);
