@@ -1299,6 +1299,40 @@ TEST_CASE("formatter: line comments do not block instance port expansion", "[for
                                  "endmodule\n");
 }
 
+TEST_CASE("formatter: instance with pp conditional keeps directive line comment", "[formatter]") {
+    FormatOptions opts;
+    opts.safe_mode = true;
+    opts.instance.align = true;
+    opts.port_declaration.align = true;
+    opts.var_declaration.align = true;
+    opts.statement.align = true;
+    opts.instance.port_indent_level = 1;
+    opts.instance.instance_port_name_width = 10;
+    opts.instance.instance_port_between_paren_width = 10;
+    opts.instance.align_adaptive = true;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+
+    const std::string src =
+        "memory u_mem5 (\n"
+        "    // input\n"
+        "    .i_clk    (i_clk     ), // input\n"
+        "    .address  (addr      ), // output() .data_in  (data_in   ),\n"
+        "`ifdef A\n"
+        "    .data_out (kj        ), // test\n"
+        "`elsif B //test\n"
+        "    .read_write (read_write),\n"
+        "`endif\n"
+        "    .chip_en  (chip_en   ),\n"
+        "    .www333   (www333    ),\n"
+        "    .www333   (www333    ),\n"
+        "    .zzfuk    (zzfuk     ),\n"
+        "    .zzfuk    (zzfuk     )\n"
+        ");\n";
+
+    CHECK(format_source(src, opts) == src);
+}
+
 TEST_CASE("formatter: standalone line comments inside instance ports are preserved",
           "[formatter]") {
     FormatOptions opts;

@@ -66,6 +66,7 @@ static std::vector<std::string> text_to_lines(const std::string& text) {
 using slang::parsing::TokenKind;
 
 struct Tok {
+    // --- Immutable lexical identity (set once during initial lex) ---
     TokenKind kind{TokenKind::Unknown};
     std::string text;
     std::string lo;
@@ -74,6 +75,14 @@ struct Tok {
     bool comment{false};
     bool directive{false};
     syntax::SyntaxKind directive_kind{syntax::SyntaxKind::Unknown};
+
+    // --- Mutable formatting metadata (set/updated by passes) ---
+    int fmt_indent{0};            // indentation level at this token
+    int fmt_spaces_before{0};     // spaces before this token (within a line)
+    bool fmt_newline_before{false}; // emit newline before this token
+    int fmt_blank_lines{0};       // blank lines before this token (after newline)
+    bool fmt_disabled{false};     // inside verilog_format:off region (verbatim)
+    bool fmt_passthrough{false};  // whitespace-sensitive macro (verbatim)
 };
 
 static std::vector<Tok> collect_lexer_tokens(const std::string& source);
@@ -5888,6 +5897,698 @@ static void verify_safe_mode_unchanged(const std::string& source, const std::str
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
+// render_tokens — build output string from metadata-annotated tokens
+// ---------------------------------------------------------------------------
+static std::string render_tokens(const std::vector<Tok>& tokens, const FormatOptions& opts) {
+    std::string out;
+    size_t total_len = 0;
+    for (const auto& t : tokens) total_len += t.text.size();
+    out.reserve(total_len + total_len / 4);
+
+    const std::string indent_unit(opts.indent_size, ' ');
+    bool at_bol = true;
+
+    for (const auto& tok : tokens) {
+        if (tok.fmt_passthrough) {
+            if (tok.fmt_newline_before) {
+                if (!at_bol) out += '\n';
+                for (int k = 0; k < tok.fmt_blank_lines; ++k)
+                    out += '\n';
+                at_bol = true;
+            }
+            if (!at_bol && tok.fmt_spaces_before > 0)
+                out.append(tok.fmt_spaces_before, ' ');
+            out += tok.text;
+            at_bol = !tok.text.empty() && tok.text.back() == '\n';
+            continue;
+        }
+        if (tok.whitespace) continue;
+
+        if (tok.fmt_newline_before) {
+            if (!at_bol) out += '\n';
+            for (int k = 0; k < tok.fmt_blank_lines; ++k)
+                out += '\n';
+            at_bol = true;
+        }
+
+        if (at_bol && !tok.text.empty()) {
+            for (int k = 0; k < tok.fmt_indent; ++k)
+                out += indent_unit;
+            at_bol = false;
+        } else if (!at_bol && tok.fmt_spaces_before > 0) {
+            out.append(tok.fmt_spaces_before, ' ');
+        }
+
+        out += tok.text;
+        if (!tok.text.empty() && tok.text.back() == '\n')
+            at_bol = true;
+    }
+
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// pass0_populate_metadata — set fmt_* fields on each token
+// ---------------------------------------------------------------------------
+static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string& input,
+                                    const FormatOptions& opts) {
+    auto disabled = find_disabled(input);
+    const MacroClassifier macro_classifier(opts.macros);
+
+    int indent_level = 0;
+    std::vector<int> indent_stack;
+
+    bool at_bol = true;
+
+    int dim_depth = 0;
+
+    int paren_depth = 0;
+    std::vector<ParenKind> paren_stack;
+    std::vector<bool> for_header_stack;
+
+    int do_depth = 0;
+
+    bool pending_nl = false;
+    bool original_newline_before_token = false;
+
+    int blank_pend = 0;
+
+    bool in_pp_cond = false;
+
+    bool after_dis = false;
+    bool in_define_disabled = false;
+
+    int block_label_state = 0;
+
+    bool struct_pend = false;
+    bool constraint_pend = false;
+    int constraint_depth = 0;
+
+    bool case_expr_pending = false;
+    int case_expr_depth = -1;
+    int case_depth = 0;
+    int case_conditional_depth = 0;
+    bool case_label_pending_nl = false;
+
+    bool control_expr_pending = false;
+    int control_expr_depth = -1;
+
+    bool single_stmt_pending = false;
+    bool single_stmt_active = false;
+
+    bool do_while_tail = false;
+
+    bool in_import_export_decl = false;
+    bool in_extern_decl = false;
+    struct ActiveMacro {
+        MacroClassification classification;
+        bool wait_open{false};
+        int paren_depth{-1};
+    };
+    std::vector<ActiveMacro> active_macros;
+    bool macro_wrap_pending = false;
+    bool function_macro_newline_candidate = false;
+    int function_macro_newline_depth = -1;
+    bool prev_macro_role_valid = false;
+    MacroRole prev_macro_role = MacroRole::ObjectLikeExpr;
+    bool whitespace_macro_passthrough = false;
+    bool whitespace_macro_seen_open = false;
+    int whitespace_macro_paren_depth = 0;
+    MacroClassification whitespace_macro_class;
+    Tok whitespace_macro_prev;
+
+    std::vector<std::string> brace_stk;
+
+    const Tok* prev = nullptr;
+    bool prev_at_procedural = false;
+
+    // -----------------------------------------------------------------------
+    // Helper lambdas
+    // -----------------------------------------------------------------------
+    auto next_significant = [&](size_t idx) -> const Tok* {
+        for (size_t j = idx + 1; j < tokens.size(); ++j) {
+            if (!tokens[j].whitespace && !tokens[j].comment)
+                return &tokens[j];
+        }
+        return nullptr;
+    };
+    auto macro_force_own_line = [](MacroRole role) {
+        return role == MacroRole::DeclarationLike || role == MacroRole::ControlFlowLike ||
+               role == MacroRole::BlockBeginLike || role == MacroRole::BlockEndLike;
+    };
+    auto macro_newline_after = [](MacroRole role) {
+        return role == MacroRole::StatementLike || role == MacroRole::DeclarationLike ||
+               role == MacroRole::ControlFlowLike || role == MacroRole::BlockBeginLike ||
+               role == MacroRole::BlockEndLike;
+    };
+    auto finish_macro_invocation = [&](const MacroClassification& classification) {
+        if (macro_newline_after(classification.role)) {
+            pending_nl = true;
+            macro_wrap_pending = true;
+        }
+        if (classification.role == MacroRole::ControlFlowLike)
+            single_stmt_pending = true;
+        if (classification.role == MacroRole::BlockBeginLike) {
+            indent_level += 1;
+            indent_stack.push_back(1);
+        }
+        if ((classification.role == MacroRole::StatementLike ||
+             classification.role == MacroRole::DeclarationLike) &&
+            single_stmt_active) {
+            indent_level = std::max(0, indent_level - 1);
+            single_stmt_active = false;
+        }
+    };
+    auto apply_newline = [&](size_t idx) {
+        if (pending_nl || blank_pend > 0) {
+            tokens[idx].fmt_newline_before = true;
+            tokens[idx].fmt_blank_lines = blank_pend;
+            pending_nl = false;
+            blank_pend = 0;
+            at_bol = true;
+        }
+    };
+
+    // -----------------------------------------------------------------------
+    // Main token loop
+    // -----------------------------------------------------------------------
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        Tok& tok = tokens[i];
+        bool tok_is_macro = is_macro_usage(tok);
+        MacroClassification tok_macro_class;
+        bool tok_macro_has_args = false;
+        if (tok_is_macro) {
+            if (const Tok* next = next_significant(i))
+                tok_macro_has_args = tok_is(*next, "(", TokenKind::OpenParenthesis);
+            tok_macro_class = classify_macro(tok, tok_macro_has_args, macro_classifier);
+        }
+        syntax::SyntaxKind tok_pp_cond_kind = syntax::SyntaxKind::Unknown;
+        if (is_line_directive(tok) && is_pp_conditional(tok.directive_kind))
+            tok_pp_cond_kind = tok.directive_kind;
+        else if (is_pp_conditional_text(tok.text))
+            tok_pp_cond_kind = directive_at_offset(tok.text, 0).kind;
+        bool tok_is_pp_conditional = is_pp_conditional(tok_pp_cond_kind);
+
+        if (whitespace_macro_passthrough) {
+            tok.fmt_passthrough = true;
+            at_bol = !tok.text.empty() && tok.text.back() == '\n';
+            if (!tok.whitespace && !tok.comment) {
+                if (tok_is(tok, "(", TokenKind::OpenParenthesis)) {
+                    ++whitespace_macro_paren_depth;
+                    whitespace_macro_seen_open = true;
+                } else if (tok_is(tok, ")", TokenKind::CloseParenthesis) &&
+                           whitespace_macro_seen_open && whitespace_macro_paren_depth > 0) {
+                    --whitespace_macro_paren_depth;
+                    if (whitespace_macro_paren_depth == 0) {
+                        whitespace_macro_passthrough = false;
+                        whitespace_macro_seen_open = false;
+                        if (macro_newline_after(whitespace_macro_class.role))
+                            pending_nl = true;
+                        prev_macro_role_valid = true;
+                        prev_macro_role = whitespace_macro_class.role;
+                        prev = &whitespace_macro_prev;
+                        original_newline_before_token = false;
+                    }
+                }
+            }
+            continue;
+        }
+
+        if (tok_is_macro && tok_macro_has_args && tok_macro_class.whitespace_sensitive) {
+            apply_newline(i);
+            tok.fmt_indent = indent_level;
+            at_bol = false;
+            whitespace_macro_passthrough = true;
+            whitespace_macro_seen_open = false;
+            whitespace_macro_paren_depth = 0;
+            whitespace_macro_class = tok_macro_class;
+            whitespace_macro_prev = tok;
+            prev_macro_role_valid = false;
+            original_newline_before_token = false;
+            continue;
+        }
+
+        // --- A. Disabled region ---
+        if (in_disabled(tok.pos, disabled)) {
+            apply_newline(i);
+            if (is_line_directive(tok) && tok.directive_kind == syntax::SyntaxKind::DefineDirective)
+                in_define_disabled = true;
+            if (tok_is_pp_conditional || in_define_disabled || !at_bol || tok.whitespace) {
+                tok.fmt_passthrough = true;
+            } else {
+                tok.fmt_indent = indent_level;
+                at_bol = false;
+            }
+            at_bol = !tok.text.empty() && tok.text.back() == '\n';
+            after_dis = !at_bol;
+            continue;
+        }
+        in_define_disabled = false;
+
+        // --- B. Whitespace tokens ---
+        if (tok.whitespace) {
+            int nl = (int)std::count(tok.text.begin(), tok.text.end(), '\n');
+            original_newline_before_token = nl > 0;
+            if (after_dis && nl >= 1)
+                pending_nl = true;
+            after_dis = false;
+            if (nl > 0 && paren_depth > 0)
+                continue;
+            if (nl > 1) {
+                int extra = std::min(nl - 1, opts.blank_lines_between_items);
+                blank_pend = std::max(blank_pend, extra);
+            }
+            continue;
+        }
+
+        if (tok_is_pp_conditional) {
+            apply_newline(i);
+            if (!at_bol) {
+                tok.fmt_newline_before = true;
+                at_bol = true;
+            }
+            tok.fmt_passthrough = true;
+            at_bol = !tok.text.empty() && tok.text.back() == '\n';
+            pending_nl = false;
+            blank_pend = 0;
+
+            bool has_inline_arg = false;
+            if (is_pp_cond_with(tok_pp_cond_kind)) {
+                auto directive = directive_at_offset(tok.text, 0);
+                size_t arg = directive.end;
+                while (arg < tok.text.size() && (tok.text[arg] == ' ' || tok.text[arg] == '\t'))
+                    ++arg;
+                has_inline_arg = arg < tok.text.size() && tok.text[arg] != '\n';
+            }
+            if (is_pp_cond_with(tok_pp_cond_kind) && !has_inline_arg) {
+                in_pp_cond = true;
+            } else {
+                in_pp_cond = false;
+                pending_nl = true;
+            }
+            prev_macro_role_valid = false;
+            prev = &tok;
+            original_newline_before_token = false;
+            continue;
+        }
+
+        if (in_pp_cond) {
+            if (!at_bol) tok.fmt_spaces_before = 1;
+            tok.fmt_passthrough = true;
+            at_bol = !tok.text.empty() && tok.text.back() == '\n';
+            in_pp_cond = false;
+            pending_nl = true;
+            prev_macro_role_valid = false;
+            prev = &tok;
+            original_newline_before_token = false;
+            continue;
+        }
+
+        // --- C. Decide spacing and line-break ---
+        bool in_dim = dim_depth > 0;
+        bool in_for_header =
+            std::any_of(for_header_stack.begin(), for_header_stack.end(), [](bool v) { return v; });
+        bool procedural_at = prev && ((tok.text == "@" && is_procedural_event_keyword(*prev)) ||
+                                      (prev->text == "@" && prev_at_procedural));
+        ParenKind paren_kind = ParenKind::Ordinary;
+        if (prev && (prev->text == "(" || tok_is(tok, ")", TokenKind::CloseParenthesis))) {
+            if (!paren_stack.empty())
+                paren_kind = paren_stack.back();
+        } else if (prev && tok_is(tok, "(", TokenKind::OpenParenthesis))
+            paren_kind = classify_paren(*prev, procedural_at);
+        int spaces = 0;
+        SD dec = SD::Undecided;
+        if (prev) {
+            spaces = spaces_req(*prev, tok, opts, in_dim, in_for_header, !paren_stack.empty(),
+                                paren_kind, procedural_at);
+            dec = break_dec(*prev, tok, opts, in_dim);
+        }
+        if (prev_macro_role_valid && tok.kind == TokenKind::ElseKeyword &&
+            prev_macro_role == MacroRole::BlockEndLike)
+            dec = opts.statement.wrap_end_else_clauses ? SD::MustWrap : SD::MustAppend;
+        if (tok_is_macro && macro_force_own_line(tok_macro_class.role)) {
+            if (tok_macro_class.role == MacroRole::BlockBeginLike && prev &&
+                prev->kind == TokenKind::CloseParenthesis) {
+                dec = opts.statement.begin_newline ? SD::MustWrap : SD::MustAppend;
+            } else if (!at_bol) {
+                dec = SD::MustWrap;
+            }
+        }
+
+        // --- D. Inline-comment suppression ---
+        bool inline_comment = tok.comment && prev && !original_newline_before_token;
+
+        do_while_tail = false;
+        if (prev && prev->kind == TokenKind::EndKeyword && tok.kind == TokenKind::WhileKeyword) {
+            if (do_depth > 0) {
+                dec = SD::MustAppend;
+                --do_depth;
+                do_while_tail = true;
+            } else {
+                dec = SD::Undecided;
+            }
+        }
+        if (macro_wrap_pending && !tok.whitespace && !tok.comment) {
+            dec = SD::MustWrap;
+            macro_wrap_pending = false;
+        }
+        if (function_macro_newline_candidate) {
+            if (original_newline_before_token && function_macro_newline_depth == 0 &&
+                paren_depth == 0 && !continues_after_function_like_macro(tok))
+                dec = SD::MustWrap;
+            function_macro_newline_candidate = false;
+            function_macro_newline_depth = -1;
+        }
+        bool disable_target = prev && prev->kind == TokenKind::DisableKeyword;
+        bool wait_fork_target = prev && prev->kind == TokenKind::WaitKeyword &&
+                                tok.kind == TokenKind::ForkKeyword;
+
+        // --- Block label ---
+        if (block_label_state == 1 && !tok.whitespace && !tok.comment) {
+            if (tok.text == ":") {
+                dec = SD::MustAppend;
+                spaces = 0;
+                block_label_state = 2;
+            } else {
+                block_label_state = 0;
+            }
+        } else if (block_label_state == 2 && !tok.whitespace && !tok.comment) {
+            dec = SD::MustAppend;
+        }
+        if (case_label_pending_nl && tok.kind == TokenKind::BeginKeyword)
+            case_label_pending_nl = false;
+
+        if (inline_comment && pending_nl) {
+            if (!case_label_pending_nl)
+                pending_nl = false;
+        } else if (tok.comment && tok.text.rfind("//", 0) == 0) {
+            size_t line_start = input.rfind('\n', (size_t)tok.pos);
+            line_start = (line_start == std::string::npos) ? 0 : line_start + 1;
+            bool standalone_comment = true;
+            for (size_t p = line_start; p < (size_t)tok.pos; ++p) {
+                if (input[p] != ' ' && input[p] != '\t') {
+                    standalone_comment = false;
+                    break;
+                }
+            }
+            if (standalone_comment)
+                dec = SD::MustWrap;
+        }
+
+        // --- E. Emit newline / spacing based on break decision ---
+        if (dec == SD::MustWrap) {
+            pending_nl = false;
+            tok.fmt_newline_before = true;
+            tok.fmt_blank_lines = blank_pend;
+            blank_pend = 0;
+            at_bol = true;
+        } else if (dec == SD::MustAppend) {
+            if (pending_nl) {
+                pending_nl = false;
+                blank_pend = 0;
+            }
+            if (!at_bol && spaces > 0)
+                tok.fmt_spaces_before = spaces;
+        } else {
+            apply_newline(i);
+            if (!at_bol && spaces > 0)
+                tok.fmt_spaces_before = spaces;
+        }
+
+        // --- F. Single-statement indent ---
+        if (single_stmt_pending && at_bol) {
+            if (constraint_depth > 0 && tok_is(tok, "{", TokenKind::OpenBrace)) {
+                // constraint body brace — let brace handler below create the scope
+            } else if (tok.kind == TokenKind::BeginKeyword) {
+                single_stmt_pending = false;
+            } else {
+                ++indent_level;
+                single_stmt_pending = false;
+                single_stmt_active = true;
+            }
+        }
+
+        // --- G. Indent-close ---
+        if (tok_is_macro && tok_macro_class.role == MacroRole::BlockEndLike) {
+            int delta = indent_stack.empty() ? 1 : indent_stack.back();
+            if (!indent_stack.empty())
+                indent_stack.pop_back();
+            indent_level = std::max(0, indent_level - delta);
+        } else if (is_indent_close(tok.kind)) {
+            if (tok.kind == TokenKind::EndCaseKeyword) {
+                case_depth = std::max(0, case_depth - 1);
+                case_conditional_depth = 0;
+            }
+            int delta = indent_stack.empty() ? 1 : indent_stack.back();
+            if (!indent_stack.empty())
+                indent_stack.pop_back();
+            indent_level = std::max(0, indent_level - delta);
+        } else if (is_close_group(tok) && tok_is(tok, "}", TokenKind::CloseBrace) && !brace_stk.empty() &&
+                   (brace_stk.back() == "struct" || brace_stk.back() == "constraint")) {
+            int delta = indent_stack.empty() ? 1 : indent_stack.back();
+            if (!indent_stack.empty())
+                indent_stack.pop_back();
+            indent_level = std::max(0, indent_level - delta);
+        }
+
+        // --- H. Set indent for the token ---
+        tok.fmt_indent = indent_level;
+        if (at_bol)
+            at_bol = false;
+
+        // --- J. Update bracket/paren/dim depth counters ---
+        if (tok_is(tok, "[", TokenKind::OpenBracket))
+            ++dim_depth;
+        else if (tok_is(tok, "]", TokenKind::CloseBracket) && dim_depth > 0)
+            --dim_depth;
+        else if (tok_is(tok, "(", TokenKind::OpenParenthesis)) {
+            ++paren_depth;
+            paren_stack.push_back(prev ? classify_paren(*prev, prev_at_procedural)
+                                       : ParenKind::Ordinary);
+            for_header_stack.push_back(prev && (prev->kind == TokenKind::ForKeyword ||
+                                                prev->kind == TokenKind::ForeachKeyword));
+            if (!active_macros.empty() && active_macros.back().wait_open && prev &&
+                is_macro_usage(*prev)) {
+                active_macros.back().paren_depth = paren_depth;
+                active_macros.back().wait_open = false;
+            }
+            if (case_expr_pending) {
+                case_expr_depth = paren_depth;
+                case_expr_pending = false;
+            }
+            if (control_expr_pending) {
+                control_expr_depth = paren_depth;
+                control_expr_pending = false;
+            }
+        } else if (tok_is(tok, ")", TokenKind::CloseParenthesis) && paren_depth > 0) {
+            size_t closing_macro_index = active_macros.size();
+            for (size_t mi = active_macros.size(); mi > 0; --mi) {
+                const auto& macro = active_macros[mi - 1];
+                if (!macro.wait_open && macro.paren_depth == paren_depth) {
+                    closing_macro_index = mi - 1;
+                    break;
+                }
+            }
+            if (case_expr_depth == paren_depth) {
+                pending_nl = true;
+                case_expr_depth = -1;
+            }
+            if (control_expr_depth == paren_depth) {
+                single_stmt_pending = true;
+                pending_nl = true;
+                control_expr_depth = -1;
+            }
+            --paren_depth;
+            if (!paren_stack.empty())
+                paren_stack.pop_back();
+            if (!for_header_stack.empty())
+                for_header_stack.pop_back();
+            if (closing_macro_index < active_macros.size()) {
+                MacroClassification classification =
+                    active_macros[closing_macro_index].classification;
+                active_macros.erase(active_macros.begin() + (ptrdiff_t)closing_macro_index);
+                finish_macro_invocation(classification);
+                if (classification.role == MacroRole::FunctionLikeExpr) {
+                    function_macro_newline_candidate = true;
+                    function_macro_newline_depth = paren_depth;
+                }
+            }
+        } else if (tok_is(tok, ";", TokenKind::Semicolon))
+            dim_depth = 0;
+
+        // --- K. Post-emit housekeeping ---
+        if (tok_is_macro) {
+            if (tok_macro_has_args) {
+                active_macros.push_back({tok_macro_class, true, -1});
+            } else {
+                finish_macro_invocation(tok_macro_class);
+            }
+        } else if (is_keyword(tok)) {
+            if (tok.kind == TokenKind::DoKeyword)
+                ++do_depth;
+
+            if (tok.kind == TokenKind::ImportKeyword || tok.kind == TokenKind::ExportKeyword)
+                in_import_export_decl = true;
+            if (tok.kind == TokenKind::ExternKeyword)
+                in_extern_decl = true;
+
+            if (tok.kind == TokenKind::CaseKeyword || tok.kind == TokenKind::CaseXKeyword ||
+                tok.kind == TokenKind::CaseZKeyword) {
+                case_expr_pending = true;
+                ++case_depth;
+                case_conditional_depth = 0;
+            }
+
+            if (tok.kind == TokenKind::IfKeyword || tok.kind == TokenKind::ForKeyword ||
+                tok.kind == TokenKind::ForeachKeyword ||
+                (tok.kind == TokenKind::WhileKeyword && !do_while_tail) ||
+                tok.kind == TokenKind::RepeatKeyword)
+                control_expr_pending = true;
+
+            if (tok.kind == TokenKind::ElseKeyword) {
+                single_stmt_pending = true;
+                pending_nl = true;
+            }
+
+            if (tok.kind == TokenKind::BeginKeyword)
+                single_stmt_pending = false;
+
+            if (is_constraint_keyword(tok))
+                constraint_pend = true;
+
+            bool import_export_function_or_task = in_import_export_decl &&
+                                                  (tok.kind == TokenKind::FunctionKeyword ||
+                                                   tok.kind == TokenKind::TaskKeyword);
+            bool extern_function_or_task = in_extern_decl &&
+                                           (tok.kind == TokenKind::FunctionKeyword ||
+                                            tok.kind == TokenKind::TaskKeyword);
+            bool typedef_class_forward_decl = tok.kind == TokenKind::ClassKeyword && prev &&
+                                              prev->kind == TokenKind::TypedefKeyword;
+            if (is_indent_open(tok.kind) && !disable_target && !wait_fork_target &&
+                !import_export_function_or_task && !extern_function_or_task &&
+                !typedef_class_forward_decl) {
+                int delta = (tok.kind == TokenKind::ModuleKeyword ||
+                             tok.kind == TokenKind::MacromoduleKeyword ||
+                             tok.kind == TokenKind::InterfaceKeyword ||
+                             tok.kind == TokenKind::PackageKeyword)
+                                ? opts.default_indent_level_inside_outmost_block
+                                : 1;
+                indent_level += delta;
+                indent_stack.push_back(delta);
+                if (is_block_open(tok.kind) && tok.kind != TokenKind::CaseKeyword &&
+                    tok.kind != TokenKind::CaseXKeyword && tok.kind != TokenKind::CaseZKeyword)
+                    pending_nl = true;
+            } else if (is_indent_close(tok.kind)) {
+                pending_nl = true;
+            } else if (tok.kind == TokenKind::StructKeyword || tok.kind == TokenKind::UnionKeyword) {
+                struct_pend = true;
+            }
+        } else if (is_open_group(tok) && tok_is(tok, "{", TokenKind::OpenBrace)) {
+            if (struct_pend || constraint_pend || (constraint_depth > 0 && single_stmt_pending)) {
+                bool is_constraint_brace = constraint_pend || (constraint_depth > 0 && single_stmt_pending);
+                brace_stk.push_back(is_constraint_brace ? "constraint" : "struct");
+                pending_nl = true;
+                indent_level += 1;
+                indent_stack.push_back(1);
+                if (is_constraint_brace) {
+                    ++constraint_depth;
+                    constraint_pend = false;
+                    single_stmt_pending = false;
+                }
+            } else {
+                brace_stk.push_back("other");
+            }
+            struct_pend = false;
+        } else if (is_close_group(tok) && tok_is(tok, "}", TokenKind::CloseBrace)) {
+            if (!brace_stk.empty()) {
+                if (brace_stk.back() == "constraint") {
+                    constraint_depth = std::max(0, constraint_depth - 1);
+                    pending_nl = true;
+                }
+                brace_stk.pop_back();
+            }
+        } else if (tok_is(tok, ";", TokenKind::Semicolon)) {
+            in_import_export_decl = false;
+            in_extern_decl = false;
+            bool in_for_header_now =
+                std::any_of(for_header_stack.begin(), for_header_stack.end(),
+                            [](bool v) { return v; });
+            if (paren_depth == 0 || (case_depth > 0 && !in_for_header_now))
+                pending_nl = true;
+            if (single_stmt_active) {
+                indent_level = std::max(0, indent_level - 1);
+                single_stmt_active = false;
+            }
+        } else if (is_line_directive(tok)) {
+            pending_nl = true;
+            if (is_pp_cond_bare(tok.directive_kind) || is_pp_cond_with(tok.directive_kind))
+                in_pp_cond = false;
+        } else if (tok.comment) {
+            if (i + 1 < tokens.size() && tokens[i + 1].whitespace &&
+                tokens[i + 1].text.find('\n') != std::string::npos)
+                pending_nl = true;
+        } else if (tok.kind == TokenKind::Directive) {
+            if (is_pp_cond_bare(tok.directive_kind)) {
+                pending_nl = true;
+                in_pp_cond = false;
+            } else if (is_pp_cond_with(tok.directive_kind)) {
+                in_pp_cond = true;
+            }
+        } else if (is_identifier(tok)) {
+            if (in_pp_cond) {
+                pending_nl = true;
+                in_pp_cond = false;
+            }
+            if (is_macro_usage(tok) && tok.text.find(';') != std::string::npos) {
+                pending_nl = true;
+                if (single_stmt_active) {
+                    indent_level = std::max(0, indent_level - 1);
+                    single_stmt_active = false;
+                }
+            }
+        } else if (in_pp_cond) {
+            pending_nl = true;
+            in_pp_cond = false;
+        }
+
+        if (tok_is(tok, "?", TokenKind::Question) && case_depth > 0 && dim_depth == 0)
+            ++case_conditional_depth;
+        else if (tok_is(tok, ":", TokenKind::Colon) && case_depth > 0 && dim_depth == 0) {
+            if (case_conditional_depth > 0) {
+                --case_conditional_depth;
+            } else if (block_label_state == 0) {
+                pending_nl = false;
+                case_label_pending_nl = true;
+            }
+        } else if (tok_is(tok, ";", TokenKind::Semicolon) || tok.kind == TokenKind::EndCaseKeyword) {
+            case_label_pending_nl = false;
+            case_conditional_depth = 0;
+        } else if (!tok.comment && !tok.whitespace) {
+            case_label_pending_nl = false;
+        }
+
+        // --- Block label post-emit ---
+        if (block_label_state == 2 && !tok.whitespace && !tok.comment && tok.text != ":") {
+            pending_nl = true;
+            block_label_state = 0;
+        }
+        if (!tok.whitespace && !tok.comment && is_keyword(tok) &&
+            (tok.kind == TokenKind::BeginKeyword || tok.kind == TokenKind::ForkKeyword ||
+             is_indent_close(tok.kind)) &&
+            !disable_target && !wait_fork_target) {
+            block_label_state = 1;
+        }
+
+        prev_macro_role_valid = tok_is_macro;
+        if (tok_is_macro)
+            prev_macro_role = tok_macro_class.role;
+        prev_at_procedural = tok.text == "@" && prev && is_procedural_event_keyword(*prev);
+        prev = &tok;
+        original_newline_before_token = false;
+    } // end pass0 main token loop
+}
+
+// ---------------------------------------------------------------------------
 // format_source — main entry point
 // ---------------------------------------------------------------------------
 
@@ -6788,6 +7489,19 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
     while (!out.empty() && out.back() == '\n')
         out.pop_back();
     out += '\n';
+
+    // -----------------------------------------------------------------------
+    // STEP 11: Dual-mode verification (new architecture)
+    {
+        auto tokens_v2 = collect_lexer_tokens(input);
+        pass0_populate_metadata(tokens_v2, input, opts);
+        std::string v2_out = render_tokens(tokens_v2, opts);
+        if (!v2_out.empty() && v2_out.back() != '\n')
+            v2_out += '\n';
+        while (v2_out.size() >= 2 && v2_out[v2_out.size() - 1] == '\n' && v2_out[v2_out.size() - 2] == '\n')
+            v2_out.pop_back();
+        write_log(opts, "pass0_render_output.sv", v2_out);
+    }
 
     // -----------------------------------------------------------------------
     // STEP 12: Safe-mode integrity check
