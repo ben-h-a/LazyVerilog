@@ -19,6 +19,82 @@ TEST_CASE("formatter: function calls support block layout", "[formatter]") {
                                                                           "         );\n");
 }
 
+
+TEST_CASE("formatter: member function calls support hanging layout", "[formatter]") {
+    FormatOptions opts;
+    opts.function.break_policy = "auto";
+    opts.function.arg_count = 3;
+    opts.function.layout = "hanging";
+
+    CHECK(format_source("op.configure(.parent(this), .size(2), .lsb_pos(0));\n", opts) ==
+          "op.configure(.parent(this),\n"
+          "             .size(2),\n"
+          "             .lsb_pos(0));\n");
+}
+
+
+TEST_CASE("formatter: macro before function declaration is split", "[formatter]") {
+    FormatOptions opts;
+
+    std::string formatted = format_source(
+        "class c;\n"
+        "    `uvm_object_utils(jtag_dtm_reg_dmi) function new (string name=\"\");\n"
+        "    endfunction\n"
+        "endclass\n",
+        opts);
+
+    CHECK(formatted.find("`uvm_object_utils(jtag_dtm_reg_dmi) function") == std::string::npos);
+    CHECK(formatted.find("`uvm_object_utils(jtag_dtm_reg_dmi)\n") != std::string::npos);
+}
+
+
+TEST_CASE("formatter: predefined uvm block macros affect indentation", "[formatter]") {
+    FormatOptions opts;
+    opts.indent_size = 4;
+
+    CHECK(format_source("class c;\n"
+                        "`uvm_object_utils_begin(c)\n"
+                        "`uvm_field_int(a, UVM_DEFAULT)\n"
+                        "`uvm_object_utils_end\n"
+                        "endclass\n",
+                        opts) == "class c;\n"
+                                 "    `uvm_object_utils_begin(c)\n"
+                                 "        `uvm_field_int(a, UVM_DEFAULT)\n"
+                                 "    `uvm_object_utils_end\n"
+                                 "endclass\n");
+}
+
+
+TEST_CASE("formatter: pp conditional function call formats all argument segments", "[formatter]") {
+    FormatOptions opts;
+    opts.function.break_policy = "auto";
+    opts.function.arg_count = 3;
+    opts.function.layout = "hanging";
+
+    const std::string src =
+        "abits.configure(.parent(this), .size(6), .lsb_pos(4), .access(\"RO\"), .volatile(0),\n"
+        "`ifdef USE_DMI_INTERFACE\n"
+        ".reset(32'h10),\n"
+        "`else\n"
+        ".reset(32'h07),\n"
+        "`endif\n"
+        ".has_reset(1), .is_rand(1));\n";
+
+    CHECK(format_source(src, opts) ==
+          "abits.configure(.parent(this),\n"
+          "                .size(6),\n"
+          "                .lsb_pos(4),\n"
+          "                .access(\"RO\"),\n"
+          "                .volatile(0),\n"
+          "`ifdef USE_DMI_INTERFACE\n"
+          "                .reset(32'h10),\n"
+          "`else\n"
+          "                .reset(32'h07),\n"
+          "`endif\n"
+          "                .has_reset(1),\n"
+          "                .is_rand(1));\n");
+}
+
 TEST_CASE("formatter: autoarg comment in multiline module header is safe", "[formatter]") {
     FormatOptions opts;
     opts.safe_mode = true;
@@ -410,7 +486,9 @@ TEST_CASE("formatter: macro calls with empty arguments are preserved", "[formatt
                             "  `DV_CHECK_FATAL(expr, , msg_id)\n"
                             "endmodule\n";
 
-    REQUIRE_NOTHROW(format_source(src, opts));
+    std::string formatted;
+    REQUIRE_NOTHROW(formatted = format_source(src, opts));
+    CHECK(formatted.find("`DV_CHECK_FATAL(expr, , msg_id)") != std::string::npos);
 }
 
 
@@ -439,6 +517,40 @@ TEST_CASE("formatter: multiline macro calls with comments are preserved and idem
     CHECK(formatted.find("// inline comment ) finish_item") == std::string::npos);
     CHECK(formatted.find("finish_item(req);") != std::string::npos);
     CHECK(format_source(formatted, opts) == formatted);
+}
+
+TEST_CASE("formatter: function-like macro preserves following statement newline", "[formatter]") {
+    FormatOptions opts;
+
+    const std::string src =
+        "`DV_CHECK_STD_RANDOMIZE_WITH_FATAL(\n"
+        "    kind, kind inside {BkdrRegPathRtl, BkdrRegPathRtlShadow};)\n"
+        "origin_val = csr_peek(.ptr(shadowed_csr), .kind(kind));\n"
+        "err_val = get_shadow_reg_diff_val(shadowed_csr, origin_val);\n";
+
+    CHECK(format_source(src, opts) ==
+          "`DV_CHECK_STD_RANDOMIZE_WITH_FATAL(kind, kind inside {BkdrRegPathRtl, "
+          "BkdrRegPathRtlShadow};)\n"
+          "origin_val = csr_peek(.ptr(shadowed_csr), .kind(kind));\n"
+          "err_val = get_shadow_reg_diff_val(shadowed_csr, origin_val);\n");
+}
+
+TEST_CASE("formatter: macro arg call after blank line is idempotent", "[formatter]") {
+    FormatOptions opts;
+    opts.function.break_policy = "always";
+
+    const std::string src =
+        "class c;\n"
+        "    task t;\n"
+        "\n"
+        "        if (lockable_field_cov!=null)\n"
+        "            lockable_field_cov.post_write(field_val, `gmv(regwen_fld));\n"
+        "    endtask\n"
+        "endclass\n";
+
+    std::string formatted = format_source(src, opts);
+    CHECK(format_source(formatted, opts) == formatted);
+    CHECK(formatted.find("\n if (lockable_field_cov") == std::string::npos);
 }
 
 TEST_CASE("formatter: constraint brace blocks are idempotent", "[formatter]") {
@@ -1052,6 +1164,31 @@ TEST_CASE("formatter: instance port name width is measured from dot to paren", "
                                  "    .chip_en  (en        )\n"
                                  ");\n"
                                  "endmodule\n");
+}
+
+TEST_CASE("formatter: instance expansion skips procedural named-argument calls", "[formatter]") {
+    FormatOptions opts;
+    opts.safe_mode = true;
+    opts.instance.align = true;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+
+    std::string formatted = format_source(
+        "package p;\n"
+        "function automatic uvm_reg_map clone_reg_map();\n"
+        "  while (regs.size()) begin\n"
+        "    uvm_reg rg;\n"
+        "    rg = regs.pop_front();\n"
+        "    clone.add_reg(.rg(rg), .offset(rg.get_offset(map)), .rights(rg.get_rights(map)), "
+        ".unmapped(0),\n"
+        "                  .frontdoor(null));\n"
+        "  end\n"
+        "endfunction\n"
+        "endpackage\n",
+        opts);
+
+    CHECK(formatted.find("regs.pop_front (") == std::string::npos);
+    CHECK(formatted.find("clone.add_reg") != std::string::npos);
 }
 
 TEST_CASE("formatter: instance array dimensions are preserved", "[formatter]") {
@@ -1851,5 +1988,86 @@ TEST_CASE("formatter: demo memory_top formats with project config", "[formatter]
 
     std::string formatted;
     REQUIRE_NOTHROW(formatted = format_source(input, cfg.format));
+    CHECK(format_source(formatted, cfg.format) == formatted);
+}
+
+TEST_CASE("formatter: case item label keeps simple statement", "[formatter]") {
+    Config cfg = load_config(".");
+    std::string input = "class c;\n"
+                        "function void f(int w);\n"
+                        "case (w)\n"
+                        "4: a = f();\n"
+                        "8/* comment */: b = g();\n"
+                        "default: `uvm_fatal(`gfn, \"bad\")\n"
+                        "endcase\n"
+                        "endfunction\n"
+                        "endclass\n";
+
+    std::string formatted;
+    REQUIRE_NOTHROW(formatted = format_source(input, cfg.format));
+    CHECK(formatted.find("4: a") != std::string::npos);
+    CHECK(formatted.find("= f();") != std::string::npos);
+    CHECK(formatted.find("8 /* comment */ : b") != std::string::npos);
+}
+
+TEST_CASE("formatter: embedded preprocessor conditionals become line-level", "[formatter]") {
+    Config cfg = load_config(".");
+    std::string input = "class c;\n"
+                        "function new(string name=\"\",`ifdef USE_DMI_INTERFACE\n"
+                        "int unsigned n_bits = 50,\n"
+                        "`else\n"
+                        "int unsigned n_bits = 41,\n"
+                        "`endif\n"
+                        "int has_coverage = 0);\n"
+                        "endfunction\n"
+                        "endclass\n";
+
+    std::string formatted;
+    REQUIRE_NOTHROW(formatted = format_source(input, cfg.format));
+    CHECK(formatted.find("name=\"\",\n") != std::string::npos);
+    CHECK(formatted.find("\n`ifdef USE_DMI_INTERFACE\n") != std::string::npos);
+    CHECK(format_source(formatted, cfg.format) == formatted);
+}
+
+TEST_CASE("formatter: coverpoint macro body stays multiline", "[formatter]") {
+    Config cfg = load_config(".");
+    std::string input = "covergroup cg;\n"
+                        "cp: coverpoint a {`MACRO}\n"
+                        "endgroup\n";
+
+    std::string formatted;
+    REQUIRE_NOTHROW(formatted = format_source(input, cfg.format));
+    CHECK(formatted.find("cp: coverpoint a {\n") != std::string::npos);
+    CHECK(formatted.find("`MACRO\n") != std::string::npos);
+    CHECK(format_source(formatted, cfg.format) == formatted);
+}
+
+TEST_CASE("formatter: constraint dist list stays multiline", "[formatter]") {
+    Config cfg = load_config(".");
+    std::string input =
+        "class c;\n"
+        "constraint num_endpoints_c { num_endpoints dist {MIN_NUM_ENDPOINTS :/ 40, "
+        "`NUM_END_POINTS := 40, [MIN_NUM_ENDPOINTS:`NUM_END_POINTS] :/ 20}; }\n"
+        "endclass\n";
+
+    std::string formatted;
+    REQUIRE_NOTHROW(formatted = format_source(input, cfg.format));
+    CHECK(formatted.find("num_endpoints dist {\n") != std::string::npos);
+    CHECK(formatted.find("MIN_NUM_ENDPOINTS :/ 40,") != std::string::npos);
+    CHECK(formatted.find("`NUM_END_POINTS := 40,") != std::string::npos);
+    CHECK(format_source(formatted, cfg.format) == formatted);
+}
+
+TEST_CASE("formatter: class extends parameter layout uses parameter layout", "[formatter]") {
+    Config cfg = load_config(".");
+    std::string input =
+        "class dma_scoreboard extends cip_base_scoreboard #(.CFG_T(dma_env_cfg), "
+        ".RAL_T(dma_reg_block), .COV_T(dma_env_cov));\n"
+        "endclass\n";
+
+    std::string formatted;
+    REQUIRE_NOTHROW(formatted = format_source(input, cfg.format));
+    CHECK(formatted.find(".CFG_T(dma_env_cfg),\n") != std::string::npos);
+    CHECK(formatted.find(".RAL_T(dma_reg_block),\n") != std::string::npos);
     CHECK(format_source(formatted, cfg.format) == formatted);
 }

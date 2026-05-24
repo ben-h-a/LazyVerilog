@@ -312,3 +312,18 @@ TEST_CASE("config: malformed TOML returns defaults", "[config]") {
     CHECK(warning_detail.line == 3);
     CHECK(warning_detail.column > 0);
 }
+
+TEST_CASE("config: macro role conflicts are reported", "[config]") {
+    auto dir = make_temp_toml(R"(
+[format.macros]
+statement_like = ["MY_MACRO"]
+declaration_like = ["MY_MACRO"]
+)");
+    std::string warning;
+    ConfigWarning warning_detail;
+    Config cfg = load_config(dir, &warning, &warning_detail);
+    (void)cfg;
+    CHECK_FALSE(warning.empty());
+    CHECK(warning.find("MY_MACRO") != std::string::npos);
+    CHECK(warning.find("multiple role lists") != std::string::npos);
+}
