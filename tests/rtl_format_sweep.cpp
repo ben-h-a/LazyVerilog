@@ -123,20 +123,29 @@ static std::vector<fs::path> collect_sv_files(const fs::path& root) {
 }
 
 static void print_usage(const char* argv0) {
-    std::cerr << "usage: " << argv0 << " <formatter-binary> <rtl-root>\n";
+    std::cerr << "usage: " << argv0 << " [--perf] <formatter-binary> <rtl-root>\n";
 }
 
 int main(int argc, char** argv) {
     std::signal(SIGINT, handle_signal);
     std::signal(SIGTERM, handle_signal);
 
-    if (argc != 3) {
+    bool perf = false;
+    std::vector<fs::path> args;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--perf") == 0)
+            perf = true;
+        else
+            args.emplace_back(argv[i]);
+    }
+
+    if (args.size() != 2) {
         print_usage(argv[0]);
         return 2;
     }
 
-    const fs::path formatter = argv[1];
-    const fs::path root = argv[2];
+    const fs::path formatter = args[0];
+    const fs::path root = args[1];
     if (!fs::exists(formatter)) {
         std::cerr << "Formatter binary does not exist: " << formatter << "\n";
         return 2;
@@ -170,7 +179,9 @@ int main(int argc, char** argv) {
         }
 
         const auto& file = files[i];
-        const auto file_start = std::chrono::steady_clock::now();
+        std::chrono::steady_clock::time_point file_start;
+        if (perf)
+            file_start = std::chrono::steady_clock::now();
         bool file_failed = false;
         bool file_not_idempotent = false;
         try {
@@ -210,12 +221,15 @@ int main(int argc, char** argv) {
             ++not_idempotent_count;
         else
             ++passed;
-        const auto file_end = std::chrono::steady_clock::now();
-        const auto elapsed_ms =
-            std::chrono::duration_cast<std::chrono::milliseconds>(file_end - file_start).count();
         std::cout << "  [" << (i + 1) << "/" << files.size() << "] pass=" << passed
-                  << " fail=" << failed << " not-idempotent=" << not_idempotent_count << " "
-                  << "time=" << elapsed_ms << "ms " << file << "\n";
+                  << " fail=" << failed << " not-idempotent=" << not_idempotent_count;
+        if (perf) {
+            const auto file_end = std::chrono::steady_clock::now();
+            const auto elapsed_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(file_end - file_start).count();
+            std::cout << " time=" << elapsed_ms << "ms";
+        }
+        std::cout << " " << file << "\n" << std::flush;
     }
 
     if (failures.empty() && not_idempotent.empty()) {
