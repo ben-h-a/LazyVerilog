@@ -1,4 +1,3 @@
-# CLAUDE.md
 ## Goal of this project
 This is a SystemVerilog LSP server written in C++.
 ## Build
