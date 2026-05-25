@@ -11,6 +11,7 @@
 #include <slang/text/SourceManager.h>
 #include <slang/util/BumpAllocator.h>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -66,8 +67,7 @@ static std::vector<std::string> text_to_lines(const std::string& text) {
 
 using slang::parsing::TokenKind;
 
-struct Tok {
-    // --- Immutable lexical identity (set once during initial lex) ---
+struct TokLexeme {
     TokenKind kind{TokenKind::Unknown};
     std::string text;
     std::string lo;
@@ -76,6 +76,13 @@ struct Tok {
     bool comment{false};
     bool directive{false};
     syntax::SyntaxKind directive_kind{syntax::SyntaxKind::Unknown};
+};
+
+struct Tok {
+    // Lexical identity is immutable after token collection.  Formatting passes may
+    // only update fmt_* metadata or fmt_text_override for emitted text.
+    std::shared_ptr<const TokLexeme> lex;
+    TokenKind kind{TokenKind::Unknown};
 
     // --- Mutable formatting metadata (set/updated by passes) ---
     int fmt_indent{0};            // indentation level at this token
@@ -84,9 +91,36 @@ struct Tok {
     int fmt_blank_lines{0};       // blank lines before this token (after newline)
     bool fmt_disabled{false};     // inside verilog_format:off region (verbatim)
     bool fmt_passthrough{false};  // whitespace-sensitive macro (verbatim)
+    std::string fmt_text_override; // emitted spelling override, lexical text stays immutable
 };
 
+static const std::string& tok_text(const Tok& tok) {
+    return tok.fmt_text_override.empty() ? tok.lex->text : tok.fmt_text_override;
+}
+static const std::string& tok_lex_text(const Tok& tok) { return tok.lex->text; }
+static const std::string& tok_lo(const Tok& tok) { return tok.lex->lo; }
+static int tok_pos(const Tok& tok) { return tok.lex->pos; }
+static bool tok_whitespace(const Tok& tok) { return tok.lex->whitespace; }
+static bool tok_comment(const Tok& tok) { return tok.lex->comment; }
+static bool tok_directive(const Tok& tok) { return tok.lex->directive; }
+static syntax::SyntaxKind tok_directive_kind(const Tok& tok) { return tok.lex->directive_kind; }
+static void tok_set_formatted_text(Tok& tok, std::string text) { tok.fmt_text_override = std::move(text); }
+
 static std::vector<Tok> collect_lexer_tokens(const std::string& source);
+static std::string render_tokens(const std::vector<Tok>& tokens, const FormatOptions& opts);
+static std::vector<Tok> tokens_from_formatted_text(const std::string& text, const FormatOptions& opts);
+static std::string join_lines(const std::vector<std::string>& lines);
+static void align_port_pass(std::vector<Tok>& tokens, const FormatOptions& opts);
+
+struct TokenLineText {
+    size_t start{0};
+    size_t end{0};
+    std::string text;
+};
+
+static std::vector<TokenLineText> token_line_texts(const std::vector<Tok>& tokens,
+                                                   const FormatOptions& opts);
+static std::vector<size_t> tok_line_starts(const std::vector<Tok>& tokens);
 
 static bool is_pp_cond_with(syntax::SyntaxKind kind);
 static bool is_pp_conditional(syntax::SyntaxKind kind);
@@ -115,9 +149,9 @@ struct DirectiveIndex {
         for (const auto& tok : collect_lexer_tokens(text)) {
             if (tok.kind != TokenKind::Directive)
                 continue;
-            size_t start = (size_t)tok.pos;
-            by_start.emplace(start, DirectiveMatch{tok.directive_kind, start,
-                                                   start + tok.text.size()});
+            size_t start = (size_t)tok_pos(tok);
+            by_start.emplace(start, DirectiveMatch{tok_directive_kind(tok), start,
+                                                   start + tok_text(tok).size()});
         }
     }
 
@@ -137,12 +171,12 @@ static DirectiveMatch directive_at_offset(const std::string& text, size_t offset
         line_end = text.size();
     std::string line = text.substr(offset, line_end - offset);
     for (const auto& tok : collect_lexer_tokens(line)) {
-        if (tok.whitespace || tok.comment)
+        if (tok_whitespace(tok) || tok_comment(tok))
             continue;
         if (tok.kind != TokenKind::Directive)
             return {};
-        return {tok.directive_kind, offset + (size_t)tok.pos,
-                offset + (size_t)tok.pos + tok.text.size()};
+        return {tok_directive_kind(tok), offset + (size_t)tok_pos(tok),
+                offset + (size_t)tok_pos(tok) + tok_text(tok).size()};
     }
     return {};
 }
@@ -339,7 +373,7 @@ static bool is_pp_conditional_text(const std::string& text) {
 
 static bool is_macro_usage(const Tok& t) {
     return t.kind == TokenKind::MacroUsage ||
-           (t.kind == TokenKind::Directive && t.directive_kind == syntax::SyntaxKind::MacroUsage);
+           (t.kind == TokenKind::Directive && tok_directive_kind(t) == syntax::SyntaxKind::MacroUsage);
 }
 
 enum class MacroRole {
@@ -366,7 +400,7 @@ static std::string normalize_macro_config_name(std::string name) {
 static std::string macro_name(const Tok& tok) {
     if (!is_macro_usage(tok))
         return {};
-    std::string text = tok.text;
+    std::string text = tok_text(tok);
     if (text.empty() || text[0] != '`')
         return {};
     size_t end = 1;
@@ -430,32 +464,32 @@ static MacroClassification classify_macro(const Tok& tok, bool has_args,
 }
 
 static bool is_line_directive(const Tok& t) {
-    return t.directive && !is_macro_usage(t);
+    return tok_directive(t) && !is_macro_usage(t);
 }
 
 static bool is_keyword(const Tok& t) {
-    return !t.directive && !t.comment && !t.whitespace && LexerFacts::isKeyword(t.kind);
+    return !tok_directive(t) && !tok_comment(t) && !tok_whitespace(t) && LexerFacts::isKeyword(t.kind);
 }
 
 static bool is_constraint_keyword(const Tok& t) {
-    return !t.directive && !t.comment && !t.whitespace &&
+    return !tok_directive(t) && !tok_comment(t) && !tok_whitespace(t) &&
            t.kind == TokenKind::ConstraintKeyword;
 }
 
 static bool is_begin_keyword(const Tok& t) {
-    return !t.directive && !t.comment && !t.whitespace && t.kind == TokenKind::BeginKeyword;
+    return !tok_directive(t) && !tok_comment(t) && !tok_whitespace(t) && t.kind == TokenKind::BeginKeyword;
 }
 
 static bool is_else_keyword(const Tok& t) {
-    return !t.directive && !t.comment && !t.whitespace && t.kind == TokenKind::ElseKeyword;
+    return !tok_directive(t) && !tok_comment(t) && !tok_whitespace(t) && t.kind == TokenKind::ElseKeyword;
 }
 
 static bool is_identifier(const Tok& t) {
-    return !t.directive && !t.comment && !t.whitespace &&
+    return !tok_directive(t) && !tok_comment(t) && !tok_whitespace(t) &&
            (t.kind == TokenKind::Identifier || t.kind == TokenKind::SystemIdentifier ||
-            (!t.text.empty() &&
-             (std::isalpha((unsigned char)t.text[0]) || t.text[0] == '_' || t.text[0] == '$' ||
-              t.text[0] == '`') &&
+            (!tok_text(t).empty() &&
+             (std::isalpha((unsigned char)tok_text(t)[0]) || tok_text(t)[0] == '_' || tok_text(t)[0] == '$' ||
+              tok_text(t)[0] == '`') &&
              !is_keyword(t)));
 }
 
@@ -531,11 +565,11 @@ static bool is_numeric(const Tok& t) {
            t.kind == TokenKind::TimeLiteral;
 }
 
-static bool is_open_group(const Tok& t) { return t.text == "(" || t.text == "[" || t.text == "{"; }
+static bool is_open_group(const Tok& t) { return tok_text(t) == "(" || tok_text(t) == "[" || tok_text(t) == "{"; }
 
-static bool is_close_group(const Tok& t) { return t.text == ")" || t.text == "]" || t.text == "}"; }
+static bool is_close_group(const Tok& t) { return tok_text(t) == ")" || tok_text(t) == "]" || tok_text(t) == "}"; }
 
-static bool is_hierarchy(const Tok& t) { return t.text == "." || t.text == "::"; }
+static bool is_hierarchy(const Tok& t) { return tok_text(t) == "." || tok_text(t) == "::"; }
 
 static bool is_unary_op(const Tok& t) {
     switch (t.kind) {
@@ -716,10 +750,10 @@ static bool is_assignment_op(const Tok& t, bool in_parens = false) {
 }
 
 static bool continues_after_function_like_macro(const Tok& tok) {
-    if (tok.text == ";" || tok.text == "," || is_close_group(tok) || is_binary_op(tok) ||
+    if (tok_text(tok) == ";" || tok_text(tok) == "," || is_close_group(tok) || is_binary_op(tok) ||
         is_assignment_op(tok) || is_unary_op(tok))
         return true;
-    return tok.text == "." || tok.text == "::" || tok.text == "[" || tok.text == "with";
+    return tok_text(tok) == "." || tok_text(tok) == "::" || tok_text(tok) == "[" || tok_text(tok) == "with";
 }
 
 static bool binary_space_before(const std::string& mode) {
@@ -733,25 +767,25 @@ static bool binary_space_after(const std::string& mode) {
 enum class ParenKind { Ordinary, FunctionCall, EventControl };
 
 static ParenKind classify_paren(const Tok& L, bool procedural_at = false) {
-    if (L.text == "@")
+    if (tok_text(L) == "@")
         return procedural_at ? ParenKind::EventControl : ParenKind::FunctionCall;
-    if (is_identifier(L) || L.text == "]")
+    if (is_identifier(L) || tok_text(L) == "]")
         return ParenKind::FunctionCall;
     return ParenKind::Ordinary;
 }
 
 static bool looks_unary_context(const Tok& L, const Tok& R) {
-    if (R.text != "+" && R.text != "-")
+    if (tok_text(R) != "+" && tok_text(R) != "-")
         return false;
-    return L.text == "(" || L.text == "[" || L.text == "{" || L.text == "," || L.text == ";" ||
-           L.text == ":" || L.text == "?" || L.text == "=" || is_binary_op(L) || is_keyword(L);
+    return tok_text(L) == "(" || tok_text(L) == "[" || tok_text(L) == "{" || tok_text(L) == "," || tok_text(L) == ";" ||
+           tok_text(L) == ":" || tok_text(L) == "?" || tok_text(L) == "=" || is_binary_op(L) || is_keyword(L);
 }
 
 static bool is_indexed_part_select_op_pair(const Tok& A, const Tok& B) {
-    return (A.text == "+" || A.text == "-") && B.text == ":";
+    return (tok_text(A) == "+" || tok_text(A) == "-") && tok_text(B) == ":";
 }
 
-static bool is_indexed_part_select_op(const Tok& t) { return t.text == "+:" || t.text == "-:"; }
+static bool is_indexed_part_select_op(const Tok& t) { return tok_text(t) == "+:" || tok_text(t) == "-:"; }
 
 // ---------------------------------------------------------------------------
 // Disabled ranges (verilog_format: off/on and `define)
@@ -891,16 +925,16 @@ static bool in_disabled(int pos, const std::vector<std::pair<int, int>>& ranges)
 static int spaces_req(const Tok& L, const Tok& R, const FormatOptions& opts, bool in_dim,
                       bool in_for_header, bool in_parens, ParenKind paren_kind,
                       bool procedural_at) {
-    const auto& lx = L.text;
-    const auto& ll = L.lo;
-    const auto& rx = R.text;
+    const auto& lx = tok_text(L);
+    const auto& ll = tok_lo(L);
+    const auto& rx = tok_text(R);
     const auto& sp = opts.spacing;
     bool L_assign = is_assignment_op(L, in_parens);
     bool R_assign = is_assignment_op(R, in_parens);
 
     if (is_line_directive(L) || is_line_directive(R))
         return 0;
-    if (R.comment)
+    if (tok_comment(R))
         return 1;
     if (lx == "(") {
         if (paren_kind == ParenKind::EventControl)
@@ -1046,18 +1080,18 @@ static int spaces_req(const Tok& L, const Tok& R, const FormatOptions& opts, boo
 // ---------------------------------------------------------------------------
 
 static SD break_dec(const Tok& L, const Tok& R, const FormatOptions& opts, bool in_dim) {
-    const auto& lx = L.text;
-    const auto& ll = L.lo;
-    const auto& rx = R.text;
-    const auto& rl = R.lo;
+    const auto& lx = tok_text(L);
+    const auto& ll = tok_lo(L);
+    const auto& rx = tok_text(R);
+    const auto& rl = tok_lo(R);
 
     if (in_dim && lx != ":" && lx != "[" && lx != "]" && rx != ":" && rx != "[" && rx != "]")
         return SD::Preserve;
     if (is_line_directive(R) || is_line_directive(L))
         return SD::MustWrap;
-    if (L.comment && L.text.find('\n') != std::string::npos)
+    if (tok_comment(L) && tok_text(L).find('\n') != std::string::npos)
         return SD::MustWrap;
-    if (L.comment && L.text.rfind("//", 0) == 0)
+    if (tok_comment(L) && tok_text(L).rfind("//", 0) == 0)
         return SD::MustWrap;
     if (is_unary_op(L))
         return SD::MustAppend;
@@ -1087,15 +1121,18 @@ static SD break_dec(const Tok& L, const Tok& R, const FormatOptions& opts, bool 
 static void push_tok(std::vector<Tok>& toks, TokenKind kind, std::string text, int pos,
                      bool whitespace = false, bool comment = false, bool directive = false,
                      syntax::SyntaxKind directive_kind = syntax::SyntaxKind::Unknown) {
+    auto lex = std::make_shared<TokLexeme>();
+    lex->kind = kind;
+    lex->lo = lower(text);
+    lex->text = std::move(text);
+    lex->pos = pos;
+    lex->whitespace = whitespace;
+    lex->comment = comment;
+    lex->directive = directive;
+    lex->directive_kind = directive_kind;
     Tok t;
+    t.lex = std::move(lex);
     t.kind = kind;
-    t.lo = lower(text);
-    t.text = std::move(text);
-    t.pos = pos;
-    t.whitespace = whitespace;
-    t.comment = comment;
-    t.directive = directive;
-    t.directive_kind = directive_kind;
     toks.push_back(std::move(t));
 }
 
@@ -1248,7 +1285,7 @@ static std::string normalize_spacing_fragment(const std::string& text, const For
     std::string out;
     const Tok* prev = nullptr;
     for (const auto& tok : toks) {
-        if (tok.whitespace)
+        if (tok_whitespace(tok))
             continue;
         if (prev) {
             int spaces =
@@ -1256,7 +1293,7 @@ static std::string normalize_spacing_fragment(const std::string& text, const For
             if (spaces > 0)
                 out += std::string(spaces, ' ');
         }
-        out += tok.text;
+        out += tok_text(tok);
         prev = &tok;
     }
     return out;
@@ -1383,10 +1420,10 @@ static std::vector<Tok> collect_lexer_tokens(const std::string& source) {
 
 static bool line_has_pp_conditional(const std::string& line) {
     for (const auto& tok : collect_lexer_tokens(line)) {
-        if (tok.whitespace || tok.comment)
+        if (tok_whitespace(tok) || tok_comment(tok))
             continue;
-        if ((is_line_directive(tok) && is_pp_conditional(tok.directive_kind)) ||
-            is_pp_conditional_text(tok.text))
+        if ((is_line_directive(tok) && is_pp_conditional(tok_directive_kind(tok))) ||
+            is_pp_conditional_text(tok_text(tok)))
             return true;
     }
     return false;
@@ -1422,14 +1459,14 @@ static PPContext build_pp_context(const std::vector<std::string>& lines) {
         bool is_endif = false;
         bool is_cond = false;
         for (const auto& tok : collect_lexer_tokens(lines[i])) {
-            if (tok.whitespace || tok.comment)
+            if (tok_whitespace(tok) || tok_comment(tok))
                 continue;
-            if ((is_line_directive(tok) && is_pp_conditional(tok.directive_kind)) ||
-                is_pp_conditional_text(tok.text)) {
+            if ((is_line_directive(tok) && is_pp_conditional(tok_directive_kind(tok))) ||
+                is_pp_conditional_text(tok_text(tok))) {
                 is_cond = true;
                 syntax::SyntaxKind kind = tok.kind == TokenKind::Directive
-                                              ? tok.directive_kind
-                                              : directive_at_offset(tok.text, 0).kind;
+                                              ? tok_directive_kind(tok)
+                                              : directive_at_offset(tok_text(tok), 0).kind;
                 is_if = kind == syntax::SyntaxKind::IfDefDirective ||
                         kind == syntax::SyntaxKind::IfNDefDirective;
                 is_endif = kind == syntax::SyntaxKind::EndIfDirective;
@@ -1479,8 +1516,8 @@ static std::string trim_right_copy(std::string s) {
 static std::pair<std::string, std::string> split_code_line_comment_tokenized(
     const std::string& line) {
     for (const auto& tok : collect_lexer_tokens(line)) {
-        if (tok.comment) {
-            return {trim_right_copy(line.substr(0, (size_t)tok.pos)), " " + line.substr(tok.pos)};
+        if (tok_comment(tok)) {
+            return {trim_right_copy(line.substr(0, (size_t)tok_pos(tok))), " " + line.substr(tok_pos(tok))};
         }
     }
     return {trim_right_copy(line), ""};
@@ -1489,9 +1526,9 @@ static std::pair<std::string, std::string> split_code_line_comment_tokenized(
 static std::vector<std::string> code_tokens_for_alignment(const std::string& code) {
     std::vector<std::string> out;
     for (const auto& tok : collect_lexer_tokens(code)) {
-        if (tok.whitespace || tok.comment || tok.directive)
+        if (tok_whitespace(tok) || tok_comment(tok) || tok_directive(tok))
             continue;
-        out.push_back(tok.text);
+        out.push_back(tok_text(tok));
     }
     return out;
 }
@@ -1533,7 +1570,7 @@ static std::vector<std::string> group_scope_resolution_tokens(std::vector<std::s
 static std::vector<Tok> significant_tokens(const std::string& text) {
     std::vector<Tok> out;
     for (auto& tok : collect_lexer_tokens(text)) {
-        if (!tok.whitespace && !tok.comment && !tok.directive)
+        if (!tok_whitespace(tok) && !tok_comment(tok) && !tok_directive(tok))
             out.push_back(std::move(tok));
     }
     return out;
@@ -1542,22 +1579,22 @@ static std::vector<Tok> significant_tokens(const std::string& text) {
 static std::vector<Tok> significant_tokens_from(const std::vector<Tok>& toks) {
     std::vector<Tok> out;
     for (const auto& tok : toks) {
-        if (!tok.whitespace && !tok.comment && !tok.directive)
+        if (!tok_whitespace(tok) && !tok_comment(tok) && !tok_directive(tok))
             out.push_back(tok);
     }
     return out;
 }
 
 static bool tok_is(const Tok& tok, const std::string& text, TokenKind kind) {
-    return tok.text == text || tok.kind == kind;
+    return tok_text(tok) == text || tok.kind == kind;
 }
 
 static bool tok_contains(const Tok& tok, char ch) {
-    if (!tok.text.empty() && tok.text[0] == '"')
+    if (!tok_text(tok).empty() && tok_text(tok)[0] == '"')
         return false;
-    if (tok.text.size() > 2)
+    if (tok_text(tok).size() > 2)
         return false;
-    return tok.text.find(ch) != std::string::npos;
+    return tok_text(tok).find(ch) != std::string::npos;
 }
 
 static bool starts_with_chars(const std::string& s, char a) {
@@ -1584,7 +1621,7 @@ static std::vector<ArgPiece> split_top_level_args_with_commas(const std::string&
     int bracket = 0;
     int brace = 0;
     for (const auto& tok : collect_lexer_tokens(text)) {
-        if (tok.whitespace || tok.comment || tok.directive)
+        if (tok_whitespace(tok) || tok_comment(tok) || tok_directive(tok))
             continue;
         if (tok_contains(tok, '('))
             ++paren;
@@ -1599,8 +1636,8 @@ static std::vector<ArgPiece> split_top_level_args_with_commas(const std::string&
         else if (tok_contains(tok, '}') && brace > 0)
             --brace;
         else if (tok_is(tok, ",", TokenKind::Comma) && paren == 0 && bracket == 0 && brace == 0) {
-            parts.push_back({text.substr(start, (size_t)tok.pos - start), true});
-            start = (size_t)tok.pos + tok.text.size();
+            parts.push_back({text.substr(start, (size_t)tok_pos(tok) - start), true});
+            start = (size_t)tok_pos(tok) + tok_text(tok).size();
         }
     }
     parts.push_back({text.substr(start), false});
@@ -1614,7 +1651,7 @@ static std::vector<std::string> split_top_level(const std::string& text) {
     int bracket = 0;
     int brace = 0;
     for (const auto& tok : collect_lexer_tokens(text)) {
-        if (tok.whitespace || tok.comment || tok.directive)
+        if (tok_whitespace(tok) || tok_comment(tok) || tok_directive(tok))
             continue;
         if (tok_contains(tok, '('))
             ++paren;
@@ -1629,8 +1666,8 @@ static std::vector<std::string> split_top_level(const std::string& text) {
         else if (tok_contains(tok, '}') && brace > 0)
             --brace;
         else if (tok_is(tok, ",", TokenKind::Comma) && paren == 0 && bracket == 0 && brace == 0) {
-            parts.push_back(text.substr(start, (size_t)tok.pos - start));
-            start = (size_t)tok.pos + tok.text.size();
+            parts.push_back(text.substr(start, (size_t)tok_pos(tok) - start));
+            start = (size_t)tok_pos(tok) + tok_text(tok).size();
         }
     }
     parts.push_back(text.substr(start));
@@ -1835,7 +1872,7 @@ static PortParsed parse_port(const std::string& raw, const FormatOptions& opts) 
     return r;
 }
 
-static std::vector<std::string> align_port_pass(std::vector<std::string> lines,
+static std::vector<std::string> align_port_pass_legacy(std::vector<std::string> lines,
                                                    const FormatOptions& opts) {
     std::string text = render_lines(lines);
     auto disabled = find_disabled(text);
@@ -1864,9 +1901,9 @@ static std::vector<std::string> align_port_pass(std::vector<std::string> lines,
     };
     auto is_standalone_comment = [&](const std::string& text) {
         for (const auto& tok : collect_lexer_tokens(text)) {
-            if (tok.whitespace)
+            if (tok_whitespace(tok))
                 continue;
-            return tok.comment;
+            return tok_comment(tok);
         }
         return false;
     };
@@ -2121,7 +2158,7 @@ static std::vector<std::string> align_port_pass(std::vector<std::string> lines,
 // Statement assignment alignment pass
 // ---------------------------------------------------------------------------
 
-static std::vector<std::string> align_assign_pass(std::vector<std::string> lines,
+static std::vector<std::string> align_assign_pass_legacy(std::vector<std::string> lines,
                                                      const FormatOptions& opts) {
     std::string text = render_lines(lines);
     auto disabled = find_disabled(text);
@@ -2134,9 +2171,9 @@ static std::vector<std::string> align_assign_pass(std::vector<std::string> lines
         int bracket = 0;
         int brace = 0;
         for (const auto& tok : collect_lexer_tokens(line)) {
-            if (tok.comment)
+            if (tok_comment(tok))
                 break;
-            if (tok.whitespace || tok.directive)
+            if (tok_whitespace(tok) || tok_directive(tok))
                 continue;
             if (tok_is(tok, "(", TokenKind::OpenParenthesis))
                 ++paren;
@@ -2151,8 +2188,8 @@ static std::vector<std::string> align_assign_pass(std::vector<std::string> lines
             else if (tok_is(tok, "}", TokenKind::CloseBrace) && brace > 0)
                 --brace;
             if (paren == 0 && bracket == 0 && brace == 0 &&
-                std::find(OPS.begin(), OPS.end(), tok.text) != OPS.end())
-                return {tok.pos, tok.text};
+                std::find(OPS.begin(), OPS.end(), tok_text(tok)) != OPS.end())
+                return {tok_pos(tok), tok_text(tok)};
         }
         return {-1, ""};
     };
@@ -2177,7 +2214,7 @@ static std::vector<std::string> align_assign_pass(std::vector<std::string> lines
     };
     auto starts_with_kind = [](const std::string& line, TokenKind kind) -> bool {
         for (const auto& tok : collect_lexer_tokens(line)) {
-            if (tok.whitespace || tok.comment || tok.directive)
+            if (tok_whitespace(tok) || tok_comment(tok) || tok_directive(tok))
                 continue;
             return tok.kind == kind;
         }
@@ -2464,7 +2501,7 @@ static VarParsed* parse_var_line(const std::string& line, const FormatOptions& o
     return vp;
 }
 
-static std::vector<std::string> align_var_pass(std::vector<std::string> lines,
+static std::vector<std::string> align_var_pass_legacy(std::vector<std::string> lines,
                                                   const FormatOptions& opts) {
     const auto& vo = opts.var_declaration;
     std::string text = render_lines(lines);
@@ -2509,9 +2546,9 @@ static std::vector<std::string> align_var_pass(std::vector<std::string> lines,
             // Comment/blank lines pass through without breaking block
             bool comment_or_blank = true;
             for (const auto& tok : collect_lexer_tokens(cur)) {
-                if (tok.whitespace)
+                if (tok_whitespace(tok))
                     continue;
-                comment_or_blank = tok.comment;
+                comment_or_blank = tok_comment(tok);
                 break;
             }
             if (comment_or_blank) {
@@ -2710,18 +2747,18 @@ static size_t find_line_comment_start(const std::string& line) {
 static std::string last_named_port_before_comment(const std::vector<Tok>& toks) {
     std::string last;
     for (size_t i = 0; i + 2 < toks.size(); ++i) {
-        if (toks[i].whitespace || toks[i].comment || toks[i].directive || toks[i].text != ".")
+        if (tok_whitespace(toks[i]) || tok_comment(toks[i]) || tok_directive(toks[i]) || tok_text(toks[i]) != ".")
             continue;
         size_t name_i = i + 1;
-        while (name_i < toks.size() && toks[name_i].whitespace)
+        while (name_i < toks.size() && tok_whitespace(toks[name_i]))
             ++name_i;
         if (name_i >= toks.size() || !is_identifier(toks[name_i]))
             continue;
         size_t open_i = name_i + 1;
-        while (open_i < toks.size() && toks[open_i].whitespace)
+        while (open_i < toks.size() && tok_whitespace(toks[open_i]))
             ++open_i;
         if (open_i < toks.size() && tok_is(toks[open_i], "(", TokenKind::OpenParenthesis))
-            last = toks[name_i].text;
+            last = tok_text(toks[name_i]);
     }
     return last;
 }
@@ -2732,18 +2769,18 @@ static std::string last_named_port_before_comment(const std::string& code) {
 
 static std::string first_named_port_in_code(const std::vector<Tok>& toks) {
     for (size_t i = 0; i + 2 < toks.size(); ++i) {
-        if (toks[i].whitespace || toks[i].comment || toks[i].directive || toks[i].text != ".")
+        if (tok_whitespace(toks[i]) || tok_comment(toks[i]) || tok_directive(toks[i]) || tok_text(toks[i]) != ".")
             continue;
         size_t name_i = i + 1;
-        while (name_i < toks.size() && toks[name_i].whitespace)
+        while (name_i < toks.size() && tok_whitespace(toks[name_i]))
             ++name_i;
         if (name_i >= toks.size() || !is_identifier(toks[name_i]))
             continue;
         size_t open_i = name_i + 1;
-        while (open_i < toks.size() && toks[open_i].whitespace)
+        while (open_i < toks.size() && tok_whitespace(toks[open_i]))
             ++open_i;
         if (open_i < toks.size() && tok_is(toks[open_i], "(", TokenKind::OpenParenthesis))
-            return toks[name_i].text;
+            return tok_text(toks[name_i]);
     }
     return "";
 }
@@ -2769,8 +2806,8 @@ static bool collect_instance(const std::vector<std::string>& lines, size_t start
         size_t line_comment = std::string::npos;
         auto stripped_toks = collect_lexer_tokens(stripped);
         for (const auto& tok : stripped_toks) {
-            if (tok.comment && starts_with_chars(tok.text, '/', '/')) {
-                line_comment = (size_t)tok.pos;
+            if (tok_comment(tok) && starts_with_chars(tok_text(tok), '/', '/')) {
+                line_comment = (size_t)tok_pos(tok);
                 code = stripped.substr(0, line_comment);
                 break;
             }
@@ -2782,7 +2819,7 @@ static bool collect_instance(const std::vector<std::string>& lines, size_t start
             int pd = start_depth;
             bool saw_hash = false;
             for (const auto& tok : toks) {
-                if (tok.whitespace || tok.comment || tok.directive)
+                if (tok_whitespace(tok) || tok_comment(tok) || tok_directive(tok))
                     continue;
                 if (pd > 0) {
                     if (tok_is(tok, "(", TokenKind::OpenParenthesis))
@@ -2819,7 +2856,7 @@ static bool collect_instance(const std::vector<std::string>& lines, size_t start
                 {
                     int d = depth;
                     for (const auto& tok : code_toks) {
-                        if (tok.whitespace || tok.comment || tok.directive)
+                        if (tok_whitespace(tok) || tok_comment(tok) || tok_directive(tok))
                             continue;
                         if (tok_is(tok, "(", TokenKind::OpenParenthesis))
                             ++d;
@@ -2850,7 +2887,7 @@ static bool collect_instance(const std::vector<std::string>& lines, size_t start
 
         parts.push_back(code);
         for (const auto& tok : code_toks) {
-            if (tok.whitespace || tok.comment || tok.directive)
+            if (tok_whitespace(tok) || tok_comment(tok) || tok_directive(tok))
                 continue;
             if (tok_is(tok, "(", TokenKind::OpenParenthesis))
                 ++depth;
@@ -2897,8 +2934,8 @@ static bool extract_port_list(const std::string& flat, std::string& port_list) {
     }
     if (depth != 0)
         return false;
-    size_t start = (size_t)toks[open_i].pos + toks[open_i].text.size();
-    size_t end = (size_t)toks[close_i].pos;
+    size_t start = (size_t)tok_pos(toks[open_i]) + tok_text(toks[open_i]).size();
+    size_t end = (size_t)tok_pos(toks[close_i]);
     port_list = flat.substr(start, end - start);
     size_t a = 0;
     while (a < port_list.size() && std::isspace((unsigned char)port_list[a]))
@@ -2931,36 +2968,36 @@ static void remove_block_comments_from_instance_port_list(std::string& port_list
     auto toks = collect_lexer_tokens(port_list);
     for (size_t ti = 0; ti < toks.size(); ++ti) {
         const auto& tok = toks[ti];
-        size_t tok_start = (size_t)tok.pos;
-        size_t tok_end = tok_start + tok.text.size();
+        size_t tok_start = (size_t)tok_pos(tok);
+        size_t tok_end = tok_start + tok_text(tok).size();
         if (tok_start > cursor)
             code += port_list.substr(cursor, tok_start - cursor);
 
-        if (tok.comment && starts_with_chars(tok.text, '/', '*') && paren_depth == 0) {
+        if (tok_comment(tok) && starts_with_chars(tok_text(tok), '/', '*') && paren_depth == 0) {
             size_t next = ti + 1;
-            while (next < toks.size() && toks[next].whitespace)
+            while (next < toks.size() && tok_whitespace(toks[next]))
                 ++next;
             if (next < toks.size() && tok_is(toks[next], "(", TokenKind::OpenParenthesis)) {
-                code += tok.text;
+                code += tok_text(tok);
                 cursor = tok_end;
                 continue;
             }
             std::string port = last_named_port_before_comment(code);
             if (!port.empty()) {
                 if (!comments.port_comments.empty() && comments.port_comments.back().first == port)
-                    append_comment(comments.port_comments.back().second, tok.text);
+                    append_comment(comments.port_comments.back().second, tok_text(tok));
                 else
-                    comments.port_comments.push_back({port, tok.text});
+                    comments.port_comments.push_back({port, tok_text(tok)});
             } else {
-                append_comment(comments.header, tok.text);
+                append_comment(comments.header, tok_text(tok));
             }
             cursor = tok_end;
             continue;
         }
 
-        code += tok.text;
+        code += tok_text(tok);
         cursor = tok_end;
-        if (tok.whitespace || tok.comment || tok.directive)
+        if (tok_whitespace(tok) || tok_comment(tok) || tok_directive(tok))
             continue;
         if (tok_is(tok, "(", TokenKind::OpenParenthesis))
             ++paren_depth;
@@ -2990,7 +3027,7 @@ static bool parse_named_ports(const std::string& port_list,
     size_t i = 0;
     auto skip_ws_commas = [&]() {
         while (i < toks.size() &&
-               (toks[i].whitespace || tok_is(toks[i], ",", TokenKind::Comma)))
+               (tok_whitespace(toks[i]) || tok_is(toks[i], ",", TokenKind::Comma)))
             ++i;
     };
 
@@ -2998,8 +3035,8 @@ static bool parse_named_ports(const std::string& port_list,
         skip_ws_commas();
         if (i >= toks.size())
             break;
-        if (toks[i].directive || is_pp_conditional_text(toks[i].text)) {
-            size_t directive_start = (size_t)toks[i].pos;
+        if (tok_directive(toks[i]) || is_pp_conditional_text(tok_text(toks[i]))) {
+            size_t directive_start = (size_t)tok_pos(toks[i]);
             size_t directive_end = port_list.find('\n', directive_start);
             if (directive_end == std::string::npos)
                 directive_end = port_list.size();
@@ -3007,47 +3044,47 @@ static bool parse_named_ports(const std::string& port_list,
                 {true, false,
                  trim_copy(port_list.substr(directive_start, directive_end - directive_start)), "",
                  ""});
-            while (i < toks.size() && (size_t)toks[i].pos < directive_end)
+            while (i < toks.size() && (size_t)tok_pos(toks[i]) < directive_end)
                 ++i;
             continue;
         }
-        if (toks[i].comment) {
-            entries.push_back({false, true, trim_copy(toks[i].text), "", ""});
+        if (tok_comment(toks[i])) {
+            entries.push_back({false, true, trim_copy(tok_text(toks[i])), "", ""});
             ++i;
             continue;
         }
-        if (toks[i].text != ".")
+        if (tok_text(toks[i]) != ".")
             return false; // positional
         ++i;
-        while (i < toks.size() && toks[i].whitespace)
+        while (i < toks.size() && tok_whitespace(toks[i]))
             ++i;
         if (i >= toks.size() || !is_identifier(toks[i]))
             return false;
-        std::string port_name = toks[i].text;
+        std::string port_name = tok_text(toks[i]);
         ++i;
-        while (i < toks.size() && toks[i].whitespace)
+        while (i < toks.size() && tok_whitespace(toks[i]))
             ++i;
-        while (i < toks.size() && toks[i].comment && starts_with_chars(toks[i].text, '/', '*')) {
-            port_name += " " + toks[i].text;
+        while (i < toks.size() && tok_comment(toks[i]) && starts_with_chars(tok_text(toks[i]), '/', '*')) {
+            port_name += " " + tok_text(toks[i]);
             ++i;
-            while (i < toks.size() && toks[i].whitespace)
+            while (i < toks.size() && tok_whitespace(toks[i]))
                 ++i;
         }
         if (i >= toks.size() || !tok_is(toks[i], "(", TokenKind::OpenParenthesis))
             return false;
-        size_t sig_start = (size_t)toks[i].pos + toks[i].text.size();
+        size_t sig_start = (size_t)tok_pos(toks[i]) + tok_text(toks[i]).size();
         ++i;
         int depth = 1;
         size_t close_pos = std::string::npos;
         while (i < toks.size() && depth > 0) {
-            if (toks[i].whitespace || toks[i].comment || toks[i].directive) {
+            if (tok_whitespace(toks[i]) || tok_comment(toks[i]) || tok_directive(toks[i])) {
                 ++i;
                 continue;
             }
             if (tok_is(toks[i], "(", TokenKind::OpenParenthesis))
                 ++depth;
             else if (tok_is(toks[i], ")", TokenKind::CloseParenthesis) && --depth == 0) {
-                close_pos = (size_t)toks[i].pos;
+                close_pos = (size_t)tok_pos(toks[i]);
                 ++i;
                 break;
             }
@@ -3074,7 +3111,7 @@ static bool split_inst_parts(const std::string& flat, std::string& module_type,
     size_t i = 0;
     if (i >= toks.size() || !is_identifier(toks[i]))
         return false;
-    module_type = toks[i++].text;
+    module_type = tok_text(toks[i++]);
 
     param_block = "";
         if (i < toks.size() && tok_is(toks[i], "#", TokenKind::Hash)) {
@@ -3091,8 +3128,8 @@ static bool split_inst_parts(const std::string& flat, std::string& module_type,
             }
         if (depth != 0)
             return false;
-        size_t start = (size_t)toks[hash_i].pos;
-        size_t end = (size_t)toks[close_i].pos + toks[close_i].text.size();
+        size_t start = (size_t)tok_pos(toks[hash_i]);
+        size_t end = (size_t)tok_pos(toks[close_i]) + tok_text(toks[close_i]).size();
         param_block = flat.substr(start, end - start);
         while (!param_block.empty() && (param_block.back() == ' ' || param_block.back() == '\t'))
             param_block.pop_back();
@@ -3102,7 +3139,7 @@ static bool split_inst_parts(const std::string& flat, std::string& module_type,
     if (i >= toks.size() || !is_identifier(toks[i]))
         return false;
     size_t inst_i = i++;
-    inst_name = toks[inst_i].text;
+    inst_name = tok_text(toks[inst_i]);
 
     // Preserve unpacked instance dimensions between the instance name and
     // port list, e.g. "u_if[NUM_CH] ( ... )".
@@ -3133,15 +3170,15 @@ static bool split_inst_parts(const std::string& flat, std::string& module_type,
         return false;
 
     size_t after_close = close_i + 1;
-    while (after_close < toks.size() && toks[after_close].comment)
+    while (after_close < toks.size() && tok_comment(toks[after_close]))
         ++after_close;
     if (after_close >= toks.size() || !tok_is(toks[after_close], ";", TokenKind::Semicolon))
         return false;
     if (after_close + 1 != toks.size())
         return false;
 
-    size_t suffix_start = (size_t)toks[inst_i].pos + toks[inst_i].text.size();
-    size_t suffix_end = (size_t)toks[open_i].pos;
+    size_t suffix_start = (size_t)tok_pos(toks[inst_i]) + tok_text(toks[inst_i]).size();
+    size_t suffix_end = (size_t)tok_pos(toks[open_i]);
     inst_suffix = flat.substr(suffix_start, suffix_end - suffix_start);
     size_t a = 0;
     while (a < inst_suffix.size() && (inst_suffix[a] == ' ' || inst_suffix[a] == '\t'))
@@ -3150,8 +3187,8 @@ static bool split_inst_parts(const std::string& flat, std::string& module_type,
     while (b > a && (inst_suffix[b - 1] == ' ' || inst_suffix[b - 1] == '\t'))
         --b;
     inst_suffix = inst_suffix.substr(a, b - a);
-    port_open = (size_t)toks[open_i].pos;
-    port_close = (size_t)toks[close_i].pos;
+    port_open = (size_t)tok_pos(toks[open_i]);
+    port_close = (size_t)tok_pos(toks[close_i]);
     return true;
 }
 
@@ -3196,7 +3233,7 @@ static bool can_start_instance_candidate(const std::vector<Tok>& toks) {
     return false;
 }
 
-static std::vector<std::string> expand_instances_pass(std::vector<std::string> lines,
+static std::vector<std::string> expand_instances_pass_legacy(std::vector<std::string> lines,
                                                         const FormatOptions& opts) {
     std::string text = render_lines(lines);
     auto disabled = find_disabled(text);
@@ -3209,11 +3246,23 @@ static std::vector<std::string> expand_instances_pass(std::vector<std::string> l
 
     std::vector<std::string> out;
     size_t i = 0;
+    int pp_depth = 0;
     while (i < lines.size()) {
         const std::string& line = lines[i];
+        std::string trimmed_line = trim_copy(line);
+        bool pp_open = trimmed_line.rfind("`ifdef", 0) == 0 ||
+                       trimmed_line.rfind("`ifndef", 0) == 0 ||
+                       trimmed_line.rfind("`elsif", 0) == 0 ||
+                       trimmed_line.rfind("`else", 0) == 0;
+        bool pp_close = trimmed_line.rfind("`endif", 0) == 0;
 
-        if (in_disabled(line_starts[i], disabled) || line_has_pp_conditional(lines[i])) {
+        if (pp_depth > 0 || pp_open || pp_close ||
+            in_disabled(line_starts[i], disabled) || line_has_pp_conditional(lines[i])) {
             out.push_back(lines[i]);
+            if (trimmed_line.rfind("`ifdef", 0) == 0 || trimmed_line.rfind("`ifndef", 0) == 0)
+                ++pp_depth;
+            else if (pp_close && pp_depth > 0)
+                --pp_depth;
             ++i;
             continue;
         }
@@ -3442,7 +3491,7 @@ static bool collect_statement_lines(const std::vector<std::string>& lines, size_
             return false;
         parts.push_back(trimmed);
         for (const auto& tok : collect_lexer_tokens(trimmed)) {
-            if (tok.whitespace || tok.comment || tok.directive)
+            if (tok_whitespace(tok) || tok_comment(tok) || tok_directive(tok))
                 continue;
             if (tok_contains(tok, '('))
                 ++paren;
@@ -3483,7 +3532,7 @@ static size_t find_top_level_equal(const std::string& text) {
     int bracket = 0;
     int brace = 0;
     for (const auto& tok : collect_lexer_tokens(text)) {
-        if (tok.whitespace || tok.comment || tok.directive)
+        if (tok_whitespace(tok) || tok_comment(tok) || tok_directive(tok))
             continue;
         if (tok_contains(tok, '('))
             ++paren;
@@ -3498,7 +3547,7 @@ static size_t find_top_level_equal(const std::string& text) {
         else if (tok_contains(tok, '}') && brace > 0)
             --brace;
         else if (tok_is(tok, "=", TokenKind::Unknown) && paren == 0 && bracket == 0 && brace == 0)
-            return (size_t)tok.pos;
+            return (size_t)tok_pos(tok);
     }
     return std::string::npos;
 }
@@ -3509,7 +3558,7 @@ static std::string pad_right(std::string s, int width) {
     return s;
 }
 
-static std::vector<std::string> format_enum_declaration_pass(std::vector<std::string> lines,
+static std::vector<std::string> format_enum_declaration_pass_legacy(std::vector<std::string> lines,
                                                                const FormatOptions& opts) {
     const auto& eo = opts.enum_declaration;
     const std::string enum_indent(opts.indent_size, ' ');
@@ -3530,7 +3579,7 @@ static std::vector<std::string> format_enum_declaration_pass(std::vector<std::st
             continue;
         }
 
-        std::string leading = line.substr(0, (size_t)first_line_toks[0].pos);
+        std::string leading = line.substr(0, (size_t)tok_pos(first_line_toks[0]));
         auto toks = significant_tokens(flat);
         size_t typedef_i = 0;
         if (toks.empty() || toks[typedef_i].kind != TokenKind::TypedefKeyword) {
@@ -3551,7 +3600,7 @@ static std::vector<std::string> format_enum_declaration_pass(std::vector<std::st
             out.push_back(lines[i]);
             continue;
         }
-        size_t open = (size_t)toks[open_i].pos;
+        size_t open = (size_t)tok_pos(toks[open_i]);
         int depth = 1;
         size_t close_i = open_i;
         while (++close_i < toks.size()) {
@@ -3564,7 +3613,7 @@ static std::vector<std::string> format_enum_declaration_pass(std::vector<std::st
             out.push_back(lines[i]);
             continue;
         }
-        size_t close = (size_t)toks[close_i].pos;
+        size_t close = (size_t)tok_pos(toks[close_i]);
         size_t semi_i = close_i + 1;
         while (semi_i < toks.size() && !tok_is(toks[semi_i], ";", TokenKind::Semicolon))
             ++semi_i;
@@ -3572,7 +3621,7 @@ static std::vector<std::string> format_enum_declaration_pass(std::vector<std::st
             out.push_back(lines[i]);
             continue;
         }
-        size_t semi = (size_t)toks[semi_i].pos;
+        size_t semi = (size_t)tok_pos(toks[semi_i]);
 
         std::string prefix = trim_copy(flat.substr(0, open));
         std::string body = flat.substr(open + 1, close - open - 1);
@@ -3677,8 +3726,8 @@ static bool parse_modport_statement(const std::string& flat, std::vector<Modport
         return false;
     if (!tok_is(toks.back(), ";", TokenKind::Semicolon))
         return false;
-    size_t rest_start = (size_t)toks[0].pos + toks[0].text.size();
-    size_t semi = (size_t)toks.back().pos;
+    size_t rest_start = (size_t)tok_pos(toks[0]) + tok_text(toks[0]).size();
+    size_t semi = (size_t)tok_pos(toks.back());
     std::string rest = flat.substr(rest_start, semi - rest_start);
     auto entries = split_top_level(rest);
     auto is_modport_dir = [](TokenKind kind) {
@@ -3712,9 +3761,9 @@ static bool parse_modport_statement(const std::string& flat, std::vector<Modport
             return false;
 
         ModportParsed mp;
-        mp.name = entry_toks[0].text;
-        size_t open = (size_t)entry_toks[open_i].pos;
-        size_t close = (size_t)entry_toks[close_i].pos;
+        mp.name = tok_text(entry_toks[0]);
+        size_t open = (size_t)tok_pos(entry_toks[open_i]);
+        size_t close = (size_t)tok_pos(entry_toks[close_i]);
         auto items = split_top_level(entry.substr(open + 1, close - open - 1));
         for (auto& item_raw : items) {
             std::string item = trim_copy(item_raw);
@@ -3723,8 +3772,8 @@ static bool parse_modport_statement(const std::string& flat, std::vector<Modport
             auto item_toks = significant_tokens(item);
             if (item_toks.empty())
                 return false;
-            std::string dir = item_toks[0].text;
-            size_t remainder_start = (size_t)item_toks[0].pos + item_toks[0].text.size();
+            std::string dir = tok_text(item_toks[0]);
+            size_t remainder_start = (size_t)tok_pos(item_toks[0]) + tok_text(item_toks[0]).size();
             std::string remainder = trim_copy(item.substr(remainder_start));
             if (dir.empty() || remainder.empty() || !is_modport_dir(item_toks[0].kind))
                 return false;
@@ -3737,7 +3786,7 @@ static bool parse_modport_statement(const std::string& flat, std::vector<Modport
     return !modports.empty();
 }
 
-static std::vector<std::string> format_modport_pass(std::vector<std::string> lines,
+static std::vector<std::string> format_modport_pass_legacy(std::vector<std::string> lines,
                                                       const FormatOptions& opts) {
     const auto& mo = opts.modport;
     const std::string item_indent(opts.indent_size, ' ');
@@ -3764,7 +3813,7 @@ static std::vector<std::string> format_modport_pass(std::vector<std::string> lin
             continue;
         }
 
-        std::string leading = line.substr(0, (size_t)line_toks[0].pos);
+        std::string leading = line.substr(0, (size_t)tok_pos(line_toks[0]));
         for (size_t mi = 0; mi < modports.size(); ++mi) {
             const auto& mp = modports[mi];
             int item_base_col = (int)leading.size() + opts.indent_size;
@@ -3828,25 +3877,25 @@ static bool find_simple_call(const std::string& line, size_t& name_start, size_t
     auto toks = collect_lexer_tokens(line);
     for (size_t i = 0; i < toks.size(); ++i) {
         const auto& tok = toks[i];
-        if (tok.whitespace || tok.comment)
+        if (tok_whitespace(tok) || tok_comment(tok))
             continue;
-        bool callable = is_identifier(tok) || starts_with_chars(tok.text, '`');
+        bool callable = is_identifier(tok) || starts_with_chars(tok_text(tok), '`');
         if (!callable)
             continue;
         size_t prev = i;
-        while (prev > 0 && toks[prev - 1].whitespace)
+        while (prev > 0 && tok_whitespace(toks[prev - 1]))
             --prev;
         size_t member_start = i;
-        if (prev > 0 && toks[prev - 1].text == ".") {
+        if (prev > 0 && tok_text(toks[prev - 1]) == ".") {
             size_t base = prev - 1;
-            while (base > 0 && toks[base - 1].whitespace)
+            while (base > 0 && tok_whitespace(toks[base - 1]))
                 --base;
             if (base == 0 || !is_identifier(toks[base - 1]))
                 continue;
             member_start = base - 1;
         }
         size_t j = i + 1;
-        while (j < toks.size() && toks[j].whitespace)
+        while (j < toks.size() && tok_whitespace(toks[j]))
             ++j;
         if (j >= toks.size() || !tok_is(toks[j], "(", TokenKind::OpenParenthesis))
             continue;
@@ -3855,7 +3904,7 @@ static bool find_simple_call(const std::string& line, size_t& name_start, size_t
         int depth = 1;
         size_t k = j;
         while (++k < toks.size()) {
-            if (toks[k].whitespace || toks[k].comment || toks[k].directive)
+            if (tok_whitespace(toks[k]) || tok_comment(toks[k]) || tok_directive(toks[k]))
                 continue;
             if (tok_contains(toks[k], '('))
                 ++depth;
@@ -3864,10 +3913,10 @@ static bool find_simple_call(const std::string& line, size_t& name_start, size_t
         }
         if (depth != 0 || k >= toks.size())
             return false;
-        name_start = (size_t)toks[member_start].pos;
-        name_end = (size_t)tok.pos + tok.text.size();
-        open = (size_t)toks[j].pos;
-        close = (size_t)toks[k].pos;
+        name_start = (size_t)tok_pos(toks[member_start]);
+        name_end = (size_t)tok_pos(tok) + tok_text(tok).size();
+        open = (size_t)tok_pos(toks[j]);
+        close = (size_t)tok_pos(toks[k]);
         return true;
     }
     return false;
@@ -3890,7 +3939,7 @@ static std::string render_call_single(const std::string& prefix, const std::stri
     return r;
 }
 
-static std::vector<std::string> format_function_calls_pass(std::vector<std::string> lines,
+static std::vector<std::string> format_function_calls_pass_legacy(std::vector<std::string> lines,
                                                                 const FormatOptions& opts) {
     const auto& fo = opts.function;
     std::string text = render_lines(lines);
@@ -4032,7 +4081,7 @@ static bool collect_statement_lines_pp_aware(const std::vector<std::string>& lin
         }
         parts.push_back(trimmed);
         for (const auto& tok : collect_lexer_tokens(trimmed)) {
-            if (tok.whitespace || tok.comment || tok.directive)
+            if (tok_whitespace(tok) || tok_comment(tok) || tok_directive(tok))
                 continue;
             if (tok_contains(tok, '('))
                 ++paren;
@@ -4062,7 +4111,7 @@ static bool collect_statement_lines_pp_aware(const std::vector<std::string>& lin
     return false;
 }
 
-static std::vector<std::string> format_pp_conditional_function_calls_pass(
+static std::vector<std::string> format_pp_conditional_function_calls_pass_legacy(
     std::vector<std::string> lines, const FormatOptions& opts, const PPContext& pp) {
     const auto& fo = opts.function;
     std::string text = render_lines(lines);
@@ -4182,7 +4231,7 @@ static std::vector<std::string> format_pp_conditional_function_calls_pass(
     return out;
 }
 
-static std::vector<std::string> format_multiline_macro_arg_calls_pass(
+static std::vector<std::string> format_multiline_macro_arg_calls_pass_legacy(
     std::vector<std::string> lines, const FormatOptions& opts) {
     const auto& fo = opts.function;
     std::string text = render_lines(lines);
@@ -4343,7 +4392,7 @@ static bool extract_single_line_module_header(const std::string& line, std::stri
 
     if (i >= toks.size() || !tok_is(toks[i], "(", TokenKind::OpenParenthesis))
         return false;
-    size_t open_paren = (size_t)toks[i].pos;
+    size_t open_paren = (size_t)tok_pos(toks[i]);
 
     int depth = 1;
     size_t close_index = i;
@@ -4356,14 +4405,14 @@ static bool extract_single_line_module_header(const std::string& line, std::stri
     }
     if (depth != 0 || close_index >= toks.size())
         return false;
-    size_t close_paren = (size_t)toks[close_index].pos;
+    size_t close_paren = (size_t)tok_pos(toks[close_index]);
 
     size_t semi_index = close_index + 1;
     if (semi_index >= toks.size() || !tok_is(toks[semi_index], ";", TokenKind::Semicolon))
         return false;
     if (semi_index + 1 != toks.size())
         return false;
-    size_t semi_pos = (size_t)toks[semi_index].pos;
+    size_t semi_pos = (size_t)tok_pos(toks[semi_index]);
 
     prefix = line.substr(0, open_paren + 1);
     ports_str = line.substr(open_paren + 1, close_paren - open_paren - 1);
@@ -4396,7 +4445,7 @@ struct ModuleHeaderScan {
 
 static bool scan_module_header_line(ModuleHeaderScan& scan, const std::string& line) {
     for (const auto& tok : collect_lexer_tokens(line)) {
-        if (tok.whitespace || tok.comment || tok.directive)
+        if (tok_whitespace(tok) || tok_comment(tok) || tok_directive(tok))
             continue;
 
         if (!scan.saw_paren && tok.kind == TokenKind::ImportKeyword)
@@ -4447,8 +4496,8 @@ static std::vector<std::string> split_top_level_tokenized(const std::string& tex
         else if (tok_is(tok, "}", TokenKind::CloseBrace) && brace > 0)
             --brace;
         else if (tok_is(tok, ",", TokenKind::Comma) && paren == 0 && bracket == 0 && brace == 0) {
-            parts.push_back(text.substr(start, (size_t)tok.pos - start));
-            start = (size_t)tok.pos + tok.text.size();
+            parts.push_back(text.substr(start, (size_t)tok_pos(tok) - start));
+            start = (size_t)tok_pos(tok) + tok_text(tok).size();
         }
     }
     parts.push_back(text.substr(start));
@@ -4485,8 +4534,8 @@ static std::vector<std::string> split_module_ports_tokenized(const std::string& 
         else if (tok_is(tok, "}", TokenKind::CloseBrace) && brace > 0)
             --brace;
         else if (tok_is(tok, ",", TokenKind::Comma) && paren == 0 && bracket == 0 && brace == 0) {
-            size_t end = (size_t)tok.pos;
-            size_t next = (size_t)tok.pos + tok.text.size();
+            size_t end = (size_t)tok_pos(tok);
+            size_t next = (size_t)tok_pos(tok) + tok_text(tok).size();
             size_t p = next;
             while (p < text.size() && (text[p] == ' ' || text[p] == '\t'))
                 ++p;
@@ -4510,27 +4559,27 @@ static std::vector<std::string> split_module_ports_tokenized(const std::string& 
 
 static bool is_standalone_comment_line(const std::string& text) {
     for (const auto& tok : collect_lexer_tokens(text)) {
-        if (tok.whitespace)
+        if (tok_whitespace(tok))
             continue;
-        return tok.comment;
+        return tok_comment(tok);
     }
     return false;
 }
 
 static bool is_line_comment_token(const Tok& tok) {
-    return tok.comment && starts_with_chars(tok.text, '/', '/');
+    return tok_comment(tok) && starts_with_chars(tok_text(tok), '/', '/');
 }
 
 static size_t first_line_comment_start_tokenized(const std::string& text) {
     for (const auto& tok : collect_lexer_tokens(text)) {
         if (is_line_comment_token(tok))
-            return (size_t)tok.pos;
+            return (size_t)tok_pos(tok);
     }
     return std::string::npos;
 }
 
 static bool token_starts_physical_line(const std::string& text, const Tok& tok) {
-    size_t p = (size_t)tok.pos;
+    size_t p = (size_t)tok_pos(tok);
     while (p > 0 && (text[p - 1] == ' ' || text[p - 1] == '\t'))
         --p;
     return p == 0 || text[p - 1] == '\n';
@@ -4539,13 +4588,13 @@ static bool token_starts_physical_line(const std::string& text, const Tok& tok) 
 static size_t first_standalone_line_comment_tokenized(const std::string& text) {
     for (const auto& tok : collect_lexer_tokens(text)) {
         if (is_line_comment_token(tok) && token_starts_physical_line(text, tok))
-            return (size_t)tok.pos;
+            return (size_t)tok_pos(tok);
     }
     return std::string::npos;
 }
 
 static size_t token_end(const Tok& tok) {
-    return (size_t)tok.pos + tok.text.size();
+    return (size_t)tok_pos(tok) + tok_text(tok).size();
 }
 
 static size_t line_end_after_token(const std::string& text, const Tok& tok) {
@@ -4561,8 +4610,8 @@ static void erase_extra_comma_before_line_comment(std::string& line) {
         if (!tok_is(toks[i], ",", TokenKind::Comma) || !tok_is(toks[i + 1], ",", TokenKind::Comma))
             continue;
         size_t comment = first_line_comment_start_tokenized(line);
-        if (comment != std::string::npos && (size_t)toks[i + 1].pos < comment) {
-            line.erase((size_t)toks[i + 1].pos, token_end(toks[i + 1]) - (size_t)toks[i + 1].pos);
+        if (comment != std::string::npos && (size_t)tok_pos(toks[i + 1]) < comment) {
+            line.erase((size_t)tok_pos(toks[i + 1]), token_end(toks[i + 1]) - (size_t)tok_pos(toks[i + 1]));
             return;
         }
     }
@@ -4584,7 +4633,7 @@ static void normalize_trailing_comma_spacing(std::string& line) {
     for (const auto& tok : toks) {
         if (!tok_is(tok, ",", TokenKind::Comma))
             continue;
-        size_t comma = (size_t)tok.pos;
+        size_t comma = (size_t)tok_pos(tok);
         if (comment == std::string::npos || comma < comment)
             remove_space_before_comma_token(line, comma);
     }
@@ -4595,11 +4644,11 @@ static bool remove_last_code_comma(std::string& line) {
     auto toks = significant_tokens(line);
     for (size_t i = toks.size(); i > 0; --i) {
         const auto& tok = toks[i - 1];
-        if (comment != std::string::npos && (size_t)tok.pos >= comment)
+        if (comment != std::string::npos && (size_t)tok_pos(tok) >= comment)
             continue;
         if (!tok_is(tok, ",", TokenKind::Comma))
             return false;
-        line.erase((size_t)tok.pos, token_end(tok) - (size_t)tok.pos);
+        line.erase((size_t)tok_pos(tok), token_end(tok) - (size_t)tok_pos(tok));
         return true;
     }
     return false;
@@ -4618,9 +4667,9 @@ static bool is_comma_eligible_portlist_entry(PortListEntryKind kind) {
 
 static PortListEntryKind classify_portlist_entry(const std::string& text) {
     for (const auto& tok : collect_lexer_tokens(text)) {
-        if (tok.whitespace)
+        if (tok_whitespace(tok))
             continue;
-        if (tok.comment)
+        if (tok_comment(tok))
             return PortListEntryKind::Comment;
         if (is_line_directive(tok))
             return PortListEntryKind::Directive;
@@ -4635,12 +4684,12 @@ static std::string take_leading_portlist_block_comments_tokenized(std::string& p
     size_t erase_end = 0;
     std::string comments;
     for (const auto& tok : collect_lexer_tokens(ports_str)) {
-        if (tok.whitespace)
+        if (tok_whitespace(tok))
             continue;
-        if (!tok.comment || !starts_with_chars(tok.text, '/', '*'))
+        if (!tok_comment(tok) || !starts_with_chars(tok_text(tok), '/', '*'))
             break;
-        comments += ports_str.substr(erase_end, (size_t)tok.pos + tok.text.size() - erase_end);
-        erase_end = (size_t)tok.pos + tok.text.size();
+        comments += ports_str.substr(erase_end, (size_t)tok_pos(tok) + tok_text(tok).size() - erase_end);
+        erase_end = (size_t)tok_pos(tok) + tok_text(tok).size();
     }
     if (erase_end > 0)
         ports_str.erase(0, erase_end);
@@ -4649,9 +4698,9 @@ static std::string take_leading_portlist_block_comments_tokenized(std::string& p
 
 static std::string leading_horizontal_whitespace_tokenized(const std::string& line) {
     for (const auto& tok : collect_lexer_tokens(line)) {
-        if (tok.whitespace)
+        if (tok_whitespace(tok))
             continue;
-        return line.substr(0, (size_t)tok.pos);
+        return line.substr(0, (size_t)tok_pos(tok));
     }
     return line;
 }
@@ -4671,9 +4720,9 @@ static bool find_module_parameter_block(const std::string& prefix, size_t& hash_
             if (tok_is(toks[k], "(", TokenKind::OpenParenthesis))
                 ++depth;
             else if (tok_is(toks[k], ")", TokenKind::CloseParenthesis) && --depth == 0) {
-                hash_pos = (size_t)toks[i].pos;
-                param_open = (size_t)toks[j].pos;
-                param_close = (size_t)toks[k].pos;
+                hash_pos = (size_t)tok_pos(toks[i]);
+                param_open = (size_t)tok_pos(toks[j]);
+                param_close = (size_t)tok_pos(toks[k]);
                 return true;
             }
         }
@@ -4808,391 +4857,577 @@ static bool line_has_token_kind(const std::string& line, TokenKind kind) {
     return false;
 }
 
-static std::vector<std::string> format_class_extends_parameter_pass(
-    std::vector<std::string> lines, const FormatOptions& opts) {
-    std::string text = render_lines(lines);
-    auto disabled = find_disabled(text);
-    auto line_starts = line_start_offsets(lines);
-
-    std::vector<std::string> out;
-    for (size_t li = 0; li < lines.size(); ++li) {
-        const auto& line = lines[li];
-        if (in_disabled(line_starts[li], disabled) || line_has_pp_conditional(line)) {
-            out.push_back(line);
+static bool token_range_has_pp_conditional(const std::vector<Tok>& tokens, size_t first,
+                                           size_t end) {
+    for (size_t i = first; i < end && i < tokens.size(); ++i) {
+        if (tok_whitespace(tokens[i]) || tok_comment(tokens[i]))
             continue;
-        }
+        if ((is_line_directive(tokens[i]) && is_pp_conditional(tok_directive_kind(tokens[i]))) ||
+            is_pp_conditional_text(tok_text(tokens[i])))
+            return true;
+    }
+    return false;
+}
 
-        auto toks = significant_tokens(line);
-        if (toks.empty() || toks[0].kind != TokenKind::ClassKeyword ||
-            !line_has_token_kind(line, TokenKind::ExtendsKeyword)) {
-            out.push_back(line);
-            continue;
-        }
+static bool token_range_disabled_or_passthrough(const std::vector<Tok>& tokens, size_t first,
+                                                size_t end) {
+    for (size_t i = first; i < end && i < tokens.size(); ++i) {
+        if (!tok_whitespace(tokens[i]) && (tokens[i].fmt_disabled || tokens[i].fmt_passthrough))
+            return true;
+    }
+    return false;
+}
 
-        size_t hash_i = toks.size();
-        for (size_t i = 0; i + 1 < toks.size(); ++i) {
-            if (tok_is(toks[i], "#", TokenKind::Hash) &&
-                tok_is(toks[i + 1], "(", TokenKind::OpenParenthesis)) {
-                hash_i = i;
-                break;
-            }
-        }
-        if (hash_i == toks.size()) {
-            out.push_back(line);
-            continue;
-        }
-
-        int depth = 1;
-        size_t close_i = hash_i + 1;
-        while (++close_i < toks.size()) {
-            if (tok_is(toks[close_i], "(", TokenKind::OpenParenthesis))
-                ++depth;
-            else if (tok_is(toks[close_i], ")", TokenKind::CloseParenthesis) && --depth == 0)
-                break;
-        }
-        if (depth != 0 || close_i >= toks.size()) {
-            out.push_back(line);
-            continue;
-        }
-
-        size_t hash_pos = (size_t)toks[hash_i].pos;
-        size_t open_pos = (size_t)toks[hash_i + 1].pos;
-        size_t close_pos = (size_t)toks[close_i].pos;
-        std::string before_hash = trim_right_copy(line.substr(0, hash_pos));
-        std::string params_str = line.substr(open_pos + 1, close_pos - open_pos - 1);
-        std::string suffix = trim_copy(line.substr(close_pos + 1));
-
-        auto raw_params = split_top_level(params_str);
-        std::vector<std::string> params;
-        for (auto& p : raw_params) {
-            std::string trimmed = trim_copy(p);
-            if (!trimmed.empty())
-                params.push_back(trimmed);
-        }
-        if (params.size() <= 1) {
-            out.push_back(line);
-            continue;
-        }
-
-        std::string leading_ws = leading_horizontal_whitespace_tokenized(line);
-        if (opts.module.parameter_layout == "block") {
-            std::string param_indent = leading_ws + std::string(opts.indent_size, ' ');
-            std::string r = before_hash + " #(\n";
-            for (size_t i = 0; i < params.size(); ++i) {
-                r += param_indent + params[i];
-                if (i + 1 < params.size())
-                    r += ",";
-                r += "\n";
-            }
-            r += leading_ws + ")" + suffix;
-            out.push_back(r);
-            continue;
-        }
-
-        std::string open = before_hash + " #(";
-        std::string hang(open.size(), ' ');
-        std::string r = open + params[0];
-        for (size_t i = 1; i < params.size(); ++i)
-            r += ",\n" + hang + params[i];
-        r += ")" + suffix;
-        out.push_back(r);
+static std::vector<size_t> code_sig_indices(const std::vector<Tok>& tokens, size_t first,
+                                            size_t end) {
+    std::vector<size_t> out;
+    for (size_t i = first; i < end && i < tokens.size(); ++i) {
+        if (!tok_whitespace(tokens[i]) && !tok_comment(tokens[i]) && !tok_directive(tokens[i]))
+            out.push_back(i);
     }
     return out;
 }
 
-static std::vector<std::string> format_portlist_pass(std::vector<std::string> lines,
-                                                       const FormatOptions& opts) {
-    const std::string indent_unit(opts.indent_size, ' ');
+static size_t next_code_sig(const std::vector<Tok>& tokens, size_t first, size_t end) {
+    for (size_t i = first; i < end && i < tokens.size(); ++i)
+        if (!tok_whitespace(tokens[i]) && !tok_comment(tokens[i]) && !tok_directive(tokens[i]))
+            return i;
+    return SIZE_MAX;
+}
 
-    std::vector<std::string> out;
-    auto push_original_lines = [&](size_t first, size_t last) {
-        for (size_t k = first; k <= last; ++k)
-            out.push_back(lines[k]);
-    };
-    for (size_t i = 0; i < lines.size(); ++i) {
-        std::string line = lines[i];
-
-        if (line_has_pp_conditional(line) || !could_start_module_header(line)) {
-            out.push_back(lines[i]);
-            continue;
-        }
-
-        bool module_start = is_module_header_start_tokenized(line);
-        if (!module_start) {
-            out.push_back(lines[i]);
-            continue;
-        }
-
-        ModuleHeaderScan header_scan;
-        bool header_complete = scan_module_header_line(header_scan, line);
-
-        size_t consumed_end = i;
-        if (!header_complete) {
-            std::string flat = line;
-            size_t j = i + 1;
-            for (; j < lines.size(); ++j) {
-                std::string trimmed = trim_copy(lines[j]);
-                // Preserve line boundaries so // comments in ANSI headers don't
-                // comment out following port declarations in the flattened text.
-                flat += "\n" + trimmed;
-                if (scan_module_header_line(header_scan, lines[j]))
-                    break;
-            }
-            if (j < lines.size()) {
-                line = flat;
-                consumed_end = j;
-            }
-        }
-        if (range_has_pp_conditional(lines, i, consumed_end)) {
-            push_original_lines(i, consumed_end);
-            i = consumed_end;
-            continue;
-        }
-
-        // Try to extract single-line module header: module foo [#(...)] (ports);
-        std::string prefix, ports_str, suffix_str;
-        if (!extract_single_line_module_header(line, prefix, ports_str, suffix_str)) {
-            push_original_lines(i, consumed_end);
-            i = consumed_end;
-            continue;
-        }
-        std::string leading_ws = leading_horizontal_whitespace_tokenized(line);
-        prefix = format_module_parameter_prefix(prefix, leading_ws, opts);
-        prefix += take_leading_portlist_block_comments_tokenized(ports_str);
-
-        auto ports = split_module_ports_tokenized(ports_str);
-        std::vector<std::string> trimmed_ports;
-        for (auto& p : ports) {
-            std::string rest = trim_all_copy(p);
-            while (!rest.empty()) {
-                bool consumed_directive = false;
-                for (const auto& tok : collect_lexer_tokens(rest)) {
-                    if (tok.whitespace)
-                        continue;
-                    if (is_line_directive(tok) && tok.pos == 0) {
-                        trimmed_ports.push_back(trim_all_copy(tok.text));
-                        rest = trim_all_copy(rest.substr(tok.text.size()));
-                        consumed_directive = true;
-                    }
-                    break;
-                }
-                if (consumed_directive)
-                    continue;
-
-                auto rest_toks = collect_lexer_tokens(rest);
-                const Tok* first_tok = nullptr;
-                for (const auto& tok : rest_toks) {
-                    if (!tok.whitespace) {
-                        first_tok = &tok;
-                        break;
-                    }
-                }
-
-                if (first_tok && is_line_comment_token(*first_tok)) {
-                    size_t line_end = line_end_after_token(rest, *first_tok);
-                    if (line_end >= rest.size()) {
-                        trimmed_ports.push_back(rest);
-                        rest.clear();
-                    } else {
-                        trimmed_ports.push_back(trim_all_copy(rest.substr(0, line_end)));
-                        rest = trim_all_copy(rest.substr(line_end + 1));
-                    }
-                    continue;
-                }
-
-                size_t standalone_comment = first_standalone_line_comment_tokenized(rest);
-                if (standalone_comment == std::string::npos) {
-                    trimmed_ports.push_back(std::move(rest));
-                    break;
-                }
-
-                std::string code = trim_all_copy(rest.substr(0, standalone_comment));
-                if (!code.empty())
-                    trimmed_ports.push_back(std::move(code));
-                rest = trim_all_copy(rest.substr(standalone_comment));
-            }
-        }
-        if (trimmed_ports.empty()) {
-            push_original_lines(i, consumed_end);
-            i = consumed_end;
-            continue;
-        }
-
-        // Leading whitespace
-        std::string port_indent = leading_ws + indent_unit;
-
-        // ANSI vs non-ANSI detection
-        std::vector<PortListEntryKind> port_kinds;
-        port_kinds.reserve(trimmed_ports.size());
-        bool is_ansi = false;
-        for (auto& p : trimmed_ports) {
-            PortListEntryKind kind = classify_portlist_entry(p);
-            port_kinds.push_back(kind);
-            if (kind == PortListEntryKind::Port) {
-                is_ansi = true;
-            }
-        }
-
-        std::string new_lines_str;
-        if (is_ansi) {
-            auto has_later_port = [&](size_t index) {
-                for (size_t pi = index + 1; pi < trimmed_ports.size(); ++pi) {
-                    if (is_comma_eligible_portlist_entry(port_kinds[pi]))
-                        return true;
-                }
-                return false;
-            };
-            std::string port_lines;
-            for (size_t k = 0; k < trimmed_ports.size(); ++k) {
-                std::string port = trimmed_ports[k];
-                std::string comma =
-                    (is_comma_eligible_portlist_entry(port_kinds[k]) &&
-                     (has_later_port(k) || opts.port_declaration.align))
-                        ? ","
-                        : "";
-                if (!comma.empty()) {
-                    size_t comment = find_line_comment_start(port);
-                    if (comment != std::string::npos)
-                        port = trim_right_copy(port.substr(0, comment)) + comma + " " +
-                               trim_left_copy(port.substr(comment));
-                    else
-                        port += comma;
-                }
-                port_lines += port_indent + port + "\n";
-            }
-            if (!port_lines.empty() && port_lines.back() == '\n')
-                port_lines.pop_back();
-            if (opts.port_declaration.align) {
-                auto port_flines = align_port_pass(text_to_lines(port_lines), opts);
-                port_lines = render_lines(port_flines);
-                std::vector<std::string> aligned_lines;
-                {
-                    std::istringstream ss(port_lines);
-                    std::string l;
-                    while (std::getline(ss, l)) {
-                        while (true) {
-                            std::string before = l;
-                            erase_extra_comma_before_line_comment(l);
-                            bool changed = l != before;
-                            if (!changed)
-                                break;
-                        }
-                        normalize_trailing_comma_spacing(l);
-                        aligned_lines.push_back(l);
-                    }
-                }
-                for (size_t ai = aligned_lines.size(); ai > 0; --ai) {
-                    std::string& l = aligned_lines[ai - 1];
-                    if (is_standalone_comment_line(l))
-                        continue;
-                    remove_last_code_comma(l);
-                    break;
-                }
-                port_lines.clear();
-                for (size_t ai = 0; ai < aligned_lines.size(); ++ai) {
-                    if (ai)
-                        port_lines += '\n';
-                    port_lines += aligned_lines[ai];
-                }
-                auto port_toks = significant_tokens(port_lines);
-                for (size_t ti = port_toks.size(); ti > 0; --ti) {
-                    const auto& tok = port_toks[ti - 1];
-                    if (tok_is(tok, ",", TokenKind::Comma)) {
-                        port_lines.erase((size_t)tok.pos, tok.text.size());
-                        break;
-                    }
-                    if (!tok.comment)
-                        break;
-                }
-                while (!port_lines.empty() &&
-                       (port_lines.back() == ' ' || port_lines.back() == '\t'))
-                    port_lines.pop_back();
-            }
-            new_lines_str = prefix + "\n" + port_lines + "\n" + leading_ws + suffix_str;
-        } else {
-            // Check all are simple identifiers.
-            bool all_simple = true;
-            for (auto& p : trimmed_ports) {
-                if (!is_simple_identifier_tokenized(p)) {
-                    all_simple = false;
-                    break;
-                }
-            }
-            if (!all_simple) {
-                push_original_lines(i, consumed_end);
-                i = consumed_end;
-                continue;
-            }
-
-            std::string port_block;
-            if (opts.module.non_ansi_port_per_line_enabled && opts.module.non_ansi_port_per_line > 0) {
-                int n = opts.module.non_ansi_port_per_line;
-                for (size_t gi = 0; gi < trimmed_ports.size(); gi += (size_t)n) {
-                    size_t end_g = std::min(gi + (size_t)n, trimmed_ports.size());
-                    std::string comma = (end_g < trimmed_ports.size()) ? "," : "";
-                    std::string grp_line = port_indent;
-                    for (size_t k = gi; k < end_g; ++k) {
-                        if (k > gi)
-                            grp_line += ", ";
-                        grp_line += trimmed_ports[k];
-                    }
-                    grp_line += comma;
-                    port_block += grp_line + "\n";
-                }
-            } else if (opts.module.non_ansi_port_max_line_length_enabled &&
-                       opts.module.non_ansi_port_max_line_length > 0) {
-                int max_len = opts.module.non_ansi_port_max_line_length;
-                std::vector<std::string> current;
-                for (size_t pi = 0; pi < trimmed_ports.size(); ++pi) {
-                    std::string candidate = port_indent;
-                    for (size_t k = 0; k < current.size(); ++k) {
-                        if (k)
-                            candidate += ", ";
-                        candidate += current[k];
-                    }
-                    candidate += ", " + trimmed_ports[pi];
-                    if (!current.empty() && (int)candidate.size() > max_len) {
-                        std::string row = port_indent;
-                        for (size_t k = 0; k < current.size(); ++k) {
-                            if (k)
-                                row += ", ";
-                            row += current[k];
-                        }
-                        row += ",";
-                        port_block += row + "\n";
-                        current = {trimmed_ports[pi]};
-                    } else {
-                        current.push_back(trimmed_ports[pi]);
-                    }
-                }
-                if (!current.empty()) {
-                    std::string row = port_indent;
-                    for (size_t k = 0; k < current.size(); ++k) {
-                        if (k)
-                            row += ", ";
-                        row += current[k];
-                    }
-                    port_block += row + "\n";
-                }
-            } else {
-                for (size_t k = 0; k < trimmed_ports.size(); ++k) {
-                    std::string comma = (k + 1 < trimmed_ports.size()) ? "," : "";
-                    port_block += port_indent + trimmed_ports[k] + comma + "\n";
-                }
-            }
-            if (!port_block.empty() && port_block.back() == '\n')
-                port_block.pop_back();
-            new_lines_str = prefix + "\n" + port_block + "\n" + leading_ws + suffix_str;
-        }
-
-        // Split new_lines_str by \n and push each line
-        auto new_flines = text_to_lines(new_lines_str);
-        for (auto& fl : new_flines)
-            out.push_back(std::move(fl));
-        i = consumed_end;
+static size_t prev_code_sig(const std::vector<Tok>& tokens, size_t first, size_t before) {
+    if (before > tokens.size())
+        before = tokens.size();
+    for (size_t i = before; i > first; --i) {
+        size_t idx = i - 1;
+        if (!tok_whitespace(tokens[idx]) && !tok_comment(tokens[idx]) && !tok_directive(tokens[idx]))
+            return idx;
     }
+    return SIZE_MAX;
+}
 
+static size_t matching_close_paren(const std::vector<Tok>& tokens, size_t open_idx,
+                                   size_t end_limit) {
+    int depth = 0;
+    for (size_t i = open_idx; i < end_limit && i < tokens.size(); ++i) {
+        if (tok_whitespace(tokens[i]) || tok_comment(tokens[i]) || tok_directive(tokens[i]))
+            continue;
+        if (tok_is(tokens[i], "(", TokenKind::OpenParenthesis))
+            ++depth;
+        else if (tok_is(tokens[i], ")", TokenKind::CloseParenthesis)) {
+            --depth;
+            if (depth == 0)
+                return i;
+        }
+    }
+    return SIZE_MAX;
+}
+
+static void format_class_extends_parameter_pass(std::vector<Tok>& tokens,
+                                                const FormatOptions& opts) {
+    auto starts = tok_line_starts(tokens);
+    for (size_t li = 0; li < starts.size(); ++li) {
+        size_t line_start = starts[li];
+        size_t line_end = (li + 1 < starts.size()) ? starts[li + 1] : tokens.size();
+        if (token_range_disabled_or_passthrough(tokens, line_start, line_end) ||
+            token_range_has_pp_conditional(tokens, line_start, line_end))
+            continue;
+
+        auto sigs = code_sig_indices(tokens, line_start, line_end);
+        if (sigs.empty() || tokens[sigs[0]].kind != TokenKind::ClassKeyword)
+            continue;
+        bool has_extends = false;
+        for (size_t idx : sigs)
+            has_extends = has_extends || tokens[idx].kind == TokenKind::ExtendsKeyword;
+        if (!has_extends)
+            continue;
+
+        size_t hash_idx = SIZE_MAX, open_idx = SIZE_MAX;
+        for (size_t si = 0; si + 1 < sigs.size(); ++si) {
+            if (tok_is(tokens[sigs[si]], "#", TokenKind::Hash) &&
+                tok_is(tokens[sigs[si + 1]], "(", TokenKind::OpenParenthesis)) {
+                hash_idx = sigs[si];
+                open_idx = sigs[si + 1];
+                break;
+            }
+        }
+        if (hash_idx == SIZE_MAX)
+            continue;
+        size_t close_idx = matching_close_paren(tokens, open_idx, line_end);
+        if (close_idx == SIZE_MAX)
+            continue;
+
+        std::vector<size_t> param_starts;
+        size_t first_param = next_code_sig(tokens, open_idx + 1, close_idx);
+        if (first_param != SIZE_MAX)
+            param_starts.push_back(first_param);
+        int paren = 0, bracket = 0, brace = 0;
+        for (size_t i = open_idx + 1; i < close_idx; ++i) {
+            if (tok_whitespace(tokens[i]) || tok_comment(tokens[i]) || tok_directive(tokens[i]))
+                continue;
+            if (tok_contains(tokens[i], '(')) ++paren;
+            else if (tok_contains(tokens[i], ')') && paren > 0) --paren;
+            else if (tok_contains(tokens[i], '[')) ++bracket;
+            else if (tok_contains(tokens[i], ']') && bracket > 0) --bracket;
+            else if (tok_contains(tokens[i], '{')) ++brace;
+            else if (tok_contains(tokens[i], '}') && brace > 0) --brace;
+            else if (tok_is(tokens[i], ",", TokenKind::Comma) && paren == 0 && bracket == 0 && brace == 0) {
+                size_t n = next_code_sig(tokens, i + 1, close_idx);
+                if (n != SIZE_MAX)
+                    param_starts.push_back(n);
+            }
+        }
+        if (param_starts.size() <= 1)
+            continue;
+
+        int base_indent = tokens[sigs[0]].fmt_indent;
+        tokens[hash_idx].fmt_newline_before = false;
+        tokens[hash_idx].fmt_spaces_before = 1;
+        tokens[open_idx].fmt_newline_before = false;
+        tokens[open_idx].fmt_spaces_before = 0;
+
+        if (opts.module.parameter_layout == "block") {
+            for (size_t pidx : param_starts) {
+                tokens[pidx].fmt_newline_before = true;
+                tokens[pidx].fmt_blank_lines = 0;
+                tokens[pidx].fmt_indent = base_indent + 1;
+                tokens[pidx].fmt_spaces_before = 0;
+            }
+            tokens[close_idx].fmt_newline_before = true;
+            tokens[close_idx].fmt_blank_lines = 0;
+            tokens[close_idx].fmt_indent = base_indent;
+            tokens[close_idx].fmt_spaces_before = 0;
+        } else {
+            tokens[param_starts[0]].fmt_newline_before = false;
+            tokens[param_starts[0]].fmt_spaces_before = 0;
+            int hang_cols = 0;
+            for (size_t i = line_start; i <= open_idx && i < tokens.size(); ++i) {
+                if (tok_whitespace(tokens[i]))
+                    continue;
+                if (i == line_start)
+                    hang_cols += tokens[i].fmt_indent * opts.indent_size + tokens[i].fmt_spaces_before;
+                else
+                    hang_cols += tokens[i].fmt_spaces_before;
+                hang_cols += (int)tok_text(tokens[i]).size();
+            }
+            int hang_indent = opts.indent_size > 0 ? hang_cols / opts.indent_size : 0;
+            int hang_spaces = std::max(0, hang_cols - hang_indent * std::max(0, opts.indent_size));
+            for (size_t pi = 1; pi < param_starts.size(); ++pi) {
+                tokens[param_starts[pi]].fmt_newline_before = true;
+                tokens[param_starts[pi]].fmt_blank_lines = 0;
+                tokens[param_starts[pi]].fmt_indent = hang_indent;
+                tokens[param_starts[pi]].fmt_spaces_before = hang_spaces;
+            }
+            tokens[close_idx].fmt_newline_before = false;
+            tokens[close_idx].fmt_spaces_before = 0;
+        }
+    }
+}
+
+struct HeaderPortEntry {
+    size_t start{SIZE_MAX};
+    size_t end{SIZE_MAX};
+    size_t comma{SIZE_MAX};
+    bool valid{false};
+    bool ansi{false};
+    size_t direction{SIZE_MAX};
+    size_t dtype_start{SIZE_MAX};
+    size_t dtype_end{SIZE_MAX};
+    size_t qualifier{SIZE_MAX};
+    size_t dim_start{SIZE_MAX};
+    size_t dim_end{SIZE_MAX};
+    size_t name{SIZE_MAX};
+    size_t trail_start{SIZE_MAX};
+    size_t trail_end{SIZE_MAX};
+    std::string direction_text;
+    std::string dtype_text;
+    std::string qualifier_text;
+    std::string dim_text;
+    std::string name_text;
+    std::string trail_text;
+};
+
+static std::string token_join_compact(const std::vector<Tok>& tokens, size_t first, size_t end) {
+    std::string out;
+    for (size_t i = first; i < end && i < tokens.size(); ++i) {
+        if (tok_whitespace(tokens[i]) || tok_comment(tokens[i]) || tok_directive(tokens[i]))
+            continue;
+        if (!out.empty() && tok_text(tokens[i]) != "]" && tok_text(tokens[i]) != ")" &&
+            tok_text(tokens[i]) != "," && tok_text(tokens[i]) != ";" && tok_text(tokens[i]) != ":" &&
+            out.back() != '[' && out.back() != '(' && out.back() != ':' && tok_text(tokens[i]) != "::")
+            out += ' ';
+        if (tok_text(tokens[i]) == "::" && !out.empty() && out.back() == ' ')
+            out.pop_back();
+        out += tok_text(tokens[i]);
+    }
     return out;
+}
+
+static HeaderPortEntry parse_header_port_entry(const std::vector<Tok>& tokens,
+                                               const std::vector<size_t>& raw_sigs,
+                                               const FormatOptions& opts) {
+    HeaderPortEntry e{};
+    std::vector<size_t> sigs;
+    for (size_t idx : raw_sigs) {
+        if (!tok_is(tokens[idx], ",", TokenKind::Comma))
+            sigs.push_back(idx);
+        else
+            e.comma = idx;
+    }
+    if (sigs.empty())
+        return e;
+    e.start = sigs.front();
+    e.end = sigs.back() + 1;
+    e.valid = true;
+    if (!is_port_direction_token(tokens[sigs[0]]))
+        return e;
+    e.ansi = true;
+    e.direction = sigs[0];
+    e.direction_text = tok_text(tokens[e.direction]);
+    size_t si = 1;
+
+    auto pure_id = [&](size_t idx) {
+        const std::string& x = tok_text(tokens[idx]);
+        if (x.empty() || (!std::isalpha((unsigned char)x[0]) && x[0] != '_' && x[0] != '$' && x[0] != '`'))
+            return false;
+        return is_identifier(tokens[idx]) || is_keyword(tokens[idx]);
+    };
+
+    if (si < sigs.size()) {
+        bool builtin = is_var_builtin_type_token(tokens[sigs[si]]) || is_port_net_type_text(tok_text(tokens[sigs[si]]));
+        bool usertype = pure_id(sigs[si]) && si + 1 < sigs.size() && !tok_is(tokens[sigs[si + 1]], ",", TokenKind::Comma);
+        if ((builtin || usertype) && !is_sign_qualifier_token(tokens[sigs[si]]) &&
+            !tok_is(tokens[sigs[si]], "[", TokenKind::OpenBracket)) {
+            e.dtype_start = sigs[si];
+            ++si;
+            if (is_port_net_type_text(tok_text(tokens[e.dtype_start])) && si < sigs.size() &&
+                is_port_data_type_text(tok_text(tokens[sigs[si]])))
+                ++si;
+            while (si + 1 < sigs.size() && tok_text(tokens[sigs[si]]) == "::")
+                si += 2;
+            e.dtype_end = (si < sigs.size()) ? sigs[si] : sigs.back() + 1;
+            e.dtype_text = token_join_compact(tokens, e.dtype_start, e.dtype_end);
+        }
+    }
+    if (si < sigs.size() && is_sign_qualifier_token(tokens[sigs[si]])) {
+        e.qualifier = sigs[si++];
+        e.qualifier_text = tok_text(tokens[e.qualifier]);
+    }
+    if (si < sigs.size() && tok_is(tokens[sigs[si]], "[", TokenKind::OpenBracket)) {
+        e.dim_start = sigs[si];
+        int depth = 0;
+        while (si < sigs.size()) {
+            if (tok_is(tokens[sigs[si]], "[", TokenKind::OpenBracket)) ++depth;
+            else if (tok_is(tokens[sigs[si]], "]", TokenKind::CloseBracket)) --depth;
+            ++si;
+            if (depth <= 0)
+                break;
+        }
+        e.dim_end = (si < sigs.size()) ? sigs[si] : sigs.back() + 1;
+        e.dim_text = normalize_bracket_spacing(token_join_compact(tokens, e.dim_start, e.dim_end), opts);
+    }
+    if (si >= sigs.size()) {
+        e.valid = false;
+        return e;
+    }
+    e.name = sigs[si++];
+    e.name_text = tok_text(tokens[e.name]);
+    e.trail_start = si < sigs.size() ? sigs[si] : SIZE_MAX;
+    e.trail_end = sigs.back() + 1;
+    if (e.trail_start != SIZE_MAX)
+        e.trail_text = normalize_bracket_spacing(token_join_compact(tokens, e.trail_start, e.trail_end), opts);
+    return e;
+}
+
+static void align_header_ports_metadata(std::vector<Tok>& tokens,
+                                        const std::vector<HeaderPortEntry>& entries,
+                                        const FormatOptions& opts) {
+    int md = 0, ms2 = 0, mdim = 0;
+    bool has_qualified_type = false;
+    int np = 0;
+    for (const auto& e : entries) {
+        if (!e.valid || !e.ansi)
+            continue;
+        ++np;
+        md = std::max(md, (int)e.direction_text.size());
+        std::string s2 = e.dtype_text + (e.qualifier_text.empty() ? "" : " " + e.qualifier_text);
+        ms2 = std::max(ms2, (int)s2.size());
+        has_qualified_type = has_qualified_type || s2.find("::") != std::string::npos;
+        mdim = std::max(mdim, (int)e.dim_text.size());
+    }
+    if (!np)
+        return;
+    const auto& pd = opts.port_declaration;
+    int s1 = tab_aligned_width(std::max(tab_aligned_width(pd.section1_min_width, opts), md + 1), opts);
+    int s2 = ms2 > 0 ? tab_aligned_width(std::max(tab_aligned_width(pd.section2_min_width, opts), ms2 + (has_qualified_type ? 3 : 1)), opts) : 0;
+    int s3 = mdim > 0 ? tab_aligned_width(std::max(tab_aligned_width(pd.section3_min_width, opts), mdim + 1), opts) : 0;
+    int idw = 0, trailw = 0;
+    for (const auto& e : entries) {
+        if (!e.valid || !e.ansi)
+            continue;
+        idw = std::max(idw, (int)e.name_text.size());
+        trailw = std::max(trailw, (int)e.trail_text.size());
+    }
+    int s4 = tab_aligned_width(std::max(tab_aligned_width(pd.section4_min_width, opts), idw + 1), opts);
+    int s5 = tab_aligned_width(std::max(tab_aligned_width(pd.section5_min_width, opts), trailw), opts);
+
+    for (const auto& e : entries) {
+        if (!e.valid || !e.ansi)
+            continue;
+        int line_s1 = s1, line_s2 = s2, line_s3 = s3, line_s4 = s4, line_s5 = s5;
+        std::string type_part = e.dtype_text + (e.qualifier_text.empty() ? "" : " " + e.qualifier_text);
+        if (pd.align_adaptive) {
+            int t1 = tab_aligned_width(pd.section1_min_width, opts);
+            int t2 = t1 + (s2 > 0 ? tab_aligned_width(pd.section2_min_width, opts) : 0);
+            int t3 = t2 + (s3 > 0 ? tab_aligned_width(pd.section3_min_width, opts) : 0);
+            int e1 = tab_aligned_width(std::max(t1, (int)e.direction_text.size() + 1), opts);
+            line_s1 = e1;
+            int e2 = e1;
+            if (s2 > 0) {
+                int c2 = type_part.empty() ? 0 : (int)type_part.size() + 1;
+                e2 = tab_aligned_width(std::max(t2, e1 + c2), opts);
+                line_s2 = e2 - e1;
+            }
+            if (s3 > 0) {
+                int c3 = e.dim_text.empty() ? 0 : (int)e.dim_text.size() + 1;
+                int e3 = tab_aligned_width(std::max(t3, e2 + c3), opts);
+                line_s3 = e3 - e2;
+            }
+            line_s4 = tab_aligned_width(std::max(tab_aligned_width(pd.section4_min_width, opts), (int)e.name_text.size() + 1), opts);
+            line_s5 = tab_aligned_width(std::max(tab_aligned_width(pd.section5_min_width, opts), (int)e.trail_text.size()), opts);
+        }
+        if (e.dtype_start != SIZE_MAX || e.qualifier != SIZE_MAX) {
+            size_t type_first = e.dtype_start != SIZE_MAX ? e.dtype_start : e.qualifier;
+            tokens[type_first].fmt_spaces_before = std::max(1, line_s1 - (int)e.direction_text.size());
+            if (e.dim_start != SIZE_MAX) {
+                tokens[e.dim_start].fmt_spaces_before = std::max(1, line_s2 - (int)type_part.size());
+                tokens[e.name].fmt_spaces_before = std::max(1, line_s3 - (int)e.dim_text.size());
+            } else {
+                int pad = std::max(1, line_s2 - (int)type_part.size()) + (line_s3 > 0 ? line_s3 : 0);
+                tokens[e.name].fmt_spaces_before = pad;
+            }
+        } else if (e.dim_start != SIZE_MAX) {
+            tokens[e.dim_start].fmt_spaces_before = std::max(1, line_s1 - (int)e.direction_text.size()) +
+                                                    (line_s2 > 0 ? line_s2 : 0);
+            tokens[e.name].fmt_spaces_before = std::max(1, line_s3 - (int)e.dim_text.size());
+        } else {
+            int pad = std::max(1, line_s1 - (int)e.direction_text.size()) +
+                      (line_s2 > 0 ? line_s2 : 0) + (line_s3 > 0 ? line_s3 : 0);
+            tokens[e.name].fmt_spaces_before = pad;
+        }
+        if (e.trail_start != SIZE_MAX)
+            tokens[e.trail_start].fmt_spaces_before = std::max(0, line_s4 - (int)e.name_text.size());
+        if (e.comma != SIZE_MAX) {
+            tokens[e.comma].fmt_newline_before = false;
+            tokens[e.comma].fmt_spaces_before = e.trail_text.empty() ? 0 : std::max(0, line_s5 - (int)e.trail_text.size());
+        }
+    }
+}
+
+static void format_portlist_pass(std::vector<Tok>& tokens, const FormatOptions& opts) {
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (tok_whitespace(tokens[i]) || tok_comment(tokens[i]) || tok_directive(tokens[i]) ||
+            tokens[i].fmt_disabled || tokens[i].fmt_passthrough)
+            continue;
+        bool header_kw = tokens[i].kind == TokenKind::ModuleKeyword ||
+                         tokens[i].kind == TokenKind::MacromoduleKeyword ||
+                         tokens[i].kind == TokenKind::InterfaceKeyword ||
+                         tokens[i].kind == TokenKind::ProgramKeyword;
+        if (!header_kw)
+            continue;
+
+        size_t port_open = SIZE_MAX;
+        int paren = 0, bracket = 0, brace = 0;
+        for (size_t j = i + 1; j < tokens.size(); ++j) {
+            if (tok_whitespace(tokens[j]) || tok_comment(tokens[j]) || tok_directive(tokens[j]))
+                continue;
+            if (tok_is(tokens[j], "(", TokenKind::OpenParenthesis)) {
+                size_t prev = prev_code_sig(tokens, i, j);
+                if (paren == 0 && !(prev != SIZE_MAX && tok_is(tokens[prev], "#", TokenKind::Hash))) {
+                    port_open = j;
+                    break;
+                }
+                ++paren;
+            } else if (tok_is(tokens[j], ")", TokenKind::CloseParenthesis) && paren > 0) --paren;
+            else if (tok_is(tokens[j], "[", TokenKind::OpenBracket)) ++bracket;
+            else if (tok_is(tokens[j], "]", TokenKind::CloseBracket) && bracket > 0) --bracket;
+            else if (tok_is(tokens[j], "{", TokenKind::OpenBrace)) ++brace;
+            else if (tok_is(tokens[j], "}", TokenKind::CloseBrace) && brace > 0) --brace;
+            else if (tok_is(tokens[j], ";", TokenKind::Semicolon) && paren == 0 && bracket == 0 && brace == 0) {
+                bool has_import = false;
+                for (size_t k = i; k < j; ++k)
+                    if (tokens[k].kind == TokenKind::ImportKeyword)
+                        has_import = true;
+                size_t next = next_code_sig(tokens, j + 1, tokens.size());
+                if (!(has_import && next != SIZE_MAX &&
+                      (tok_is(tokens[next], "(", TokenKind::OpenParenthesis) ||
+                       tok_is(tokens[next], "#", TokenKind::Hash))))
+                    break;
+            } else if ((tokens[j].kind == TokenKind::EndModuleKeyword ||
+                      tokens[j].kind == TokenKind::EndInterfaceKeyword ||
+                      tokens[j].kind == TokenKind::EndProgramKeyword) && paren == 0)
+                break;
+        }
+        if (port_open == SIZE_MAX)
+            continue;
+        size_t port_close = matching_close_paren(tokens, port_open, tokens.size());
+        if (port_close == SIZE_MAX)
+            continue;
+        size_t semi = next_code_sig(tokens, port_close + 1, tokens.size());
+        if (semi == SIZE_MAX || !tok_is(tokens[semi], ";", TokenKind::Semicolon))
+            continue;
+        if (token_range_has_pp_conditional(tokens, i, semi + 1) ||
+            token_range_disabled_or_passthrough(tokens, i, semi + 1))
+            continue;
+
+        std::vector<size_t> sigs = code_sig_indices(tokens, i, semi + 1);
+        int base_indent = tokens[i].fmt_indent;
+
+        // Format module/interface parameter block immediately before the port list.
+        size_t hash_idx = SIZE_MAX, param_open = SIZE_MAX, param_close = SIZE_MAX;
+        for (size_t si = 0; si + 1 < sigs.size(); ++si) {
+            if (sigs[si] >= port_open)
+                break;
+            if (tok_is(tokens[sigs[si]], "#", TokenKind::Hash) &&
+                tok_is(tokens[sigs[si + 1]], "(", TokenKind::OpenParenthesis)) {
+                hash_idx = sigs[si];
+                param_open = sigs[si + 1];
+                param_close = matching_close_paren(tokens, param_open, port_open);
+                break;
+            }
+        }
+        if (hash_idx != SIZE_MAX && param_close != SIZE_MAX) {
+            std::vector<size_t> params;
+            size_t first_param = next_code_sig(tokens, param_open + 1, param_close);
+            if (first_param != SIZE_MAX)
+                params.push_back(first_param);
+            int p_paren = 0, p_bracket = 0, p_brace = 0;
+            for (size_t j = param_open + 1; j < param_close; ++j) {
+                if (tok_whitespace(tokens[j]) || tok_comment(tokens[j]) || tok_directive(tokens[j]))
+                    continue;
+                if (tok_contains(tokens[j], '(')) ++p_paren;
+                else if (tok_contains(tokens[j], ')') && p_paren > 0) --p_paren;
+                else if (tok_contains(tokens[j], '[')) ++p_bracket;
+                else if (tok_contains(tokens[j], ']') && p_bracket > 0) --p_bracket;
+                else if (tok_contains(tokens[j], '{')) ++p_brace;
+                else if (tok_contains(tokens[j], '}') && p_brace > 0) --p_brace;
+                else if (tok_is(tokens[j], ",", TokenKind::Comma) && p_paren == 0 && p_bracket == 0 && p_brace == 0) {
+                    size_t n = next_code_sig(tokens, j + 1, param_close);
+                    if (n != SIZE_MAX)
+                        params.push_back(n);
+                }
+            }
+            tokens[hash_idx].fmt_spaces_before = 1;
+            tokens[param_open].fmt_spaces_before = 0;
+            if (opts.module.parameter_layout == "block") {
+                for (size_t pidx : params) {
+                    tokens[pidx].fmt_newline_before = true;
+                    tokens[pidx].fmt_blank_lines = 0;
+                    tokens[pidx].fmt_indent = base_indent + 1;
+                    tokens[pidx].fmt_spaces_before = 0;
+                }
+                tokens[param_close].fmt_newline_before = true;
+                tokens[param_close].fmt_blank_lines = 0;
+                tokens[param_close].fmt_indent = base_indent;
+                tokens[param_close].fmt_spaces_before = 0;
+            } else if (params.size() > 1) {
+                tokens[params[0]].fmt_newline_before = false;
+                tokens[params[0]].fmt_spaces_before = 0;
+                int hang_cols = 0;
+                for (size_t j = i; j <= param_open && j < tokens.size(); ++j) {
+                    if (tok_whitespace(tokens[j]))
+                        continue;
+                    if (j == i)
+                        hang_cols += tokens[j].fmt_indent * opts.indent_size + tokens[j].fmt_spaces_before;
+                    else
+                        hang_cols += tokens[j].fmt_spaces_before;
+                    hang_cols += (int)tok_text(tokens[j]).size();
+                }
+                int hang_indent = opts.indent_size > 0 ? hang_cols / opts.indent_size : 0;
+                int hang_spaces = std::max(0, hang_cols - hang_indent * std::max(0, opts.indent_size));
+                for (size_t pi = 1; pi < params.size(); ++pi) {
+                    tokens[params[pi]].fmt_newline_before = true;
+                    tokens[params[pi]].fmt_blank_lines = 0;
+                    tokens[params[pi]].fmt_indent = hang_indent;
+                    tokens[params[pi]].fmt_spaces_before = hang_spaces;
+                }
+            }
+        }
+
+        std::vector<std::vector<size_t>> raw_entries;
+        std::vector<size_t> current;
+        paren = bracket = brace = 0;
+        for (size_t j = port_open + 1; j < port_close; ++j) {
+            if (tok_whitespace(tokens[j]) || tok_comment(tokens[j]) || tok_directive(tokens[j]))
+                continue;
+            if (tok_is(tokens[j], "(", TokenKind::OpenParenthesis)) ++paren;
+            else if (tok_is(tokens[j], ")", TokenKind::CloseParenthesis) && paren > 0) --paren;
+            else if (tok_is(tokens[j], "[", TokenKind::OpenBracket)) ++bracket;
+            else if (tok_is(tokens[j], "]", TokenKind::CloseBracket) && bracket > 0) --bracket;
+            else if (tok_is(tokens[j], "{", TokenKind::OpenBrace)) ++brace;
+            else if (tok_is(tokens[j], "}", TokenKind::CloseBrace) && brace > 0) --brace;
+            current.push_back(j);
+            if (tok_is(tokens[j], ",", TokenKind::Comma) && paren == 0 && bracket == 0 && brace == 0) {
+                raw_entries.push_back(current);
+                current.clear();
+            }
+        }
+        if (!current.empty())
+            raw_entries.push_back(current);
+        if (raw_entries.empty())
+            continue;
+
+        std::vector<HeaderPortEntry> entries;
+        bool ansi = false;
+        for (const auto& raw : raw_entries) {
+            HeaderPortEntry e = parse_header_port_entry(tokens, raw, opts);
+            if (e.valid) {
+                ansi = ansi || e.ansi;
+                entries.push_back(e);
+            }
+        }
+        if (entries.empty())
+            continue;
+
+        tokens[port_open].fmt_spaces_before = 0;
+        for (size_t ei = 0; ei < entries.size(); ++ei) {
+            auto& e = entries[ei];
+            if (!e.valid)
+                continue;
+            bool put_newline = true;
+            if (!ansi && opts.module.non_ansi_port_per_line_enabled &&
+                opts.module.non_ansi_port_per_line > 1) {
+                put_newline = (ei % (size_t)opts.module.non_ansi_port_per_line) == 0;
+            }
+            tokens[e.start].fmt_newline_before = put_newline;
+            tokens[e.start].fmt_blank_lines = 0;
+            tokens[e.start].fmt_indent = base_indent + 1;
+            tokens[e.start].fmt_spaces_before = put_newline ? 0 : 1;
+        }
+        for (size_t j = port_open + 1; j < port_close; ++j) {
+            if (!tok_comment(tokens[j]))
+                continue;
+            if (tokens[j].fmt_newline_before) {
+                tokens[j].fmt_newline_before = true;
+                tokens[j].fmt_blank_lines = 0;
+                tokens[j].fmt_indent = base_indent + 1;
+                tokens[j].fmt_spaces_before = 0;
+            } else {
+                tokens[j].fmt_spaces_before = 1;
+            }
+        }
+        tokens[port_close].fmt_newline_before = true;
+        tokens[port_close].fmt_blank_lines = 0;
+        tokens[port_close].fmt_indent = base_indent;
+        tokens[port_close].fmt_spaces_before = 0;
+        tokens[semi].fmt_newline_before = false;
+        tokens[semi].fmt_spaces_before = 0;
+
+        if (ansi && opts.port_declaration.align)
+            align_header_ports_metadata(tokens, entries, opts);
+
+        i = semi;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5210,7 +5445,7 @@ static std::vector<std::string> format_portlist_pass(std::vector<std::string> li
 // ---------------------------------------------------------------------------
 // Function/task declaration formatting pass
 // ---------------------------------------------------------------------------
-static std::vector<std::string> format_function_declaration_pass(
+static std::vector<std::string> format_function_declaration_pass_legacy(
     std::vector<std::string> lines, const FormatOptions& opts) {
     const auto& fd = opts.function_declaration;
     std::string text = render_lines(lines);
@@ -5232,7 +5467,7 @@ static std::vector<std::string> format_function_declaration_pass(
             out.push_back(line);
             continue;
         }
-        size_t indent_end = (size_t)toks[0].pos;
+        size_t indent_end = (size_t)tok_pos(toks[0]);
         size_t open_i = 1;
         while (open_i < toks.size() && !tok_is(toks[open_i], "(", TokenKind::OpenParenthesis))
             ++open_i;
@@ -5258,8 +5493,8 @@ static std::vector<std::string> format_function_declaration_pass(
             continue;
         }
         // Split ports
-        size_t open = (size_t)toks[open_i].pos;
-        size_t close = (size_t)toks[close_i].pos;
+        size_t open = (size_t)tok_pos(toks[open_i]);
+        size_t close = (size_t)tok_pos(toks[close_i]);
         std::string args_text = line.substr(open + 1, close - open - 1);
         auto raw_args = split_top_level(args_text);
         std::vector<std::string> args;
@@ -5326,9 +5561,9 @@ static std::vector<std::string> split_semicolon_statements_pass(std::vector<std:
         int bracket = 0;
         int brace = 0;
         for (const auto& tok : collect_lexer_tokens(line)) {
-            if (tok.comment)
+            if (tok_comment(tok))
                 break;
-            if (tok.whitespace || tok.directive)
+            if (tok_whitespace(tok) || tok_directive(tok))
                 continue;
             if (tok_is(tok, "(", TokenKind::OpenParenthesis))
                 ++paren;
@@ -5343,12 +5578,12 @@ static std::vector<std::string> split_semicolon_statements_pass(std::vector<std:
             else if (tok_is(tok, "}", TokenKind::CloseBrace) && brace > 0)
                 --brace;
             if (paren == 0 && bracket == 0 && brace == 0 && tok_is(tok, ";", TokenKind::Semicolon)) {
-                size_t rest = (size_t)tok.pos + tok.text.size();
+                size_t rest = (size_t)tok_pos(tok) + tok_text(tok).size();
                 while (rest < line.size() && (line[rest] == ' ' || line[rest] == '\t'))
                     ++rest;
                 if (rest < line.size() && line.compare(rest, 2, "//") != 0 &&
                     line.compare(rest, 2, "/*") != 0)
-                    split_points.push_back((size_t)tok.pos + tok.text.size());
+                    split_points.push_back((size_t)tok_pos(tok) + tok_text(tok).size());
             }
         }
         if (split_points.empty()) {
@@ -5372,7 +5607,7 @@ static std::vector<std::string> split_semicolon_statements_pass(std::vector<std:
     return out;
 }
 
-static std::vector<std::string> format_covergroup_pass(std::vector<std::string> lines,
+static std::vector<std::string> format_covergroup_pass_legacy(std::vector<std::string> lines,
                                                          const FormatOptions& opts) {
     std::string text = render_lines(lines);
     auto disabled = find_disabled(text);
@@ -5475,7 +5710,7 @@ static std::vector<std::string> format_covergroup_pass(std::vector<std::string> 
             bool split_body = false;
             for (size_t ti = 0; ti < toks.size(); ++ti) {
                 if (tok_is(toks[ti], "{", TokenKind::OpenBrace)) {
-                    open_pos = (size_t)toks[ti].pos;
+                    open_pos = (size_t)tok_pos(toks[ti]);
                     break;
                 }
                 if (toks[ti].kind == TokenKind::CoverPointKeyword ||
@@ -5528,7 +5763,7 @@ static std::vector<std::string> format_covergroup_pass(std::vector<std::string> 
                     starts_with_close_brace = true;
                     break;
                 }
-                if (!tok.whitespace && !tok.comment)
+                if (!tok_whitespace(tok) && !tok_comment(tok))
                     break;
             }
             bool is_endgroup_line = !toks.empty() && toks[0].kind == TokenKind::EndGroupKeyword;
@@ -5631,7 +5866,7 @@ static std::vector<std::string> format_covergroup_pass(std::vector<std::string> 
     return normalized;
 }
 
-static std::vector<std::string> format_constraint_dist_pass(std::vector<std::string> lines,
+static std::vector<std::string> format_constraint_dist_pass_legacy(std::vector<std::string> lines,
                                                               const FormatOptions& opts) {
     std::string text = render_lines(lines);
     auto disabled = find_disabled(text);
@@ -5653,7 +5888,7 @@ static std::vector<std::string> format_constraint_dist_pass(std::vector<std::str
         bool saw_open = false;
         for (;;) {
             for (const auto& tok : collect_lexer_tokens(lines[end])) {
-                if (tok.whitespace || tok.comment || tok.directive)
+                if (tok_whitespace(tok) || tok_comment(tok) || tok_directive(tok))
                     continue;
                 if (tok_is(tok, "{", TokenKind::OpenBrace)) {
                     ++brace_depth;
@@ -5710,8 +5945,8 @@ static std::vector<std::string> format_constraint_dist_pass(std::vector<std::str
             continue;
         }
 
-        size_t open_pos = (size_t)toks[open_i].pos;
-        size_t close_pos = (size_t)toks[close_i].pos;
+        size_t open_pos = (size_t)tok_pos(toks[open_i]);
+        size_t close_pos = (size_t)tok_pos(toks[close_i]);
         std::string body = flat.substr(open_pos + 1, close_pos - open_pos - 1);
         auto raw_items = split_top_level(body);
         std::vector<std::string> items;
@@ -5760,9 +5995,9 @@ static std::vector<std::string> align_define_continuation_pass(std::vector<std::
         for (auto toks = collect_lexer_tokens(ln); !toks.empty();) {
             Tok tok = toks.back();
             toks.pop_back();
-            if (tok.whitespace)
+            if (tok_whitespace(tok))
                 continue;
-            std::string text = tok.text;
+            std::string text = tok_text(tok);
             while (!text.empty() && (text.back() == ' ' || text.back() == '\t'))
                 text.pop_back();
             return !text.empty() && text.back() == '\\';
@@ -5772,8 +6007,8 @@ static std::vector<std::string> align_define_continuation_pass(std::vector<std::
     auto content_width = [](const std::string& ln) -> size_t {
         size_t e = 0;
         for (const auto& tok : collect_lexer_tokens(ln)) {
-            if (!tok.whitespace)
-                e = (size_t)tok.pos + tok.text.size();
+            if (!tok_whitespace(tok))
+                e = (size_t)tok_pos(tok) + tok_text(tok).size();
         }
         if (e > 0 && ln[e - 1] == '\\')
             --e;
@@ -5837,7 +6072,7 @@ static void verify_safe_mode_unchanged(const std::string& source, const std::str
 static std::vector<size_t> tok_line_starts(const std::vector<Tok>& tokens) {
     std::vector<size_t> starts;
     for (size_t i = 0; i < tokens.size(); ++i) {
-        if (i == 0 || (tokens[i].fmt_newline_before && !tokens[i].whitespace)) {
+        if (i == 0 || (tokens[i].fmt_newline_before && !tok_whitespace(tokens[i]))) {
             starts.push_back(i);
         }
     }
@@ -5855,13 +6090,13 @@ static void split_semicolon_statements_pass_v2(std::vector<Tok>& tokens) {
     bool line_has_backslash = false;
 
     // Pre-scan: check if first logical line has pp conditional or backslash
-    for (size_t i = 0; i < tokens.size() && !(i > 0 && tokens[i].fmt_newline_before && !tokens[i].whitespace); ++i) {
-        if (tokens[i].whitespace)
+    for (size_t i = 0; i < tokens.size() && !(i > 0 && tokens[i].fmt_newline_before && !tok_whitespace(tokens[i])); ++i) {
+        if (tok_whitespace(tokens[i]))
             continue;
-        if ((tokens[i].directive && is_pp_conditional(tokens[i].directive_kind)) ||
-            is_pp_conditional_text(tokens[i].text))
+        if ((tok_directive(tokens[i]) && is_pp_conditional(tok_directive_kind(tokens[i]))) ||
+            is_pp_conditional_text(tok_text(tokens[i])))
             line_has_pp = true;
-        if (!tokens[i].text.empty() && tokens[i].text.back() == '\\')
+        if (!tok_text(tokens[i]).empty() && tok_text(tokens[i]).back() == '\\')
             line_has_backslash = true;
     }
 
@@ -5869,7 +6104,7 @@ static void split_semicolon_statements_pass_v2(std::vector<Tok>& tokens) {
         auto& tok = tokens[i];
 
         // Reset per-line state at logical line boundaries
-        if (tok.fmt_newline_before && !tok.whitespace && i > 0) {
+        if (tok.fmt_newline_before && !tok_whitespace(tok) && i > 0) {
             paren = 0;
             bracket = 0;
             brace = 0;
@@ -5877,19 +6112,19 @@ static void split_semicolon_statements_pass_v2(std::vector<Tok>& tokens) {
             line_has_backslash = false;
             // Scan this logical line for pp conditionals and backslash
             for (size_t j = i; j < tokens.size(); ++j) {
-                if (j > i && tokens[j].fmt_newline_before && !tokens[j].whitespace)
+                if (j > i && tokens[j].fmt_newline_before && !tok_whitespace(tokens[j]))
                     break;
-                if (tokens[j].whitespace)
+                if (tok_whitespace(tokens[j]))
                     continue;
-                if ((tokens[j].directive && is_pp_conditional(tokens[j].directive_kind)) ||
-                    is_pp_conditional_text(tokens[j].text))
+                if ((tok_directive(tokens[j]) && is_pp_conditional(tok_directive_kind(tokens[j]))) ||
+                    is_pp_conditional_text(tok_text(tokens[j])))
                     line_has_pp = true;
-                if (!tokens[j].text.empty() && tokens[j].text.back() == '\\')
+                if (!tok_text(tokens[j]).empty() && tok_text(tokens[j]).back() == '\\')
                     line_has_backslash = true;
             }
         }
 
-        if (tok.fmt_disabled || tok.fmt_passthrough || tok.whitespace)
+        if (tok.fmt_disabled || tok.fmt_passthrough || tok_whitespace(tok))
             continue;
 
         if (line_has_pp || line_has_backslash)
@@ -5913,11 +6148,11 @@ static void split_semicolon_statements_pass_v2(std::vector<Tok>& tokens) {
             tok_is(tok, ";", TokenKind::Semicolon)) {
             // Find next significant token on the same logical line
             for (size_t j = i + 1; j < tokens.size(); ++j) {
-                if (tokens[j].fmt_newline_before && !tokens[j].whitespace)
+                if (tokens[j].fmt_newline_before && !tok_whitespace(tokens[j]))
                     break; // different logical line — nothing to split
-                if (tokens[j].whitespace || tokens[j].fmt_disabled || tokens[j].fmt_passthrough)
+                if (tok_whitespace(tokens[j]) || tokens[j].fmt_disabled || tokens[j].fmt_passthrough)
                     continue;
-                if (tokens[j].comment)
+                if (tok_comment(tokens[j]))
                     break; // trailing comment — don't split
                 // Found code after `;` on same line — split it
                 tokens[j].fmt_newline_before = true;
@@ -5969,7 +6204,7 @@ static void align_define_continuation_pass_v2(std::vector<Tok>& tokens,
         size_t last_sig = s; // last significant (non-whitespace) token
         bool found_sig = false;
         for (size_t j = s; j < e; ++j) {
-            if (tokens[j].whitespace)
+            if (tok_whitespace(tokens[j]))
                 continue;
             if (tokens[j].fmt_disabled) {
                 info.disabled = true;
@@ -5977,13 +6212,13 @@ static void align_define_continuation_pass_v2(std::vector<Tok>& tokens,
             }
             found_sig = true;
             last_sig = j;
-            if ((tokens[j].directive && is_pp_conditional(tokens[j].directive_kind)) ||
-                is_pp_conditional_text(tokens[j].text))
+            if ((tok_directive(tokens[j]) && is_pp_conditional(tok_directive_kind(tokens[j]))) ||
+                is_pp_conditional_text(tok_text(tokens[j])))
                 info.has_pp_cond = true;
         }
 
         if (found_sig && !info.disabled) {
-            std::string txt = tokens[last_sig].text;
+            std::string txt = tok_text(tokens[last_sig]);
             // Trim trailing whitespace from token text
             while (!txt.empty() && (txt.back() == ' ' || txt.back() == '\t'))
                 txt.pop_back();
@@ -5996,7 +6231,7 @@ static void align_define_continuation_pass_v2(std::vector<Tok>& tokens,
                 int col = tokens[s].fmt_indent * opts.indent_size;
                 bool first = true;
                 for (size_t j = s; j < e; ++j) {
-                    if (tokens[j].whitespace)
+                    if (tok_whitespace(tokens[j]))
                         continue;
                     if (j == last_sig) {
                         // Content width = col + text length minus the trailing backslash
@@ -6008,7 +6243,7 @@ static void align_define_continuation_pass_v2(std::vector<Tok>& tokens,
                     }
                     if (!first)
                         col += tokens[j].fmt_spaces_before;
-                    col += (int)tokens[j].text.size();
+                    col += (int)tok_text(tokens[j]).size();
                     first = false;
                 }
             }
@@ -6042,7 +6277,7 @@ static void align_define_continuation_pass_v2(std::vector<Tok>& tokens,
             auto& bs_tok = tokens[info.bs_tok_idx];
 
             // Strip trailing backslash (and surrounding spaces) from token text
-            std::string txt = bs_tok.text;
+            std::string txt = tok_text(bs_tok);
             while (!txt.empty() && (txt.back() == ' ' || txt.back() == '\t'))
                 txt.pop_back();
             if (!txt.empty() && txt.back() == '\\')
@@ -6056,7 +6291,7 @@ static void align_define_continuation_pass_v2(std::vector<Tok>& tokens,
                 pad = 1;
 
             // Rebuild token text: content + padding + backslash
-            bs_tok.text = txt + std::string(pad, ' ') + "\\";
+            tok_set_formatted_text(bs_tok, txt + std::string(pad, ' ') + "\\");
         }
     }
 }
@@ -6112,13 +6347,13 @@ static void align_assign_pass_v2(std::vector<Tok>& tokens, const FormatOptions& 
 
         for (size_t k = cur_line_first_sig; k < end_idx; ++k) {
             const auto& tok = tokens[k];
-            if (tok.whitespace)
+            if (tok_whitespace(tok))
                 continue;
             if (tok.fmt_disabled)
                 ln.disabled = true;
-            if (tok.directive && is_pp_conditional(tok.directive_kind))
+            if (tok_directive(tok) && is_pp_conditional(tok_directive_kind(tok)))
                 ln.has_pp_cond = true;
-            if (is_pp_conditional_text(tok.text))
+            if (is_pp_conditional_text(tok_text(tok)))
                 ln.has_pp_cond = true;
             sig_indices.push_back(k);
         }
@@ -6130,7 +6365,7 @@ static void align_assign_pass_v2(std::vector<Tok>& tokens, const FormatOptions& 
             paren = 0; bracket = 0; brace = 0;
             for (size_t si = 0; si < sig_indices.size(); ++si) {
                 const auto& tok = tokens[sig_indices[si]];
-                if (tok.comment)
+                if (tok_comment(tok))
                     break;
                 if (tok_is(tok, "(", TokenKind::OpenParenthesis))
                     ++paren;
@@ -6145,7 +6380,7 @@ static void align_assign_pass_v2(std::vector<Tok>& tokens, const FormatOptions& 
                 else if (tok_is(tok, "}", TokenKind::CloseBrace) && brace > 0)
                     --brace;
                 if (paren == 0 && bracket == 0 && brace == 0 &&
-                    std::find(OPS.begin(), OPS.end(), tok.text) != OPS.end()) {
+                    std::find(OPS.begin(), OPS.end(), tok_text(tok)) != OPS.end()) {
                     ln.assign_op_idx = sig_indices[si];
                     break;
                 }
@@ -6159,7 +6394,7 @@ static void align_assign_pass_v2(std::vector<Tok>& tokens, const FormatOptions& 
             std::vector<size_t> code_sigs;
             for (auto idx : sig_indices) {
                 const auto& tok = tokens[idx];
-                if (!tok.comment && !tok.directive)
+                if (!tok_comment(tok) && !tok_directive(tok))
                     code_sigs.push_back(idx);
             }
             if (code_sigs.size() >= 3 &&
@@ -6197,8 +6432,8 @@ static void align_assign_pass_v2(std::vector<Tok>& tokens, const FormatOptions& 
                 // Check if previous line is comment-only
                 bool is_comment_only = true;
                 for (size_t k = pl.first_sig; k < pl.end; ++k) {
-                    if (tokens[k].whitespace) continue;
-                    if (!tokens[k].comment) { is_comment_only = false; break; }
+                    if (tok_whitespace(tokens[k])) continue;
+                    if (!tok_comment(tokens[k])) { is_comment_only = false; break; }
                 }
                 if (is_comment_only)
                     continue;
@@ -6206,7 +6441,7 @@ static void align_assign_pass_v2(std::vector<Tok>& tokens, const FormatOptions& 
                 // Check if it starts with module/interface/program and has #(
                 std::vector<size_t> prev_sigs;
                 for (size_t k = pl.first_sig; k < pl.end; ++k) {
-                    if (!tokens[k].whitespace && !tokens[k].comment && !tokens[k].directive)
+                    if (!tok_whitespace(tokens[k]) && !tok_comment(tokens[k]) && !tok_directive(tokens[k]))
                         prev_sigs.push_back(k);
                 }
                 if (!prev_sigs.empty() &&
@@ -6242,15 +6477,15 @@ static void align_assign_pass_v2(std::vector<Tok>& tokens, const FormatOptions& 
         if (ln.assign_op_idx != SIZE_MAX) {
             bool first = true;
             for (size_t k = ln.first_sig; k < ln.end; ++k) {
-                if (tokens[k].whitespace)
+                if (tok_whitespace(tokens[k]))
                     continue;
                 if (k == ln.assign_op_idx)
                     break;
                 if (first) {
-                    ln.lhs_inline_width += (int)tokens[k].text.size();
+                    ln.lhs_inline_width += (int)tok_text(tokens[k]).size();
                     first = false;
                 } else {
-                    ln.lhs_inline_width += tokens[k].fmt_spaces_before + (int)tokens[k].text.size();
+                    ln.lhs_inline_width += tokens[k].fmt_spaces_before + (int)tok_text(tokens[k]).size();
                 }
             }
         }
@@ -6261,7 +6496,7 @@ static void align_assign_pass_v2(std::vector<Tok>& tokens, const FormatOptions& 
 
     for (size_t i = 0; i < tokens.size(); ++i) {
         const auto& tok = tokens[i];
-        if (tok.whitespace) {
+        if (tok_whitespace(tok)) {
             if (tok.fmt_newline_before)
                 next_is_line_start = true;
             continue;
@@ -6335,10 +6570,11 @@ static void align_assign_pass_v2(std::vector<Tok>& tokens, const FormatOptions& 
             // Single line: still apply lhs_min_width if needed
             if (j - li == 1 && opts.statement.lhs_min_width > 0) {
                 const auto& sl = lines[li];
-                int target = opts.statement.lhs_min_width;
+                int base_width = std::max(opts.statement.lhs_min_width, sl.lhs_inline_width);
+                int target = base_width + 1;
                 if (opts.tab_align && opts.indent_size > 0)
                     target = snap_to_indent_grid(sl.indent_level * opts.indent_size + target, opts.indent_size) - sl.indent_level * opts.indent_size;
-                int sp = std::max(1, target - sl.lhs_inline_width + 1);
+                int sp = std::max(1, target - sl.lhs_inline_width);
                 tokens[sl.assign_op_idx].fmt_spaces_before = sp;
             }
             li = j;
@@ -6350,12 +6586,12 @@ static void align_assign_pass_v2(std::vector<Tok>& tokens, const FormatOptions& 
         for (size_t k = li; k < j; ++k)
             max_lhs = std::max(max_lhs, lines[k].lhs_inline_width);
 
-        int target = max_lhs;
+        int target = max_lhs + 1;
         if (opts.tab_align && opts.indent_size > 0)
-            target = snap_to_indent_grid(ln.indent_level * opts.indent_size + max_lhs, opts.indent_size) - ln.indent_level * opts.indent_size;
+            target = snap_to_indent_grid(ln.indent_level * opts.indent_size + max_lhs + 1, opts.indent_size) - ln.indent_level * opts.indent_size;
 
         for (size_t k = li; k < j; ++k) {
-            int sp = std::max(1, target - lines[k].lhs_inline_width + 1);
+            int sp = std::max(1, target - lines[k].lhs_inline_width);
             tokens[lines[k].assign_op_idx].fmt_spaces_before = sp;
         }
 
@@ -6394,6 +6630,7 @@ struct VarTokenParsed {
     std::vector<Declarator> declarators;
 
     // Trailing comment
+    size_t semicolon_idx;     // terminating semicolon token
     size_t comment_idx;       // SIZE_MAX if none
     std::string comment_str;
 };
@@ -6408,14 +6645,14 @@ static VarTokenParsed parse_var_tokens(const std::vector<Tok>& tokens, size_t li
     size_t comment_idx = SIZE_MAX;
 
     for (size_t k = line_start; k < line_end; ++k) {
-        if (tokens[k].whitespace)
+        if (tok_whitespace(tokens[k]))
             continue;
-        if (tokens[k].comment) {
+        if (tok_comment(tokens[k])) {
             if (comment_idx == SIZE_MAX)
                 comment_idx = k;
             continue;
         }
-        if (tokens[k].directive)
+        if (tok_directive(tokens[k]))
             continue;
         sig_indices.push_back(k);
     }
@@ -6460,7 +6697,7 @@ static VarTokenParsed parse_var_tokens(const std::vector<Tok>& tokens, size_t li
     }
 
     // Handle scope resolution (e.g., pkg::type_t)
-    while (idx < sig_indices.size() && tokens[sig_indices[idx]].text == "::" &&
+    while (idx < sig_indices.size() && tok_text(tokens[sig_indices[idx]]) == "::" &&
            idx + 1 < sig_indices.size()) {
         type_parts_indices.push_back(sig_indices[idx]);     // ::
         type_parts_indices.push_back(sig_indices[idx + 1]); // type name
@@ -6471,13 +6708,13 @@ static VarTokenParsed parse_var_tokens(const std::vector<Tok>& tokens, size_t li
     std::string type_kw_str;
     for (size_t k = 0; k < type_parts_indices.size(); ++k) {
         if (k > 0) type_kw_str += ' ';
-        type_kw_str += tokens[type_parts_indices[k]].text;
+        type_kw_str += tok_text(tokens[type_parts_indices[k]]);
     }
 
     // Optional qualifier (signed/unsigned)
     std::string qualifier_str;
     if (idx < sig_indices.size() && is_sign_qualifier_token(tokens[sig_indices[idx]])) {
-        qualifier_str = tokens[sig_indices[idx]].text;
+        qualifier_str = tok_text(tokens[sig_indices[idx]]);
         ++idx;
     }
 
@@ -6505,8 +6742,8 @@ static VarTokenParsed parse_var_tokens(const std::vector<Tok>& tokens, size_t li
         while (idx < sig_indices.size()) {
             const auto& tok = tokens[sig_indices[idx]];
             if (idx > dim_first) dim_str += ' ';  // space between bracket tokens
-            dim_str += tok.text;
-            for (char c : tok.text) {
+            dim_str += tok_text(tok);
+            for (char c : tok_text(tok)) {
                 if (c == '[') ++depth;
                 else if (c == ']') --depth;
             }
@@ -6537,18 +6774,18 @@ static VarTokenParsed parse_var_tokens(const std::vector<Tok>& tokens, size_t li
         const auto& name_token = tokens[name_tok];
 
         // Validate: must start with [A-Za-z_]
-        if (name_token.text.empty() ||
-            (!std::isalpha((unsigned char)name_token.text[0]) && name_token.text[0] != '_'))
+        if (tok_text(name_token).empty() ||
+            (!std::isalpha((unsigned char)tok_text(name_token)[0]) && tok_text(name_token)[0] != '_'))
             return;
 
-        std::string name_str = name_token.text;
+        std::string name_str = tok_text(name_token);
 
         // Everything after the name is trailing (unpacked dims, = init, etc.)
         std::string trail_str;
         size_t trail_start_si = name_si + 1;
         for (size_t k = trail_start_si; k < end_exclusive; ++k) {
             if (k > trail_start_si) trail_str += ' ';
-            trail_str += tokens[sig_indices[k]].text;
+            trail_str += tok_text(tokens[sig_indices[k]]);
         }
         trail_str = normalize_bracket_spacing(trail_str, opts);
 
@@ -6589,13 +6826,14 @@ static VarTokenParsed parse_var_tokens(const std::vector<Tok>& tokens, size_t li
     result.valid = true;
     result.first_sig = sig_indices[0];
     result.line_end = line_end;
+    result.semicolon_idx = semi_idx;
     result.comment_idx = comment_idx;
     if (comment_idx != SIZE_MAX) {
         result.comment_str = " ";
         for (size_t k = comment_idx; k < line_end; ++k) {
-            if (tokens[k].whitespace) continue;
-            if (tokens[k].comment) {
-                result.comment_str += tokens[k].text;
+            if (tok_whitespace(tokens[k])) continue;
+            if (tok_comment(tokens[k])) {
+                result.comment_str += tok_text(tokens[k]);
                 break;
             }
         }
@@ -6636,13 +6874,13 @@ static void align_var_pass_v2(std::vector<Tok>& tokens, const FormatOptions& opt
         ln.is_comment_or_blank = true;
 
         for (size_t k = cur_line_start; k < end_idx; ++k) {
-            if (tokens[k].whitespace) continue;
+            if (tok_whitespace(tokens[k])) continue;
             if (tokens[k].fmt_disabled) ln.disabled = true;
-            if (tokens[k].directive && is_pp_conditional(tokens[k].directive_kind))
+            if (tok_directive(tokens[k]) && is_pp_conditional(tok_directive_kind(tokens[k])))
                 ln.has_pp_cond = true;
-            if (is_pp_conditional_text(tokens[k].text))
+            if (is_pp_conditional_text(tok_text(tokens[k])))
                 ln.has_pp_cond = true;
-            if (!tokens[k].comment)
+            if (!tok_comment(tokens[k]))
                 ln.is_comment_or_blank = false;
         }
         if (cur_first_sig == SIZE_MAX)
@@ -6657,7 +6895,7 @@ static void align_var_pass_v2(std::vector<Tok>& tokens, const FormatOptions& opt
 
     for (size_t i = 0; i < tokens.size(); ++i) {
         const auto& tok = tokens[i];
-        if (tok.whitespace) {
+        if (tok_whitespace(tok)) {
             if (tok.fmt_newline_before)
                 next_is_line_start = true;
             continue;
@@ -6842,11 +7080,17 @@ static void align_var_pass_v2(std::vector<Tok>& tokens, const FormatOptions& opt
                         // (accounts for ", " between declarators)
                     }
                 } else {
-                    // Last declarator: the semicolon follows
-                    // Need to pad trail if section4_min_width
-                    if (!decl.trail_str.empty() && vo.section4_min_width > 0 &&
-                        k < line_trail_widths.size() && line_trail_widths[k] > 1) {
-                        // Need padding between trail and semicolon
+                    // Last declarator: align the semicolon as the end of section 4.
+                    if (vp.semicolon_idx < tokens.size()) {
+                        int id_w = (k < line_id_widths.size()) ? line_id_widths[k]
+                                                               : (int)decl.name_str.size() + 1;
+                        int trail_w = (k < line_trail_widths.size()) ? line_trail_widths[k] : 0;
+                        int pad = 1;
+                        if (decl.trail_str.empty())
+                            pad = std::max(1, id_w - (int)decl.name_str.size() + trail_w);
+                        else
+                            pad = std::max(0, trail_w - (int)decl.trail_str.size());
+                        tokens[vp.semicolon_idx].fmt_spaces_before = pad;
                     }
                 }
             }
@@ -6856,7 +7100,6 @@ static void align_var_pass_v2(std::vector<Tok>& tokens, const FormatOptions& opt
     }
 }
 
-} // anonymous namespace
 
 // ---------------------------------------------------------------------------
 // render_tokens — build output string from metadata-annotated tokens
@@ -6864,7 +7107,7 @@ static void align_var_pass_v2(std::vector<Tok>& tokens, const FormatOptions& opt
 static std::string render_tokens(const std::vector<Tok>& tokens, const FormatOptions& opts) {
     std::string out;
     size_t total_len = 0;
-    for (const auto& t : tokens) total_len += t.text.size();
+    for (const auto& t : tokens) total_len += tok_text(t).size();
     out.reserve(total_len + total_len / 4);
 
     const std::string indent_unit(opts.indent_size, ' ');
@@ -6880,11 +7123,11 @@ static std::string render_tokens(const std::vector<Tok>& tokens, const FormatOpt
             }
             if (!at_bol && tok.fmt_spaces_before > 0)
                 out.append(tok.fmt_spaces_before, ' ');
-            out += tok.text;
-            at_bol = !tok.text.empty() && tok.text.back() == '\n';
+            out += tok_text(tok);
+            at_bol = !tok_text(tok).empty() && tok_text(tok).back() == '\n';
             continue;
         }
-        if (tok.whitespace) continue;
+        if (tok_whitespace(tok)) continue;
 
         if (tok.fmt_newline_before) {
             if (!at_bol) out += '\n';
@@ -6893,16 +7136,18 @@ static std::string render_tokens(const std::vector<Tok>& tokens, const FormatOpt
             at_bol = true;
         }
 
-        if (at_bol && !tok.text.empty()) {
+        if (at_bol && !tok_text(tok).empty()) {
             for (int k = 0; k < tok.fmt_indent; ++k)
                 out += indent_unit;
+            if (tok.fmt_spaces_before > 0)
+                out.append(tok.fmt_spaces_before, ' ');
             at_bol = false;
         } else if (!at_bol && tok.fmt_spaces_before > 0) {
             out.append(tok.fmt_spaces_before, ' ');
         }
 
-        out += tok.text;
-        if (!tok.text.empty() && tok.text.back() == '\n')
+        out += tok_text(tok);
+        if (!tok_text(tok).empty() && tok_text(tok).back() == '\n')
             at_bol = true;
     }
 
@@ -6989,7 +7234,7 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
     // -----------------------------------------------------------------------
     auto next_significant = [&](size_t idx) -> const Tok* {
         for (size_t j = idx + 1; j < tokens.size(); ++j) {
-            if (!tokens[j].whitespace && !tokens[j].comment)
+            if (!tok_whitespace(tokens[j]) && !tok_comment(tokens[j]))
                 return &tokens[j];
         }
         return nullptr;
@@ -7045,16 +7290,16 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
             tok_macro_class = classify_macro(tok, tok_macro_has_args, macro_classifier);
         }
         syntax::SyntaxKind tok_pp_cond_kind = syntax::SyntaxKind::Unknown;
-        if (is_line_directive(tok) && is_pp_conditional(tok.directive_kind))
-            tok_pp_cond_kind = tok.directive_kind;
-        else if (is_pp_conditional_text(tok.text))
-            tok_pp_cond_kind = directive_at_offset(tok.text, 0).kind;
+        if (is_line_directive(tok) && is_pp_conditional(tok_directive_kind(tok)))
+            tok_pp_cond_kind = tok_directive_kind(tok);
+        else if (is_pp_conditional_text(tok_text(tok)))
+            tok_pp_cond_kind = directive_at_offset(tok_text(tok), 0).kind;
         bool tok_is_pp_conditional = is_pp_conditional(tok_pp_cond_kind);
 
         if (whitespace_macro_passthrough) {
             tok.fmt_passthrough = true;
-            at_bol = !tok.text.empty() && tok.text.back() == '\n';
-            if (!tok.whitespace && !tok.comment) {
+            at_bol = !tok_text(tok).empty() && tok_text(tok).back() == '\n';
+            if (!tok_whitespace(tok) && !tok_comment(tok)) {
                 if (tok_is(tok, "(", TokenKind::OpenParenthesis)) {
                     ++whitespace_macro_paren_depth;
                     whitespace_macro_seen_open = true;
@@ -7091,26 +7336,26 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
         }
 
         // --- A. Disabled region ---
-        if (in_disabled(tok.pos, disabled)) {
+        if (in_disabled(tok_pos(tok), disabled)) {
             tok.fmt_disabled = true;
             apply_newline(i);
-            if (is_line_directive(tok) && tok.directive_kind == syntax::SyntaxKind::DefineDirective)
+            if (is_line_directive(tok) && tok_directive_kind(tok) == syntax::SyntaxKind::DefineDirective)
                 in_define_disabled = true;
-            if (tok_is_pp_conditional || in_define_disabled || !at_bol || tok.whitespace) {
+            if (tok_is_pp_conditional || in_define_disabled || !at_bol || tok_whitespace(tok)) {
                 tok.fmt_passthrough = true;
             } else {
                 tok.fmt_indent = indent_level;
                 at_bol = false;
             }
-            at_bol = !tok.text.empty() && tok.text.back() == '\n';
+            at_bol = !tok_text(tok).empty() && tok_text(tok).back() == '\n';
             after_dis = !at_bol;
             continue;
         }
         in_define_disabled = false;
 
         // --- B. Whitespace tokens ---
-        if (tok.whitespace) {
-            int nl = (int)std::count(tok.text.begin(), tok.text.end(), '\n');
+        if (tok_whitespace(tok)) {
+            int nl = (int)std::count(tok_text(tok).begin(), tok_text(tok).end(), '\n');
             original_newline_before_token = nl > 0;
             if (after_dis && nl >= 1)
                 pending_nl = true;
@@ -7131,17 +7376,17 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
                 at_bol = true;
             }
             tok.fmt_passthrough = true;
-            at_bol = !tok.text.empty() && tok.text.back() == '\n';
+            at_bol = !tok_text(tok).empty() && tok_text(tok).back() == '\n';
             pending_nl = false;
             blank_pend = 0;
 
             bool has_inline_arg = false;
             if (is_pp_cond_with(tok_pp_cond_kind)) {
-                auto directive = directive_at_offset(tok.text, 0);
+                auto directive = directive_at_offset(tok_text(tok), 0);
                 size_t arg = directive.end;
-                while (arg < tok.text.size() && (tok.text[arg] == ' ' || tok.text[arg] == '\t'))
+                while (arg < tok_text(tok).size() && (tok_text(tok)[arg] == ' ' || tok_text(tok)[arg] == '\t'))
                     ++arg;
-                has_inline_arg = arg < tok.text.size() && tok.text[arg] != '\n';
+                has_inline_arg = arg < tok_text(tok).size() && tok_text(tok)[arg] != '\n';
             }
             if (is_pp_cond_with(tok_pp_cond_kind) && !has_inline_arg) {
                 in_pp_cond = true;
@@ -7158,7 +7403,7 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
         if (in_pp_cond) {
             if (!at_bol) tok.fmt_spaces_before = 1;
             tok.fmt_passthrough = true;
-            at_bol = !tok.text.empty() && tok.text.back() == '\n';
+            at_bol = !tok_text(tok).empty() && tok_text(tok).back() == '\n';
             in_pp_cond = false;
             pending_nl = true;
             prev_macro_role_valid = false;
@@ -7171,10 +7416,10 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
         bool in_dim = dim_depth > 0;
         bool in_for_header =
             std::any_of(for_header_stack.begin(), for_header_stack.end(), [](bool v) { return v; });
-        bool procedural_at = prev && ((tok.text == "@" && is_procedural_event_keyword(*prev)) ||
-                                      (prev->text == "@" && prev_at_procedural));
+        bool procedural_at = prev && ((tok_text(tok) == "@" && is_procedural_event_keyword(*prev)) ||
+                                      (tok_text(*prev) == "@" && prev_at_procedural));
         ParenKind paren_kind = ParenKind::Ordinary;
-        if (prev && (prev->text == "(" || tok_is(tok, ")", TokenKind::CloseParenthesis))) {
+        if (prev && (tok_text(*prev) == "(" || tok_is(tok, ")", TokenKind::CloseParenthesis))) {
             if (!paren_stack.empty())
                 paren_kind = paren_stack.back();
         } else if (prev && tok_is(tok, "(", TokenKind::OpenParenthesis))
@@ -7199,7 +7444,7 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
         }
 
         // --- D. Inline-comment suppression ---
-        bool inline_comment = tok.comment && prev && !original_newline_before_token;
+        bool inline_comment = tok_comment(tok) && prev && !original_newline_before_token;
 
         do_while_tail = false;
         if (prev && prev->kind == TokenKind::EndKeyword && tok.kind == TokenKind::WhileKeyword) {
@@ -7211,7 +7456,7 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
                 dec = SD::Undecided;
             }
         }
-        if (macro_wrap_pending && !tok.whitespace && !tok.comment) {
+        if (macro_wrap_pending && !tok_whitespace(tok) && !tok_comment(tok)) {
             dec = SD::MustWrap;
             macro_wrap_pending = false;
         }
@@ -7227,15 +7472,15 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
                                 tok.kind == TokenKind::ForkKeyword;
 
         // --- Block label ---
-        if (block_label_state == 1 && !tok.whitespace && !tok.comment) {
-            if (tok.text == ":") {
+        if (block_label_state == 1 && !tok_whitespace(tok) && !tok_comment(tok)) {
+            if (tok_text(tok) == ":") {
                 dec = SD::MustAppend;
                 spaces = 0;
                 block_label_state = 2;
             } else {
                 block_label_state = 0;
             }
-        } else if (block_label_state == 2 && !tok.whitespace && !tok.comment) {
+        } else if (block_label_state == 2 && !tok_whitespace(tok) && !tok_comment(tok)) {
             dec = SD::MustAppend;
         }
         if (case_label_pending_nl && tok.kind == TokenKind::BeginKeyword)
@@ -7244,11 +7489,11 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
         if (inline_comment && pending_nl) {
             if (!case_label_pending_nl)
                 pending_nl = false;
-        } else if (tok.comment && tok.text.rfind("//", 0) == 0) {
-            size_t line_start = input.rfind('\n', (size_t)tok.pos);
+        } else if (tok_comment(tok) && tok_text(tok).rfind("//", 0) == 0) {
+            size_t line_start = input.rfind('\n', (size_t)tok_pos(tok));
             line_start = (line_start == std::string::npos) ? 0 : line_start + 1;
             bool standalone_comment = true;
-            for (size_t p = line_start; p < (size_t)tok.pos; ++p) {
+            for (size_t p = line_start; p < (size_t)tok_pos(tok); ++p) {
                 if (input[p] != ' ' && input[p] != '\t') {
                     standalone_comment = false;
                     break;
@@ -7484,17 +7729,17 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
             }
         } else if (is_line_directive(tok)) {
             pending_nl = true;
-            if (is_pp_cond_bare(tok.directive_kind) || is_pp_cond_with(tok.directive_kind))
+            if (is_pp_cond_bare(tok_directive_kind(tok)) || is_pp_cond_with(tok_directive_kind(tok)))
                 in_pp_cond = false;
-        } else if (tok.comment) {
-            if (i + 1 < tokens.size() && tokens[i + 1].whitespace &&
-                tokens[i + 1].text.find('\n') != std::string::npos)
+        } else if (tok_comment(tok)) {
+            if (i + 1 < tokens.size() && tok_whitespace(tokens[i + 1]) &&
+                tok_text(tokens[i + 1]).find('\n') != std::string::npos)
                 pending_nl = true;
         } else if (tok.kind == TokenKind::Directive) {
-            if (is_pp_cond_bare(tok.directive_kind)) {
+            if (is_pp_cond_bare(tok_directive_kind(tok))) {
                 pending_nl = true;
                 in_pp_cond = false;
-            } else if (is_pp_cond_with(tok.directive_kind)) {
+            } else if (is_pp_cond_with(tok_directive_kind(tok))) {
                 in_pp_cond = true;
             }
         } else if (is_identifier(tok)) {
@@ -7502,7 +7747,7 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
                 pending_nl = true;
                 in_pp_cond = false;
             }
-            if (is_macro_usage(tok) && tok.text.find(';') != std::string::npos) {
+            if (is_macro_usage(tok) && tok_text(tok).find(';') != std::string::npos) {
                 pending_nl = true;
                 if (single_stmt_active) {
                     indent_level = std::max(0, indent_level - 1);
@@ -7526,16 +7771,16 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
         } else if (tok_is(tok, ";", TokenKind::Semicolon) || tok.kind == TokenKind::EndCaseKeyword) {
             case_label_pending_nl = false;
             case_conditional_depth = 0;
-        } else if (!tok.comment && !tok.whitespace) {
+        } else if (!tok_comment(tok) && !tok_whitespace(tok)) {
             case_label_pending_nl = false;
         }
 
         // --- Block label post-emit ---
-        if (block_label_state == 2 && !tok.whitespace && !tok.comment && tok.text != ":") {
+        if (block_label_state == 2 && !tok_whitespace(tok) && !tok_comment(tok) && tok_text(tok) != ":") {
             pending_nl = true;
             block_label_state = 0;
         }
-        if (!tok.whitespace && !tok.comment && is_keyword(tok) &&
+        if (!tok_whitespace(tok) && !tok_comment(tok) && is_keyword(tok) &&
             (tok.kind == TokenKind::BeginKeyword || tok.kind == TokenKind::ForkKeyword ||
              is_indent_close(tok.kind)) &&
             !disable_target && !wait_fork_target) {
@@ -7545,11 +7790,938 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
         prev_macro_role_valid = tok_is_macro;
         if (tok_is_macro)
             prev_macro_role = tok_macro_class.role;
-        prev_at_procedural = tok.text == "@" && prev && is_procedural_event_keyword(*prev);
+        prev_at_procedural = tok_text(tok) == "@" && prev && is_procedural_event_keyword(*prev);
         prev = &tok;
         original_newline_before_token = false;
     } // end pass0 main token loop
 }
+
+
+// ---------------------------------------------------------------------------
+// Token pass adapters for legacy structural passes.
+// ---------------------------------------------------------------------------
+
+
+static std::vector<TokenLineText> token_line_texts(const std::vector<Tok>& tokens,
+                                                   const FormatOptions& opts) {
+    std::vector<TokenLineText> out;
+    size_t start = 0;
+    bool have = false;
+    auto flush = [&](size_t end) {
+        if (!have && end <= start)
+            return;
+        std::vector<Tok> slice(tokens.begin() + (ptrdiff_t)start, tokens.begin() + (ptrdiff_t)end);
+        if (!slice.empty()) {
+            if (slice.front().fmt_newline_before) {
+                for (int b = 0; b < slice.front().fmt_blank_lines; ++b)
+                    out.push_back({start, start, ""});
+            }
+            slice.front().fmt_newline_before = false;
+            slice.front().fmt_blank_lines = 0;
+        }
+        std::string rendered = render_tokens(slice, opts);
+        size_t begin = 0;
+        while (true) {
+            size_t nl = rendered.find('\n', begin);
+            std::string part = nl == std::string::npos ? rendered.substr(begin)
+                                                       : rendered.substr(begin, nl - begin);
+            out.push_back({start, end, part});
+            if (nl == std::string::npos)
+                break;
+            begin = nl + 1;
+            if (begin >= rendered.size())
+                break;
+        }
+    };
+
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (!tok_whitespace(tokens[i]) && tokens[i].fmt_newline_before && have) {
+            flush(i);
+            start = i;
+            have = false;
+        }
+        if (!tok_whitespace(tokens[i]))
+            have = true;
+    }
+    if (have || start < tokens.size())
+        flush(tokens.size());
+    return out;
+}
+
+static std::string join_lines(const std::vector<std::string>& lines) {
+    std::string r;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (i)
+            r += '\n';
+        r += lines[i];
+    }
+    return r;
+}
+
+static std::vector<Tok> tokens_from_formatted_text(const std::string& text, const FormatOptions& opts) {
+    auto out = collect_lexer_tokens(text);
+    bool at_bol = true;
+    int col = 0;
+    int blank_lines = 0;
+    for (size_t i = 0; i < out.size(); ++i) {
+        auto& tok = out[i];
+        tok.fmt_indent = 0;
+        tok.fmt_spaces_before = 0;
+        tok.fmt_newline_before = false;
+        tok.fmt_blank_lines = 0;
+        tok.fmt_disabled = false;
+        tok.fmt_passthrough = false;
+        tok.fmt_text_override.clear();
+
+        if (tok_whitespace(tok)) {
+            for (char ch : tok_text(tok)) {
+                if (ch == '\n') {
+                    at_bol = true;
+                    col = 0;
+                    ++blank_lines;
+                } else if (ch == ' ' || ch == '\t') {
+                    ++col;
+                }
+            }
+            continue;
+        }
+
+        if (at_bol) {
+            if (i != 0 || blank_lines > 0)
+                tok.fmt_newline_before = true;
+            tok.fmt_blank_lines = std::max(0, blank_lines - 1);
+            tok.fmt_indent = opts.indent_size > 0 ? col / opts.indent_size : 0;
+            int indent_cols = tok.fmt_indent * std::max(0, opts.indent_size);
+            tok.fmt_spaces_before = std::max(0, col - indent_cols);
+        } else {
+            tok.fmt_spaces_before = col;
+        }
+        at_bol = false;
+        col = 0;
+        blank_lines = 0;
+    }
+    return out;
+}
+
+template <typename Pass>
+static void apply_legacy_line_pass_to_tokens(std::vector<Tok>& tokens, const FormatOptions& opts,
+                                             Pass pass) {
+    std::string text = render_tokens(tokens, opts);
+    auto lines = text_to_lines(text);
+    lines = pass(std::move(lines));
+    tokens = tokens_from_formatted_text(render_lines(lines), opts);
+}
+
+static void align_assign_pass(std::vector<Tok>& tokens, const FormatOptions& opts) {
+    align_assign_pass_v2(tokens, opts);
+}
+
+static void align_var_pass(std::vector<Tok>& tokens, const FormatOptions& opts) {
+    align_var_pass_v2(tokens, opts);
+}
+
+static void align_port_pass(std::vector<Tok>& tokens, const FormatOptions& opts) {
+    auto tlines = token_line_texts(tokens, opts);
+    std::vector<std::string> lines;
+    lines.reserve(tlines.size());
+    for (const auto& tl : tlines)
+        lines.push_back(tl.text);
+
+    std::vector<std::string> out;
+    size_t i = 0;
+    bool module_header_region = false;
+    auto starts_with_port_dir = [](const std::string& line) -> bool {
+        auto toks = significant_tokens(line);
+        return !toks.empty() && is_port_direction_token(toks[0]);
+    };
+    auto is_port_decl_line = [&](int idx) -> bool {
+        return idx >= 0 && idx < (int)lines.size() && starts_with_port_dir(lines[(size_t)idx]);
+    };
+    auto is_semi_only = [&](int idx) -> bool {
+        if (idx < 0 || idx >= (int)lines.size())
+            return false;
+        auto toks = significant_tokens(lines[(size_t)idx]);
+        return toks.size() == 1 && tok_is(toks[0], ";", TokenKind::Semicolon);
+    };
+    auto is_standalone_comment = [&](const std::string& text) {
+        for (const auto& tok : collect_lexer_tokens(text)) {
+            if (tok_whitespace(tok))
+                continue;
+            return tok_comment(tok);
+        }
+        return false;
+    };
+    auto has_header_end = [](const std::string& line) {
+        auto toks = significant_tokens(line);
+        bool saw_close = false;
+        for (const auto& tok : toks) {
+            if (tok_is(tok, ")", TokenKind::CloseParenthesis))
+                saw_close = true;
+            else if (saw_close && tok_is(tok, ";", TokenKind::Semicolon))
+                return true;
+        }
+        return false;
+    };
+    auto has_kind = [](const std::string& line, TokenKind kind) {
+        for (const auto& tok : significant_tokens(line))
+            if (tok.kind == kind)
+                return true;
+        return false;
+    };
+    auto is_header_start_line = [&](const std::string& line) {
+        auto toks = significant_tokens(line);
+        if (toks.empty())
+            return false;
+        bool starts_header = toks[0].kind == TokenKind::ModuleKeyword ||
+                             toks[0].kind == TokenKind::MacromoduleKeyword ||
+                             toks[0].kind == TokenKind::InterfaceKeyword ||
+                             toks[0].kind == TokenKind::ProgramKeyword ||
+                             toks[0].kind == TokenKind::TaskKeyword ||
+                             toks[0].kind == TokenKind::FunctionKeyword;
+        if (!starts_header || has_header_end(line))
+            return false;
+        return has_kind(line, TokenKind::OpenParenthesis) || !has_kind(line, TokenKind::Semicolon) ||
+               has_kind(line, TokenKind::ImportKeyword);
+    };
+    auto pad = [](std::string s, int w) -> std::string {
+        s.resize(std::max((int)s.size(), w), ' ');
+        return s;
+    };
+
+    while (i < lines.size()) {
+        if (line_has_pp_conditional(lines[i])) {
+            out.push_back(lines[i++]);
+            continue;
+        }
+        if (module_header_region) {
+            out.push_back(lines[i]);
+            if (has_header_end(lines[i]))
+                module_header_region = false;
+            ++i;
+            continue;
+        }
+        if (is_header_start_line(lines[i])) {
+            module_header_region = true;
+            out.push_back(lines[i++]);
+            continue;
+        }
+        if (!is_port_decl_line((int)i)) {
+            out.push_back(lines[i++]);
+            continue;
+        }
+
+        struct PortBlkEntry { std::string orig; std::string port_text; PortParsed parsed; };
+        std::vector<PortBlkEntry> blk;
+        size_t j = i;
+        while (j < lines.size()) {
+            if (line_has_pp_conditional(lines[j]))
+                break;
+            if (!is_port_decl_line((int)j)) {
+                if (significant_tokens(lines[j]).empty() || is_standalone_comment(lines[j])) {
+                    blk.push_back({lines[j], lines[j], PortParsed{}});
+                    ++j;
+                    continue;
+                }
+                break;
+            }
+            std::string fl = lines[j];
+            std::string port_line = lines[j];
+            ++j;
+            if (is_semi_only((int)j)) {
+                port_line += ";";
+                ++j;
+            }
+            blk.push_back({fl, port_line, parse_port(port_line, opts)});
+        }
+
+        int md = 0, ms2_content = 0, mdim = 0;
+        bool has_qualified_type = false;
+        int np = 0;
+        size_t max_slots = 0;
+        for (auto& e : blk) {
+            if (!e.parsed.valid)
+                continue;
+            ++np;
+            md = std::max(md, (int)e.parsed.direction.size());
+            std::string s2 = e.parsed.dtype + (e.parsed.qualifier.empty() ? "" : " " + e.parsed.qualifier);
+            ms2_content = std::max(ms2_content, (int)s2.size());
+            for (const auto& tok : significant_tokens(s2))
+                has_qualified_type = has_qualified_type || tok.kind == TokenKind::DoubleColon;
+            mdim = std::max(mdim, (int)e.parsed.dim.size());
+            max_slots = std::max(max_slots, e.parsed.names.size());
+        }
+        if (!np) {
+            for (auto& e : blk)
+                out.push_back(e.orig);
+            i = j;
+            continue;
+        }
+
+        const auto& pd = opts.port_declaration;
+        int pd_s1_min = tab_aligned_width(pd.section1_min_width, opts);
+        int pd_s2_min = tab_aligned_width(pd.section2_min_width, opts);
+        int pd_s3_min = tab_aligned_width(pd.section3_min_width, opts);
+        int pd_s4_min = tab_aligned_width(pd.section4_min_width, opts);
+        int pd_s5_min = tab_aligned_width(pd.section5_min_width, opts);
+        int s1 = tab_aligned_width(std::max(pd_s1_min, md + 1), opts);
+        int s2 = ms2_content > 0 ? tab_aligned_width(std::max(pd_s2_min, ms2_content + (has_qualified_type ? 3 : 1)), opts) : 0;
+        int s3 = mdim > 0 ? tab_aligned_width(std::max(pd_s3_min, mdim + 1), opts) : 0;
+        int s5_min = pd_s5_min;
+
+        std::vector<int> id_widths(max_slots, 0), trail_widths(max_slots, 0);
+        for (size_t slot = 0; slot < max_slots; ++slot) {
+            int max_id = 0, max_tr = 0;
+            for (auto& e : blk) {
+                if (!e.parsed.valid)
+                    continue;
+                if (slot < e.parsed.names.size()) {
+                    max_id = std::max(max_id, (int)e.parsed.names[slot].first.size());
+                    max_tr = std::max(max_tr, (int)e.parsed.names[slot].second.size());
+                }
+            }
+            id_widths[slot] = tab_aligned_width(std::max(pd_s4_min, max_id + 1), opts);
+            trail_widths[slot] = tab_aligned_width(std::max(s5_min, max_tr), opts);
+        }
+
+        for (auto& e : blk) {
+            const auto& pp = e.parsed;
+            if (!pp.valid) {
+                out.push_back(e.orig);
+                continue;
+            }
+            int line_s1 = s1, line_s2 = s2, line_s3 = s3;
+            std::vector<int> line_id_widths = id_widths, line_trail_widths = trail_widths;
+            if (opts.port_declaration.align_adaptive) {
+                std::string tp = pp.dtype + (pp.qualifier.empty() ? "" : " " + pp.qualifier);
+                int t1 = pd_s1_min;
+                int t2 = t1 + (s2 > 0 ? pd_s2_min : 0);
+                int t3 = t2 + (s3 > 0 ? pd_s3_min : 0);
+                int e1 = tab_aligned_width(std::max(t1, (int)pp.direction.size() + 1), opts);
+                line_s1 = e1;
+                int e2 = e1;
+                if (s2 > 0) {
+                    int c2 = tp.empty() ? 0 : (int)tp.size() + 1;
+                    e2 = tab_aligned_width(std::max(t2, e1 + c2), opts);
+                    line_s2 = e2 - e1;
+                }
+                if (s3 > 0) {
+                    int c3 = pp.dim.empty() ? 0 : (int)pp.dim.size() + 1;
+                    int e3 = tab_aligned_width(std::max(t3, e2 + c3), opts);
+                    line_s3 = e3 - e2;
+                }
+                line_id_widths.clear();
+                line_trail_widths.clear();
+                for (const auto& [nm, tr] : pp.names) {
+                    line_id_widths.push_back(tab_aligned_width(std::max(pd_s4_min, (int)nm.size() + 1), opts));
+                    line_trail_widths.push_back(tab_aligned_width(std::max(s5_min, (int)tr.size()), opts));
+                }
+            }
+
+            std::string line = pp.indent;
+            line += pad(pp.direction, line_s1);
+            if (line_s2 > 0) {
+                std::string tp = pp.dtype + (pp.qualifier.empty() ? "" : " " + pp.qualifier);
+                line += pad(tp, line_s2);
+            }
+            if (line_s3 > 0)
+                line += pad(pp.dim, line_s3);
+            size_t nslots = pp.names.size();
+            for (size_t slot = 0; slot < nslots; ++slot) {
+                bool is_last = slot == nslots - 1;
+                const auto& nm = pp.names[slot].first;
+                const auto& tr = pp.names[slot].second;
+                line += slot < line_id_widths.size() ? pad(nm, line_id_widths[slot]) : nm;
+                if (!is_last) {
+                    line += (slot < line_trail_widths.size() ? pad(tr, line_trail_widths[slot]) : tr) + ", ";
+                } else {
+                    std::string term = pp.terminator.empty() ? ";" : pp.terminator;
+                    line += slot < line_trail_widths.size() ? pad(tr, line_trail_widths[slot]) : tr;
+                    line += term;
+                }
+            }
+            if (!pp.comment.empty())
+                line += pp.comment;
+            while (!line.empty() && line.back() == ' ')
+                line.pop_back();
+            out.push_back(line);
+        }
+        i = j;
+    }
+
+    tokens = tokens_from_formatted_text(join_lines(out), opts);
+}
+
+
+static size_t matching_close_token(const std::vector<Tok>& tokens, size_t open_idx,
+                                   size_t end_limit, const std::string& open_text,
+                                   const std::string& close_text, TokenKind open_kind,
+                                   TokenKind close_kind) {
+    int depth = 0;
+    for (size_t i = open_idx; i < end_limit && i < tokens.size(); ++i) {
+        if (tok_whitespace(tokens[i]) || tok_comment(tokens[i]) || tok_directive(tokens[i]))
+            continue;
+        if (tok_is(tokens[i], open_text, open_kind))
+            ++depth;
+        else if (tok_is(tokens[i], close_text, close_kind)) {
+            --depth;
+            if (depth == 0)
+                return i;
+        }
+    }
+    return SIZE_MAX;
+}
+
+static std::vector<std::pair<size_t, size_t>> top_level_ranges_between(
+    const std::vector<Tok>& tokens, size_t first, size_t last, size_t* last_comma = nullptr) {
+    std::vector<std::pair<size_t, size_t>> ranges;
+    size_t start = next_code_sig(tokens, first, last);
+    int paren = 0, bracket = 0, brace = 0;
+    for (size_t i = first; i < last && i < tokens.size(); ++i) {
+        if (tok_whitespace(tokens[i]) || tok_comment(tokens[i]) || tok_directive(tokens[i]))
+            continue;
+        if (tok_is(tokens[i], "(", TokenKind::OpenParenthesis)) ++paren;
+        else if (tok_is(tokens[i], ")", TokenKind::CloseParenthesis) && paren > 0) --paren;
+        else if (tok_is(tokens[i], "[", TokenKind::OpenBracket)) ++bracket;
+        else if (tok_is(tokens[i], "]", TokenKind::CloseBracket) && bracket > 0) --bracket;
+        else if (tok_is(tokens[i], "{", TokenKind::OpenBrace) || tokens[i].kind == TokenKind::ApostropheOpenBrace) ++brace;
+        else if (tok_is(tokens[i], "}", TokenKind::CloseBrace) && brace > 0) --brace;
+        else if (tok_is(tokens[i], ",", TokenKind::Comma) && paren == 0 && bracket == 0 && brace == 0) {
+            size_t end = prev_code_sig(tokens, start, i + 1);
+            if (start != SIZE_MAX && end != SIZE_MAX && end < i)
+                ranges.push_back({start, i});
+            if (last_comma)
+                *last_comma = i;
+            start = next_code_sig(tokens, i + 1, last);
+        }
+    }
+    if (start != SIZE_MAX) {
+        size_t end = prev_code_sig(tokens, start, last);
+        if (end != SIZE_MAX && end >= start)
+            ranges.push_back({start, end + 1});
+    }
+    return ranges;
+}
+
+static size_t find_top_level_token(const std::vector<Tok>& tokens, size_t first, size_t last,
+                                   const std::string& text, TokenKind kind) {
+    int paren = 0, bracket = 0, brace = 0;
+    for (size_t i = first; i < last && i < tokens.size(); ++i) {
+        if (tok_whitespace(tokens[i]) || tok_comment(tokens[i]) || tok_directive(tokens[i]))
+            continue;
+        if (tok_is(tokens[i], text, kind) && paren == 0 && bracket == 0 && brace == 0)
+            return i;
+        if (tok_is(tokens[i], "(", TokenKind::OpenParenthesis)) ++paren;
+        else if (tok_is(tokens[i], ")", TokenKind::CloseParenthesis) && paren > 0) --paren;
+        else if (tok_is(tokens[i], "[", TokenKind::OpenBracket)) ++bracket;
+        else if (tok_is(tokens[i], "]", TokenKind::CloseBracket) && bracket > 0) --bracket;
+        else if (tok_is(tokens[i], "{", TokenKind::OpenBrace) || tokens[i].kind == TokenKind::ApostropheOpenBrace) ++brace;
+        else if (tok_is(tokens[i], "}", TokenKind::CloseBrace) && brace > 0) --brace;
+    }
+    return SIZE_MAX;
+}
+
+static int token_range_width_compact(const std::vector<Tok>& tokens, size_t first, size_t end) {
+    return (int)token_join_compact(tokens, first, end).size();
+}
+
+static size_t statement_end_semicolon(const std::vector<Tok>& tokens, size_t start) {
+    int paren = 0, bracket = 0, brace = 0;
+    for (size_t i = start; i < tokens.size(); ++i) {
+        if (tok_whitespace(tokens[i]) || tok_comment(tokens[i]) || tok_directive(tokens[i]))
+            continue;
+        if (tok_is(tokens[i], "(", TokenKind::OpenParenthesis)) ++paren;
+        else if (tok_is(tokens[i], ")", TokenKind::CloseParenthesis) && paren > 0) --paren;
+        else if (tok_is(tokens[i], "[", TokenKind::OpenBracket)) ++bracket;
+        else if (tok_is(tokens[i], "]", TokenKind::CloseBracket) && bracket > 0) --bracket;
+        else if (tok_is(tokens[i], "{", TokenKind::OpenBrace) || tokens[i].kind == TokenKind::ApostropheOpenBrace) ++brace;
+        else if (tok_is(tokens[i], "}", TokenKind::CloseBrace) && brace > 0) --brace;
+        else if (tok_is(tokens[i], ";", TokenKind::Semicolon) && paren == 0 && bracket == 0 && brace == 0)
+            return i;
+    }
+    return SIZE_MAX;
+}
+
+static void format_enum_declaration_pass(std::vector<Tok>& tokens, const FormatOptions& opts) {
+    const auto& eo = opts.enum_declaration;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (tok_whitespace(tokens[i]) || tok_comment(tokens[i]) || tok_directive(tokens[i]) ||
+            tokens[i].fmt_disabled || tokens[i].fmt_passthrough || tokens[i].kind != TokenKind::TypedefKeyword)
+            continue;
+        size_t semi = statement_end_semicolon(tokens, i);
+        if (semi == SIZE_MAX || token_range_has_pp_conditional(tokens, i, semi + 1) ||
+            token_range_disabled_or_passthrough(tokens, i, semi + 1))
+            continue;
+        size_t enum_i = SIZE_MAX, open = SIZE_MAX;
+        for (size_t j = i; j <= semi; ++j) {
+            if (tokens[j].kind == TokenKind::EnumKeyword)
+                enum_i = j;
+            if (enum_i != SIZE_MAX && tok_is(tokens[j], "{", TokenKind::OpenBrace)) { open = j; break; }
+        }
+        if (enum_i == SIZE_MAX || open == SIZE_MAX)
+            continue;
+        size_t close = matching_close_token(tokens, open, semi + 1, "{", "}", TokenKind::OpenBrace, TokenKind::CloseBrace);
+        if (close == SIZE_MAX || close >= semi)
+            continue;
+        auto items = top_level_ranges_between(tokens, open + 1, close);
+        if (items.empty())
+            continue;
+        int base = tokens[i].fmt_indent;
+        int item_base_col = (base + 1) * std::max(0, opts.indent_size);
+        int name_width = tab_aligned_width(eo.enum_name_min_width, opts);
+        int value_width = tab_aligned_width(eo.enum_value_min_width, opts);
+        std::vector<size_t> eqs(items.size(), SIZE_MAX);
+        if (eo.align && !eo.align_adaptive) {
+            for (size_t k = 0; k < items.size(); ++k) {
+                eqs[k] = find_top_level_token(tokens, items[k].first, items[k].second, "=", TokenKind::Unknown);
+                size_t name_end = eqs[k] == SIZE_MAX ? items[k].second : eqs[k];
+                name_width = std::max(name_width, token_range_width_compact(tokens, items[k].first, name_end) + 1);
+                if (eqs[k] != SIZE_MAX)
+                    value_width = std::max(value_width, token_range_width_compact(tokens, eqs[k] + 1, items[k].second));
+            }
+            if (opts.tab_align) {
+                name_width = snap_to_indent_grid(item_base_col + name_width, opts.indent_size) - item_base_col;
+                value_width = snap_to_indent_grid(item_base_col + name_width + 2 + value_width, opts.indent_size) - item_base_col - name_width - 2;
+            }
+        }
+        tokens[open].fmt_newline_before = false;
+        tokens[open].fmt_spaces_before = 1;
+        for (size_t k = 0; k < items.size(); ++k) {
+            size_t first = items[k].first;
+            size_t eq = eqs[k] == SIZE_MAX ? find_top_level_token(tokens, items[k].first, items[k].second, "=", TokenKind::Unknown) : eqs[k];
+            tokens[first].fmt_newline_before = true;
+            tokens[first].fmt_blank_lines = 0;
+            tokens[first].fmt_indent = base + 1;
+            tokens[first].fmt_spaces_before = 0;
+            if (eo.align && eq != SIZE_MAX) {
+                int nw = token_range_width_compact(tokens, first, eq);
+                int cur_name_width = name_width;
+                if (eo.align_adaptive) {
+                    cur_name_width = std::max(tab_aligned_width(eo.enum_name_min_width, opts), nw + 1);
+                    if (opts.tab_align)
+                        cur_name_width = snap_to_indent_grid(item_base_col + cur_name_width, opts.indent_size) - item_base_col;
+                }
+                tokens[eq].fmt_spaces_before = std::max(1, cur_name_width - nw);
+                size_t val = next_code_sig(tokens, eq + 1, items[k].second);
+                if (val != SIZE_MAX)
+                    tokens[val].fmt_spaces_before = 1;
+            } else if (eq != SIZE_MAX) {
+                tokens[eq].fmt_spaces_before = 1;
+                size_t val = next_code_sig(tokens, eq + 1, items[k].second);
+                if (val != SIZE_MAX)
+                    tokens[val].fmt_spaces_before = 1;
+            }
+            size_t comma = find_top_level_token(tokens, items[k].second, close, ",", TokenKind::Comma);
+            if (comma != SIZE_MAX)
+                tokens[comma].fmt_spaces_before = 0;
+        }
+        tokens[close].fmt_newline_before = true;
+        tokens[close].fmt_blank_lines = 0;
+        tokens[close].fmt_indent = base;
+        tokens[close].fmt_spaces_before = 0;
+        size_t suffix = next_code_sig(tokens, close + 1, semi);
+        if (suffix != SIZE_MAX)
+            tokens[suffix].fmt_spaces_before = 1;
+        tokens[semi].fmt_spaces_before = 0;
+        i = semi;
+    }
+}
+
+static bool is_modport_dir_kind(TokenKind kind) {
+    return kind == TokenKind::InputKeyword || kind == TokenKind::OutputKeyword ||
+           kind == TokenKind::InOutKeyword || kind == TokenKind::RefKeyword ||
+           kind == TokenKind::ImportKeyword || kind == TokenKind::ExportKeyword;
+}
+
+static void format_modport_pass(std::vector<Tok>& tokens, const FormatOptions& opts) {
+    const auto& mo = opts.modport;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (tok_whitespace(tokens[i]) || tok_comment(tokens[i]) || tok_directive(tokens[i]) ||
+            tokens[i].fmt_disabled || tokens[i].fmt_passthrough || tokens[i].kind != TokenKind::ModPortKeyword)
+            continue;
+        size_t semi = statement_end_semicolon(tokens, i);
+        if (semi == SIZE_MAX || token_range_has_pp_conditional(tokens, i, semi + 1) ||
+            token_range_disabled_or_passthrough(tokens, i, semi + 1))
+            continue;
+        auto modports = top_level_ranges_between(tokens, next_code_sig(tokens, i + 1, semi), semi);
+        int base = tokens[i].fmt_indent;
+        for (auto mp : modports) {
+            size_t name = mp.first;
+            size_t open = SIZE_MAX;
+            for (size_t j = name + 1; j < mp.second; ++j)
+                if (tok_is(tokens[j], "(", TokenKind::OpenParenthesis)) { open = j; break; }
+            if (open == SIZE_MAX)
+                continue;
+            size_t close = matching_close_paren(tokens, open, mp.second);
+            if (close == SIZE_MAX)
+                continue;
+            auto items = top_level_ranges_between(tokens, open + 1, close);
+            if (items.empty())
+                continue;
+            int dir_width = tab_aligned_width(mo.direction_min_width, opts);
+            int sig_width = tab_aligned_width(mo.signal_min_width, opts);
+            for (auto item : items) {
+                if (!is_modport_dir_kind(tokens[item.first].kind))
+                    continue;
+                dir_width = std::max(dir_width, (int)tok_text(tokens[item.first]).size() + 1);
+                if (mo.align && !mo.align_adaptive)
+                    sig_width = std::max(sig_width, token_range_width_compact(tokens, item.first + 1, item.second));
+            }
+            if (opts.tab_align) {
+                int col = (base + 1) * std::max(0, opts.indent_size);
+                dir_width = snap_to_indent_grid(col + dir_width, opts.indent_size) - col;
+            }
+            tokens[name].fmt_spaces_before = (i == mp.first ? 1 : tokens[name].fmt_spaces_before);
+            tokens[open].fmt_spaces_before = 1;
+            for (size_t k = 0; k < items.size(); ++k) {
+                auto item = items[k];
+                tokens[item.first].fmt_newline_before = true;
+                tokens[item.first].fmt_blank_lines = 0;
+                tokens[item.first].fmt_indent = base + 1;
+                tokens[item.first].fmt_spaces_before = 0;
+                size_t rem = next_code_sig(tokens, item.first + 1, item.second);
+                if (rem != SIZE_MAX && mo.align)
+                    tokens[rem].fmt_spaces_before = std::max(1, dir_width - (int)tok_text(tokens[item.first]).size());
+                else if (rem != SIZE_MAX)
+                    tokens[rem].fmt_spaces_before = 1;
+                size_t comma = find_top_level_token(tokens, item.second, close, ",", TokenKind::Comma);
+                if (comma != SIZE_MAX)
+                    tokens[comma].fmt_spaces_before = 0;
+            }
+            tokens[close].fmt_newline_before = true;
+            tokens[close].fmt_blank_lines = 0;
+            tokens[close].fmt_indent = base;
+            tokens[close].fmt_spaces_before = 0;
+        }
+        tokens[semi].fmt_spaces_before = 0;
+        i = semi;
+    }
+}
+
+static void expand_instances_pass(std::vector<Tok>& tokens, const FormatOptions& opts) {
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (tok_whitespace(tokens[i]) || tok_comment(tokens[i]) || tok_directive(tokens[i]) ||
+            tokens[i].fmt_disabled || tokens[i].fmt_passthrough || !is_identifier(tokens[i]))
+            continue;
+        size_t mod = i;
+        if (is_keyword(tokens[mod]))
+            continue;
+        size_t j = next_code_sig(tokens, mod + 1, tokens.size());
+        if (j != SIZE_MAX && tok_is(tokens[j], "#", TokenKind::Hash)) {
+            size_t po = next_code_sig(tokens, j + 1, tokens.size());
+            if (po == SIZE_MAX || !tok_is(tokens[po], "(", TokenKind::OpenParenthesis))
+                continue;
+            j = next_code_sig(tokens, matching_close_paren(tokens, po, tokens.size()) + 1, tokens.size());
+        }
+        if (j == SIZE_MAX || !is_identifier(tokens[j]))
+            continue;
+        size_t inst_name = j;
+        size_t open = SIZE_MAX;
+        int bracket = 0;
+        for (j = next_code_sig(tokens, inst_name + 1, tokens.size()); j != SIZE_MAX; j = next_code_sig(tokens, j + 1, tokens.size())) {
+            if (tok_is(tokens[j], "[", TokenKind::OpenBracket)) ++bracket;
+            else if (tok_is(tokens[j], "]", TokenKind::CloseBracket) && bracket > 0) --bracket;
+            else if (tok_is(tokens[j], "(", TokenKind::OpenParenthesis) && bracket == 0) { open = j; break; }
+            else if (bracket == 0) break;
+        }
+        if (open == SIZE_MAX)
+            continue;
+        size_t close = matching_close_paren(tokens, open, tokens.size());
+        if (close == SIZE_MAX)
+            continue;
+        size_t semi = next_code_sig(tokens, close + 1, tokens.size());
+        if (semi == SIZE_MAX || !tok_is(tokens[semi], ";", TokenKind::Semicolon) ||
+            token_range_has_pp_conditional(tokens, i, semi + 1) || token_range_disabled_or_passthrough(tokens, i, semi + 1))
+            continue;
+        auto ports = top_level_ranges_between(tokens, open + 1, close);
+        if (ports.empty())
+            continue;
+        bool named = true;
+        int max_port = 0, max_sig = 0;
+        struct P { size_t dot, name, op, cl, comma; int sigw; };
+        std::vector<P> ps;
+        for (auto r : ports) {
+            size_t dot = r.first;
+            if (tok_text(tokens[dot]) != ".") { named = false; break; }
+            size_t name = next_code_sig(tokens, dot + 1, r.second);
+            size_t op = next_code_sig(tokens, name == SIZE_MAX ? r.second : name + 1, r.second);
+            if (name == SIZE_MAX || op == SIZE_MAX || !tok_is(tokens[op], "(", TokenKind::OpenParenthesis)) { named = false; break; }
+            size_t cl = matching_close_paren(tokens, op, r.second);
+            if (cl == SIZE_MAX) { named = false; break; }
+            size_t comma = find_top_level_token(tokens, r.second, close, ",", TokenKind::Comma);
+            int sigw = token_range_width_compact(tokens, op + 1, cl);
+            max_port = std::max(max_port, (int)tok_text(tokens[name]).size());
+            max_sig = std::max(max_sig, sigw);
+            ps.push_back({dot, name, op, cl, comma, sigw});
+        }
+        if (!named)
+            continue;
+        int base = tokens[mod].fmt_indent;
+        int port_indent = opts.instance.port_indent_level;
+        tokens[open].fmt_spaces_before = 1;
+        int eff_before = std::max(1, opts.instance.instance_port_name_width - max_port - 1);
+        int eff_inside = std::max(0, opts.instance.instance_port_between_paren_width - max_sig);
+        for (const auto& p : ps) {
+            tokens[p.dot].fmt_newline_before = true;
+            tokens[p.dot].fmt_blank_lines = 0;
+            tokens[p.dot].fmt_indent = base + port_indent;
+            tokens[p.dot].fmt_spaces_before = 0;
+            tokens[p.name].fmt_spaces_before = 0;
+            int before = opts.instance.align_adaptive ? std::max(1, opts.instance.instance_port_name_width - (int)tok_text(tokens[p.name]).size() - 1) : eff_before + (max_port - (int)tok_text(tokens[p.name]).size());
+            tokens[p.op].fmt_spaces_before = before;
+            int inside = opts.instance.align_adaptive ? std::max(0, opts.instance.instance_port_between_paren_width - p.sigw) : eff_inside + (max_sig - p.sigw);
+            tokens[p.cl].fmt_spaces_before = inside;
+            if (p.comma != SIZE_MAX)
+                tokens[p.comma].fmt_spaces_before = 0;
+        }
+        tokens[close].fmt_newline_before = true;
+        tokens[close].fmt_blank_lines = 0;
+        tokens[close].fmt_indent = base;
+        tokens[close].fmt_spaces_before = 0;
+        tokens[semi].fmt_spaces_before = 0;
+        i = semi;
+    }
+}
+
+static PPContext build_pp_context(const std::vector<Tok>& tokens, const FormatOptions&) {
+    PPContext ctx;
+    auto starts = tok_line_starts(tokens);
+    ctx.lines.resize(starts.size());
+    int depth = 0;
+    for (size_t li = 0; li < starts.size(); ++li) {
+        size_t s = starts[li], e = (li + 1 < starts.size()) ? starts[li + 1] : tokens.size();
+        ctx.lines[li].depth_before = depth;
+        bool is_if = false, is_endif = false, is_cond = false;
+        size_t first = next_code_sig(tokens, s, e);
+        if (first != SIZE_MAX && ((is_line_directive(tokens[first]) && is_pp_conditional(tok_directive_kind(tokens[first]))) ||
+                                  is_pp_conditional_text(tok_text(tokens[first])))) {
+            is_cond = true;
+            auto kind = tok_directive_kind(tokens[first]);
+            is_if = kind == syntax::SyntaxKind::IfDefDirective || kind == syntax::SyntaxKind::IfNDefDirective;
+            is_endif = kind == syntax::SyntaxKind::EndIfDirective;
+        }
+        ctx.lines[li].conditional = is_cond;
+        if (is_endif && depth > 0) --depth;
+        if (is_if) ++depth;
+        ctx.lines[li].depth_after = depth;
+    }
+    return ctx;
+}
+
+static void format_arg_list_metadata(std::vector<Tok>& tokens, size_t open, size_t close,
+                                     int base_indent, int hanging_indent, bool hanging) {
+    auto args = top_level_ranges_between(tokens, open + 1, close);
+    if (args.empty())
+        return;
+    if (hanging) {
+        tokens[args[0].first].fmt_newline_before = false;
+        tokens[args[0].first].fmt_spaces_before = 0;
+        for (size_t k = 1; k < args.size(); ++k) {
+            tokens[args[k].first].fmt_newline_before = true;
+            tokens[args[k].first].fmt_blank_lines = 0;
+            tokens[args[k].first].fmt_indent = hanging_indent;
+            tokens[args[k].first].fmt_spaces_before = 0;
+        }
+        tokens[close].fmt_newline_before = false;
+        tokens[close].fmt_spaces_before = 0;
+    } else {
+        for (auto r : args) {
+            tokens[r.first].fmt_newline_before = true;
+            tokens[r.first].fmt_blank_lines = 0;
+            tokens[r.first].fmt_indent = base_indent + 1;
+            tokens[r.first].fmt_spaces_before = 0;
+        }
+        tokens[close].fmt_newline_before = true;
+        tokens[close].fmt_blank_lines = 0;
+        tokens[close].fmt_indent = base_indent;
+        tokens[close].fmt_spaces_before = 0;
+    }
+    for (auto r : args) {
+        size_t comma = find_top_level_token(tokens, r.second, close, ",", TokenKind::Comma);
+        if (comma != SIZE_MAX)
+            tokens[comma].fmt_spaces_before = 0;
+    }
+}
+
+static size_t find_simple_call_tokens(const std::vector<Tok>& tokens, size_t first, size_t end,
+                                      size_t& name, size_t& open, size_t& close) {
+    for (size_t i = first; i < end && i < tokens.size(); ++i) {
+        if (tok_whitespace(tokens[i]) || tok_comment(tokens[i]) || tok_directive(tokens[i]))
+            continue;
+        bool callable = is_identifier(tokens[i]) || starts_with_chars(tok_text(tokens[i]), '`');
+        if (!callable || is_function_call_skip_token(tokens[i]))
+            continue;
+        size_t op = next_code_sig(tokens, i + 1, end);
+        if (op == SIZE_MAX || !tok_is(tokens[op], "(", TokenKind::OpenParenthesis))
+            continue;
+        size_t cl = matching_close_paren(tokens, op, end);
+        if (cl == SIZE_MAX)
+            continue;
+        name = i; open = op; close = cl; return i;
+    }
+    return SIZE_MAX;
+}
+
+static void format_function_calls_pass(std::vector<Tok>& tokens, const FormatOptions& opts);
+
+static void format_pp_conditional_function_calls_pass(std::vector<Tok>& tokens,
+                                                      const FormatOptions& opts,
+                                                      const PPContext&) {
+    format_function_calls_pass(tokens, opts);
+}
+
+static void format_multiline_macro_arg_calls_pass(std::vector<Tok>& tokens,
+                                                  const FormatOptions& opts) {
+    const auto& fo = opts.function;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (tokens[i].fmt_disabled || tokens[i].fmt_passthrough || tok_whitespace(tokens[i]) || tok_comment(tokens[i]))
+            continue;
+        size_t semi = statement_end_semicolon(tokens, i);
+        if (semi == SIZE_MAX || token_range_has_pp_conditional(tokens, i, semi + 1))
+            continue;
+        size_t name, open, close;
+        if (find_simple_call_tokens(tokens, i, semi + 1, name, open, close) == SIZE_MAX || tok_text(tokens[name])[0] == '`')
+            continue;
+        bool has_macro = false;
+        for (size_t k = open + 1; k < close; ++k)
+            has_macro = has_macro || tok_text(tokens[k]).find('`') != std::string::npos;
+        auto args = top_level_ranges_between(tokens, open + 1, close);
+        if (!has_macro || args.size() <= 1)
+            continue;
+        tokens[open].fmt_spaces_before = fo.space_before_paren ? 1 : 0;
+        int hang = tokens[name].fmt_indent;
+        format_arg_list_metadata(tokens, open, close, tokens[name].fmt_indent, hang, true);
+        i = semi;
+    }
+}
+
+static void format_function_calls_pass(std::vector<Tok>& tokens, const FormatOptions& opts) {
+    const auto& fo = opts.function;
+    auto starts = tok_line_starts(tokens);
+    for (size_t li = 0; li < starts.size(); ++li) {
+        size_t s = starts[li], e = (li + 1 < starts.size()) ? starts[li + 1] : tokens.size();
+        if (token_range_disabled_or_passthrough(tokens, s, e) || token_range_has_pp_conditional(tokens, s, e))
+            continue;
+        size_t name, open, close;
+        if (find_simple_call_tokens(tokens, s, e, name, open, close) == SIZE_MAX || tok_text(tokens[name])[0] == '`')
+            continue;
+        bool decl_prefix = false;
+        for (size_t k = s; k < name; ++k)
+            decl_prefix = decl_prefix || tokens[k].kind == TokenKind::FunctionKeyword || tokens[k].kind == TokenKind::TaskKeyword || tokens[k].kind == TokenKind::ModuleKeyword || tokens[k].kind == TokenKind::ClassKeyword;
+        if (decl_prefix)
+            continue;
+        auto args = top_level_ranges_between(tokens, open + 1, close);
+        bool has_macro_arg = false;
+        for (auto r : args)
+            for (size_t k = r.first; k < r.second; ++k)
+                has_macro_arg = has_macro_arg || tok_text(tokens[k]).find('`') != std::string::npos;
+        bool do_break = false;
+        if (has_macro_arg && args.size() > 1) do_break = true;
+        else if (fo.break_policy == "always") do_break = !args.empty();
+        else if (fo.break_policy == "auto") do_break = fo.arg_count >= 0 && (int)args.size() >= fo.arg_count;
+        tokens[open].fmt_spaces_before = fo.space_before_paren ? 1 : 0;
+        if (!do_break || fo.break_policy == "never") {
+            if (!args.empty() && fo.space_inside_paren)
+                tokens[args.front().first].fmt_spaces_before = 1;
+            tokens[close].fmt_spaces_before = (!args.empty() && fo.space_inside_paren) ? 1 : 0;
+            continue;
+        }
+        format_arg_list_metadata(tokens, open, close, tokens[name].fmt_indent, tokens[name].fmt_indent, fo.layout == "hanging");
+    }
+}
+
+static void format_covergroup_pass(std::vector<Tok>& tokens, const FormatOptions& opts) {
+    int cover_depth = 0;
+    int brace_depth = 0;
+    int cover_base = 0;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (tok_whitespace(tokens[i]) || tok_comment(tokens[i]) || tok_directive(tokens[i]))
+            continue;
+        if (tokens[i].kind == TokenKind::CoverGroupKeyword) {
+            cover_depth++;
+            cover_base = tokens[i].fmt_indent;
+        } else if (tokens[i].kind == TokenKind::EndGroupKeyword) {
+            tokens[i].fmt_indent = cover_base;
+            cover_depth = std::max(0, cover_depth - 1);
+            brace_depth = 0;
+        } else if (cover_depth > 0 && !tokens[i].fmt_disabled && !tokens[i].fmt_passthrough) {
+            bool close_brace = tok_is(tokens[i], "}", TokenKind::CloseBrace);
+            if (tokens[i].fmt_newline_before) {
+                int d = brace_depth - (close_brace ? 1 : 0);
+                tokens[i].fmt_indent = cover_base + 1 + std::max(0, d);
+                tokens[i].fmt_spaces_before = 0;
+            }
+            if (tok_is(tokens[i], "{", TokenKind::OpenBrace)) ++brace_depth;
+            else if (close_brace && brace_depth > 0) --brace_depth;
+        }
+    }
+    (void)opts;
+}
+
+static void format_constraint_dist_pass(std::vector<Tok>& tokens, const FormatOptions& opts) {
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (tokens[i].kind != TokenKind::DistKeyword || tokens[i].fmt_disabled || tokens[i].fmt_passthrough)
+            continue;
+        size_t open = next_code_sig(tokens, i + 1, tokens.size());
+        if (open == SIZE_MAX || !tok_is(tokens[open], "{", TokenKind::OpenBrace))
+            continue;
+        size_t close = matching_close_token(tokens, open, tokens.size(), "{", "}", TokenKind::OpenBrace, TokenKind::CloseBrace);
+        if (close == SIZE_MAX || token_range_has_pp_conditional(tokens, i, close + 1))
+            continue;
+        auto items = top_level_ranges_between(tokens, open + 1, close);
+        if (items.size() <= 1)
+            continue;
+        int base = tokens[i].fmt_indent;
+        if (opts.statement.begin_newline) {
+            tokens[open].fmt_newline_before = true;
+            tokens[open].fmt_indent = base;
+            tokens[open].fmt_spaces_before = 0;
+        } else {
+            tokens[open].fmt_spaces_before = 1;
+        }
+        for (auto r : items) {
+            tokens[r.first].fmt_newline_before = true;
+            tokens[r.first].fmt_blank_lines = 0;
+            tokens[r.first].fmt_indent = base + 1;
+            tokens[r.first].fmt_spaces_before = 0;
+            size_t comma = find_top_level_token(tokens, r.second, close, ",", TokenKind::Comma);
+            if (comma != SIZE_MAX) tokens[comma].fmt_spaces_before = 0;
+        }
+        tokens[close].fmt_newline_before = true;
+        tokens[close].fmt_blank_lines = 0;
+        tokens[close].fmt_indent = base;
+        tokens[close].fmt_spaces_before = 0;
+        i = close;
+    }
+}
+
+static void format_function_declaration_pass(std::vector<Tok>& tokens, const FormatOptions& opts) {
+    const auto& fd = opts.function_declaration;
+    auto starts = tok_line_starts(tokens);
+    for (size_t li = 0; li < starts.size(); ++li) {
+        size_t s = starts[li], e = (li + 1 < starts.size()) ? starts[li + 1] : tokens.size();
+        size_t first = next_code_sig(tokens, s, e);
+        if (first == SIZE_MAX || (tokens[first].kind != TokenKind::FunctionKeyword && tokens[first].kind != TokenKind::TaskKeyword) ||
+            token_range_disabled_or_passthrough(tokens, s, e) || token_range_has_pp_conditional(tokens, s, e))
+            continue;
+        size_t open = SIZE_MAX;
+        for (size_t j = first + 1; j < e; ++j)
+            if (tok_is(tokens[j], "(", TokenKind::OpenParenthesis)) { open = j; break; }
+        if (open == SIZE_MAX)
+            continue;
+        size_t close = matching_close_paren(tokens, open, e);
+        if (close == SIZE_MAX)
+            continue;
+        int approx_len = 0;
+        for (size_t j = s; j < e; ++j)
+            if (!tok_whitespace(tokens[j])) approx_len += (int)tok_text(tokens[j]).size() + std::max(0, tokens[j].fmt_spaces_before);
+        if (approx_len <= fd.line_length)
+            continue;
+        tokens[open].fmt_spaces_before = 0;
+        format_arg_list_metadata(tokens, open, close, tokens[first].fmt_indent, tokens[first].fmt_indent, fd.layout == "hanging");
+    }
+}
+
+} // anonymous namespace
 
 // ---------------------------------------------------------------------------
 // format_source — main entry point
@@ -7558,91 +8730,52 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
 std::string format_source(const std::string& source, const FormatOptions& opts) {
     ScopedTokenCache token_cache;
 
-    // -----------------------------------------------------------------------
-    // Tokenize using slang::Lexer (no SyntaxTree/CST needed)
-    // -----------------------------------------------------------------------
     const std::string& input = source;
     write_log(opts, "format_source_input.sv", input);
 
     auto tokens = collect_lexer_tokens(input);
 
-    // -----------------------------------------------------------------------
-    // Primary output path: pass0 → render_tokens
-    // -----------------------------------------------------------------------
     pass0_populate_metadata(tokens, input, opts);
     split_semicolon_statements_pass_v2(tokens);
     align_define_continuation_pass_v2(tokens, opts);
+
     std::string v2_out = render_tokens(tokens, opts);
-    // normalize trailing newlines:
-    if (!v2_out.empty() && v2_out.back() != '\n') v2_out += '\n';
-    while (v2_out.size() >= 2 && v2_out[v2_out.size()-1] == '\n' && v2_out[v2_out.size()-2] == '\n')
+    if (!v2_out.empty() && v2_out.back() != '\n')
+        v2_out += '\n';
+    while (v2_out.size() >= 2 && v2_out[v2_out.size() - 1] == '\n' &&
+           v2_out[v2_out.size() - 2] == '\n')
         v2_out.pop_back();
     write_log(opts, "pass0_render_output.sv", v2_out);
 
-    // -----------------------------------------------------------------------
-    // Module-header layout passes (v2 bridge — operate on rendered lines)
-    // -----------------------------------------------------------------------
-    {
-        auto lines = text_to_lines(v2_out);
-        lines = format_class_extends_parameter_pass(std::move(lines), opts);
-        lines = format_portlist_pass(std::move(lines), opts);
-        v2_out = render_lines(lines);
-    }
+    // Module-header reflow mutates token metadata directly.
+    format_class_extends_parameter_pass(tokens, opts);
+    format_portlist_pass(tokens, opts);
 
-    // -----------------------------------------------------------------------
-    // Line-group alignment passes (v2 bridge — operate on rendered lines)
-    // -----------------------------------------------------------------------
-    {
-        auto lines = text_to_lines(v2_out);
-        if (opts.statement.align)
-            lines = align_assign_pass(std::move(lines), opts);
-        if (opts.var_declaration.align)
-            lines = align_var_pass(std::move(lines), opts);
-        if (opts.port_declaration.align)
-            lines = align_port_pass(std::move(lines), opts);
-        v2_out = render_lines(lines);
-    }
+    if (opts.statement.align)
+        align_assign_pass(tokens, opts);
+    if (opts.var_declaration.align)
+        align_var_pass(tokens, opts);
+    if (opts.port_declaration.align)
+        align_port_pass(tokens, opts);
 
-    // -----------------------------------------------------------------------
-    // Structural layout passes (v2 bridge — operate on rendered lines)
-    // -----------------------------------------------------------------------
-    {
-        auto lines = text_to_lines(v2_out);
-        lines = format_enum_declaration_pass(std::move(lines), opts);
-        lines = format_modport_pass(std::move(lines), opts);
-        if (opts.instance.align)
-            lines = expand_instances_pass(std::move(lines), opts);
-        PPContext pp = build_pp_context(lines);
-        lines = format_pp_conditional_function_calls_pass(std::move(lines), opts, pp);
-        lines = format_multiline_macro_arg_calls_pass(std::move(lines), opts);
-        lines = format_function_calls_pass(std::move(lines), opts);
-        lines = text_to_lines(render_lines(lines));
-        lines = format_covergroup_pass(std::move(lines), opts);
-        lines = format_constraint_dist_pass(std::move(lines), opts);
-        lines = format_function_declaration_pass(std::move(lines), opts);
-        v2_out = render_lines(lines);
-    }
+    format_enum_declaration_pass(tokens, opts);
+    format_modport_pass(tokens, opts);
+    if (opts.instance.align)
+        expand_instances_pass(tokens, opts);
+    PPContext pp = build_pp_context(tokens, opts);
+    format_pp_conditional_function_calls_pass(tokens, opts, pp);
+    format_multiline_macro_arg_calls_pass(tokens, opts);
+    format_function_calls_pass(tokens, opts);
+    format_covergroup_pass(tokens, opts);
+    format_constraint_dist_pass(tokens, opts);
+    format_function_declaration_pass(tokens, opts);
 
-    // -----------------------------------------------------------------------
-    // Final line pass: align define continuations
-    // -----------------------------------------------------------------------
-    std::string out;
-    {
-        auto lines = text_to_lines(v2_out);
-        lines = align_define_continuation_pass(std::move(lines), opts);
-        out = render_lines(lines);
-    }
+    std::string out = render_tokens(tokens, opts);
 
-    // -----------------------------------------------------------------------
-    // Final newline normalization: result.rstrip('\n') + '\n'
-    // -----------------------------------------------------------------------
     while (!out.empty() && out.back() == '\n')
         out.pop_back();
     out += '\n';
 
-    // -----------------------------------------------------------------------
-    // Safe-mode integrity check: verify only whitespace changed.
-    // -----------------------------------------------------------------------
     verify_safe_mode_unchanged(source, out, opts);
 
     return out;
