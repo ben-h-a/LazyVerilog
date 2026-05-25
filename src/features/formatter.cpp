@@ -7159,54 +7159,124 @@ static std::string render_tokens(const std::vector<Tok>& tokens, const FormatOpt
 // ---------------------------------------------------------------------------
 static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string& input,
                                     const FormatOptions& opts) {
+    // Pass 0 is the formatter's structural scan.  It does not rewrite token text;
+    // it annotates each token with enough layout metadata for render_tokens():
+    //
+    //   fmt_indent          indentation level if the token starts a rendered line
+    //   fmt_spaces_before   horizontal spacing before the token on the same line
+    //   fmt_newline_before  whether render_tokens() should break before the token
+    //   fmt_blank_lines     preserved/capped blank lines attached to that break
+    //   fmt_disabled        token belongs to a format-off region
+    //   fmt_passthrough     token should be emitted exactly as collected
+    //
+    // Later passes can still adjust this metadata, but this pass establishes the
+    // baseline line breaking and indentation by walking the token stream once and
+    // maintaining lightweight parser state (indent stack, grouping depths, macro
+    // roles, preprocessor conditionals, case labels, etc.).
     auto disabled = find_disabled(input);
     const MacroClassifier macro_classifier(opts.macros);
 
+    // Current logical indentation level.  indent_stack mirrors every construct
+    // that increments indent_level so the corresponding close token can subtract
+    // the exact delta (important because the outermost module/package/interface
+    // indent can be configured independently from ordinary block indentation).
     int indent_level = 0;
     std::vector<int> indent_stack;
 
+    // True when the next emitted non-whitespace token will be at the beginning of
+    // a rendered line.  This is separate from original source newlines: source
+    // whitespace is consumed and converted into fmt_* metadata.
     bool at_bol = true;
 
+    // Bracket depth for packed/unpacked dimensions and selects.  While non-zero,
+    // some spacing and wrapping rules are intentionally suppressed so expressions
+    // such as [WIDTH-1:0] are kept compact.
     int dim_depth = 0;
 
+    // Parenthesis stack.  paren_depth is the numeric nesting level; paren_stack
+    // records what kind of parenthesis each open token introduced; and
+    // for_header_stack marks parentheses belonging to for/foreach headers, where
+    // semicolons should not terminate statements or force a newline.
     int paren_depth = 0;
     std::vector<ParenKind> paren_stack;
     std::vector<bool> for_header_stack;
 
+    // Tracks unmatched "do" keywords so "end while (...)" / "while (...)" tails
+    // are formatted as part of the do-while construct rather than as an ordinary
+    // while statement starting a new single-statement body.
     int do_depth = 0;
 
+    // Deferred layout requests.  Many tokens (for example semicolons, begin/end,
+    // comments, or macro invocations) decide that the *next* significant token
+    // must start a new line; pending_nl carries that decision until the next
+    // non-whitespace token.  original_newline_before_token remembers whether the
+    // source had a newline immediately before the current token, which is needed
+    // to distinguish inline comments from standalone comments.
     bool pending_nl = false;
     bool original_newline_before_token = false;
 
+    // Number of blank lines to preserve before the next token.  It is capped by
+    // opts.blank_lines_between_items when whitespace is consumed.
     int blank_pend = 0;
 
+    // Set while handling a split preprocessor conditional such as a directive
+    // token followed by its condition expression.  The condition expression is
+    // passed through so macro/preprocessor spelling and spacing are preserved.
     bool in_pp_cond = false;
 
+    // Format-disabled regions are mostly passthrough.  after_dis bridges the
+    // transition back to normal formatting, while in_define_disabled keeps a
+    // multi-token `define inside a disabled region verbatim until its newline.
     bool after_dis = false;
     bool in_define_disabled = false;
 
+    // begin/end/fork labels are written as "begin : label".  This small state
+    // machine detects the colon and the label token so the label stays attached
+    // to the block opener/closer before normal newline handling resumes.
     int block_label_state = 0;
 
+    // Struct/union and constraint bodies use braces, but unlike expression braces
+    // their contents should be indented as blocks.  *_pend indicates that the
+    // next "{" opens such a block; constraint_depth also handles nested
+    // constraint single-statement bodies.
     bool struct_pend = false;
     bool constraint_pend = false;
     int constraint_depth = 0;
 
+    // case handling needs to distinguish the case expression, case item labels,
+    // and ternary ?: operators inside case items.  case_conditional_depth counts
+    // pending '?' tokens so a ':' in a ternary expression is not mistaken for a
+    // case label separator.
     bool case_expr_pending = false;
     int case_expr_depth = -1;
     int case_depth = 0;
     int case_conditional_depth = 0;
     bool case_label_pending_nl = false;
 
+    // After if/for/foreach/while/repeat, the closing ')' of the control
+    // expression should schedule either a begin block or a single-statement body
+    // on the next token.
     bool control_expr_pending = false;
     int control_expr_depth = -1;
 
+    // Single-statement body indentation.  single_stmt_pending means a control
+    // construct has just ended and the next token may need one extra indent;
+    // single_stmt_active means that temporary indent has been applied and should
+    // be removed at the statement terminator or statement-like macro.
     bool single_stmt_pending = false;
     bool single_stmt_active = false;
 
+    // True only while formatting the trailing while of a do-while construct.
     bool do_while_tail = false;
 
+    // import/export and extern declarations can contain function/task keywords
+    // that must not open normal function/task indentation scopes.
     bool in_import_export_decl = false;
     bool in_extern_decl = false;
+
+    // Macro invocations can behave like expressions, statements, declarations,
+    // or synthetic block delimiters.  Function-like macros are tracked until
+    // their argument list closes; object-like macros are completed immediately.
     struct ActiveMacro {
         MacroClassification classification;
         bool wait_open{false};
@@ -7224,8 +7294,13 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
     MacroClassification whitespace_macro_class;
     Tok whitespace_macro_prev;
 
+    // Brace stack classifies "{" scopes.  Only struct/constraint braces affect
+    // indentation here; expression/concatenation braces are recorded as "other"
+    // so nested closes still pair correctly.
     std::vector<std::string> brace_stk;
 
+    // Previous significant token state.  prev_at_procedural helps classify
+    // event-control parentheses following procedural @.
     const Tok* prev = nullptr;
     bool prev_at_procedural = false;
 
@@ -7233,6 +7308,9 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
     // Helper lambdas
     // -----------------------------------------------------------------------
     auto next_significant = [&](size_t idx) -> const Tok* {
+        // Look ahead past lexer whitespace and comments.  This is deliberately
+        // shallow: pass0 only needs immediate context such as whether a macro is
+        // followed by an argument list.
         for (size_t j = idx + 1; j < tokens.size(); ++j) {
             if (!tok_whitespace(tokens[j]) && !tok_comment(tokens[j]))
                 return &tokens[j];
@@ -7240,15 +7318,22 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
         return nullptr;
     };
     auto macro_force_own_line = [](MacroRole role) {
+        // Declaration/control/block macros are treated like structural tokens,
+        // so they should not be silently appended after prior code.
         return role == MacroRole::DeclarationLike || role == MacroRole::ControlFlowLike ||
                role == MacroRole::BlockBeginLike || role == MacroRole::BlockEndLike;
     };
     auto macro_newline_after = [](MacroRole role) {
+        // Statement-ish macros terminate a logical line even when they do not
+        // contain a literal semicolon in the token stream.
         return role == MacroRole::StatementLike || role == MacroRole::DeclarationLike ||
                role == MacroRole::ControlFlowLike || role == MacroRole::BlockBeginLike ||
                role == MacroRole::BlockEndLike;
     };
     auto finish_macro_invocation = [&](const MacroClassification& classification) {
+        // Apply the effects of a completed macro invocation.  For function-like
+        // macros this is called when the matching ')' closes; for object-like
+        // macros it is called at the macro token itself.
         if (macro_newline_after(classification.role)) {
             pending_nl = true;
             macro_wrap_pending = true;
@@ -7267,6 +7352,8 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
         }
     };
     auto apply_newline = [&](size_t idx) {
+        // Materialize a deferred newline/blank-line request on the current token.
+        // Once attached to fmt_* metadata, the pending request is consumed.
         if (pending_nl || blank_pend > 0) {
             tokens[idx].fmt_newline_before = true;
             tokens[idx].fmt_blank_lines = blank_pend;
@@ -7281,6 +7368,12 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
     // -----------------------------------------------------------------------
     for (size_t i = 0; i < tokens.size(); ++i) {
         Tok& tok = tokens[i];
+
+        // Classify macro tokens before normal spacing decisions.  The macro
+        // configuration determines whether a macro acts like an expression, a
+        // statement, a declaration, a control construct, or a synthetic block
+        // delimiter.  Function-like macros are identified by looking for an
+        // immediate significant "(" after the macro token.
         bool tok_is_macro = is_macro_usage(tok);
         MacroClassification tok_macro_class;
         bool tok_macro_has_args = false;
@@ -7289,6 +7382,12 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
                 tok_macro_has_args = tok_is(*next, "(", TokenKind::OpenParenthesis);
             tok_macro_class = classify_macro(tok, tok_macro_has_args, macro_classifier);
         }
+
+        // Detect preprocessor conditionals in both lexer representations:
+        // most directives arrive as a Directive token with directive_kind set,
+        // but some preserved/passthrough text can contain the directive spelling
+        // inside tok_text().  Normalize both cases to tok_pp_cond_kind so the
+        // conditional-handling path below can treat them identically.
         syntax::SyntaxKind tok_pp_cond_kind = syntax::SyntaxKind::Unknown;
         if (is_line_directive(tok) && is_pp_conditional(tok_directive_kind(tok)))
             tok_pp_cond_kind = tok_directive_kind(tok);
@@ -7297,6 +7396,11 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
         bool tok_is_pp_conditional = is_pp_conditional(tok_pp_cond_kind);
 
         if (whitespace_macro_passthrough) {
+            // Some macros are explicitly marked whitespace-sensitive (for
+            // example, tool-specific DSL macros).  Once such a macro starts, all
+            // tokens through its balanced argument list are rendered verbatim.
+            // We still count parentheses so we know where the protected region
+            // ends, then restore normal macro/newline state.
             tok.fmt_passthrough = true;
             at_bol = !tok_text(tok).empty() && tok_text(tok).back() == '\n';
             if (!tok_whitespace(tok) && !tok_comment(tok)) {
@@ -7322,6 +7426,9 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
         }
 
         if (tok_is_macro && tok_macro_has_args && tok_macro_class.whitespace_sensitive) {
+            // Start a whitespace-sensitive function-like macro.  Its own token
+            // receives normal indentation/newline metadata; following tokens are
+            // marked passthrough until the matching close parenthesis.
             apply_newline(i);
             tok.fmt_indent = indent_level;
             at_bol = false;
@@ -7337,6 +7444,11 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
 
         // --- A. Disabled region ---
         if (in_disabled(tok_pos(tok), disabled)) {
+            // verilog_format:off regions are preserved.  Tokens that already
+            // carry source newlines (whitespace, preprocessor conditionals,
+            // multi-token defines) are passed through exactly; otherwise a token
+            // at the beginning of a disabled line can still receive current
+            // indentation so the transition into the disabled block is stable.
             tok.fmt_disabled = true;
             apply_newline(i);
             if (is_line_directive(tok) && tok_directive_kind(tok) == syntax::SyntaxKind::DefineDirective)
@@ -7355,6 +7467,10 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
 
         // --- B. Whitespace tokens ---
         if (tok_whitespace(tok)) {
+            // Whitespace tokens are not emitted directly unless passthrough is
+            // active.  Convert their newline count into deferred layout state.
+            // Newlines inside parentheses are ignored here because expression
+            // wrapping/alignment is handled by later passes.
             int nl = (int)std::count(tok_text(tok).begin(), tok_text(tok).end(), '\n');
             original_newline_before_token = nl > 0;
             if (after_dis && nl >= 1)
@@ -7370,6 +7486,10 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
         }
 
         if (tok_is_pp_conditional) {
+            // Preprocessor conditionals are line-oriented and should remain
+            // syntactically untouched.  The directive token itself is emitted as
+            // passthrough; for split forms such as "`ifdef" followed by a
+            // separate condition token, in_pp_cond preserves the next token too.
             apply_newline(i);
             if (!at_bol) {
                 tok.fmt_newline_before = true;
@@ -7401,6 +7521,10 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
         }
 
         if (in_pp_cond) {
+            // Preserve the argument/expression part of a split preprocessor
+            // conditional and then force following SystemVerilog code onto a new
+            // line.  A single separating space is added only if the directive and
+            // condition share the rendered line.
             if (!at_bol) tok.fmt_spaces_before = 1;
             tok.fmt_passthrough = true;
             at_bol = !tok_text(tok).empty() && tok_text(tok).back() == '\n';
@@ -7413,6 +7537,9 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
         }
 
         // --- C. Decide spacing and line-break ---
+        // Compute local context for the pair (prev, tok), then delegate the
+        // ordinary spacing/wrapping policy to spaces_req() and break_dec().
+        // Special constructs below can override that baseline decision.
         bool in_dim = dim_depth > 0;
         bool in_for_header =
             std::any_of(for_header_stack.begin(), for_header_stack.end(), [](bool v) { return v; });
@@ -7444,6 +7571,9 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
         }
 
         // --- D. Inline-comment suppression ---
+        // If a line comment was originally inline, do not let a pending newline
+        // from the previous token move it to its own line.  Standalone comments
+        // are detected from the original input and forced to start a line.
         bool inline_comment = tok_comment(tok) && prev && !original_newline_before_token;
 
         do_while_tail = false;
@@ -7504,6 +7634,10 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
         }
 
         // --- E. Emit newline / spacing based on break decision ---
+        // dec chooses between three behaviors:
+        //   MustWrap   attach an explicit newline to this token
+        //   MustAppend consume any pending newline and keep this token inline
+        //   Undecided  honor pending newlines, otherwise use normal spacing
         if (dec == SD::MustWrap) {
             pending_nl = false;
             tok.fmt_newline_before = true;
@@ -7524,6 +7658,9 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
         }
 
         // --- F. Single-statement indent ---
+        // Apply the one-token-late indent for control statements without begin.
+        // If the next token is begin, the normal block opener handles indentation
+        // instead.  Constraint braces are also allowed to become real scopes.
         if (single_stmt_pending && at_bol) {
             if (constraint_depth > 0 && tok_is(tok, "{", TokenKind::OpenBrace)) {
                 // constraint body brace — let brace handler below create the scope
@@ -7537,6 +7674,9 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
         }
 
         // --- G. Indent-close ---
+        // Closing constructs reduce indent before the token's fmt_indent is set,
+        // so "end", "endcase", block-end macros, and closing struct/constraint
+        // braces align with their corresponding opener.
         if (tok_is_macro && tok_macro_class.role == MacroRole::BlockEndLike) {
             int delta = indent_stack.empty() ? 1 : indent_stack.back();
             if (!indent_stack.empty())
@@ -7560,11 +7700,17 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
         }
 
         // --- H. Set indent for the token ---
+        // At this point all pre-token indentation adjustments are complete.
+        // render_tokens() will multiply fmt_indent by opts.indent_size if this
+        // token begins a line.
         tok.fmt_indent = indent_level;
         if (at_bol)
             at_bol = false;
 
         // --- J. Update bracket/paren/dim depth counters ---
+        // Update grouping state after annotating the current token.  This makes
+        // an opening token use the outer indentation/context, while following
+        // tokens see the inner context.
         if (tok_is(tok, "[", TokenKind::OpenBracket))
             ++dim_depth;
         else if (tok_is(tok, "]", TokenKind::CloseBracket) && dim_depth > 0)
@@ -7625,6 +7771,9 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
             dim_depth = 0;
 
         // --- K. Post-emit housekeeping ---
+        // Update structural state that affects subsequent tokens: macro
+        // completion, keyword-opened scopes, statement termination, comments,
+        // preprocessor continuations, and case-label bookkeeping.
         if (tok_is_macro) {
             if (tok_macro_has_args) {
                 active_macros.push_back({tok_macro_class, true, -1});
@@ -7759,6 +7908,9 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
             in_pp_cond = false;
         }
 
+        // Within case items, ':' can mean either a case-label separator or the
+        // false branch of a ternary expression.  Track '?' nesting so only label
+        // colons suppress the pending newline before the item body.
         if (tok_is(tok, "?", TokenKind::Question) && case_depth > 0 && dim_depth == 0)
             ++case_conditional_depth;
         else if (tok_is(tok, ":", TokenKind::Colon) && case_depth > 0 && dim_depth == 0) {
@@ -7776,6 +7928,9 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
         }
 
         // --- Block label post-emit ---
+        // After seeing begin/fork/end-style tokens, arm the label detector for
+        // an optional ": name" sequence.  Once a label name is consumed, schedule
+        // the next token on a new line.
         if (block_label_state == 2 && !tok_whitespace(tok) && !tok_comment(tok) && tok_text(tok) != ":") {
             pending_nl = true;
             block_label_state = 0;
@@ -7787,6 +7942,9 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
             block_label_state = 1;
         }
 
+        // Carry pairwise context into the next iteration.  Whitespace tokens do
+        // not normally reach this point, so prev is the last significant token
+        // seen by spacing and wrapping decisions.
         prev_macro_role_valid = tok_is_macro;
         if (tok_is_macro)
             prev_macro_role = tok_macro_class.role;
