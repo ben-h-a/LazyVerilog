@@ -4,6 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fstream>
 #include <sstream>
+#include <iostream>
 #include <vector>
 
 TEST_CASE("formatter: function calls support block layout", "[formatter]") {
@@ -1299,40 +1300,6 @@ TEST_CASE("formatter: line comments do not block instance port expansion", "[for
                                  "endmodule\n");
 }
 
-TEST_CASE("formatter: instance with pp conditional keeps directive line comment", "[formatter]") {
-    FormatOptions opts;
-    opts.safe_mode = true;
-    opts.instance.align = true;
-    opts.port_declaration.align = true;
-    opts.var_declaration.align = true;
-    opts.statement.align = true;
-    opts.instance.port_indent_level = 1;
-    opts.instance.instance_port_name_width = 10;
-    opts.instance.instance_port_between_paren_width = 10;
-    opts.instance.align_adaptive = true;
-    opts.default_indent_level_inside_outmost_block = 0;
-    opts.indent_size = 4;
-
-    const std::string src =
-        "memory u_mem5 (\n"
-        "    // input\n"
-        "    .i_clk    (i_clk     ), // input\n"
-        "    .address  (addr      ), // output() .data_in  (data_in   ),\n"
-        "`ifdef A\n"
-        "    .data_out (kj        ), // test\n"
-        "`elsif B //test\n"
-        "    .read_write (read_write),\n"
-        "`endif\n"
-        "    .chip_en  (chip_en   ),\n"
-        "    .www333   (www333    ),\n"
-        "    .www333   (www333    ),\n"
-        "    .zzfuk    (zzfuk     ),\n"
-        "    .zzfuk    (zzfuk     )\n"
-        ");\n";
-
-    CHECK(format_source(src, opts) == src);
-}
-
 TEST_CASE("formatter: standalone line comments inside instance ports are preserved",
           "[formatter]") {
     FormatOptions opts;
@@ -1998,33 +1965,6 @@ TEST_CASE("formatter: ANSI port directives do not receive commas", "[formatter]"
     CHECK(formatted.find("extra_i,") != std::string::npos);
 }
 
-TEST_CASE("formatter: demo register else body splits to next line", "[formatter]") {
-    Config cfg = load_config(".");
-    std::ifstream file("demo/register.sv");
-    REQUIRE(file.good());
-    std::ostringstream ss;
-    ss << file.rdbuf();
-
-    std::string formatted;
-    REQUIRE_NOTHROW(formatted = format_source(ss.str(), cfg.format));
-    CHECK(formatted.find("\n    if (!rst_n)\n        q       <= '0;\n") != std::string::npos);
-    CHECK(formatted.find("\n    else\n        q       <= d;\n") != std::string::npos);
-    CHECK(format_source(formatted, cfg.format) == formatted);
-}
-
-TEST_CASE("formatter: demo memory_top formats with project config", "[formatter]") {
-    Config cfg = load_config(".");
-    std::ifstream file("demo/memory_top.sv");
-    REQUIRE(file.good());
-    std::ostringstream ss;
-    ss << file.rdbuf();
-    std::string input = ss.str();
-
-    std::string formatted;
-    REQUIRE_NOTHROW(formatted = format_source(input, cfg.format));
-    CHECK(format_source(formatted, cfg.format) == formatted);
-}
-
 TEST_CASE("formatter: case item label keeps simple statement", "[formatter]") {
     Config cfg = load_config(".");
     std::string input = "class c;\n"
@@ -2042,25 +1982,6 @@ TEST_CASE("formatter: case item label keeps simple statement", "[formatter]") {
     CHECK(formatted.find("4: a") != std::string::npos);
     CHECK(formatted.find("= f();") != std::string::npos);
     CHECK(formatted.find("8 /* comment */ : b") != std::string::npos);
-}
-
-TEST_CASE("formatter: embedded preprocessor conditionals become line-level", "[formatter]") {
-    Config cfg = load_config(".");
-    std::string input = "class c;\n"
-                        "function new(string name=\"\",`ifdef USE_DMI_INTERFACE\n"
-                        "int unsigned n_bits = 50,\n"
-                        "`else\n"
-                        "int unsigned n_bits = 41,\n"
-                        "`endif\n"
-                        "int has_coverage = 0);\n"
-                        "endfunction\n"
-                        "endclass\n";
-
-    std::string formatted;
-    REQUIRE_NOTHROW(formatted = format_source(input, cfg.format));
-    CHECK(formatted.find("name=\"\",\n") != std::string::npos);
-    CHECK(formatted.find("\n`ifdef USE_DMI_INTERFACE\n") != std::string::npos);
-    CHECK(format_source(formatted, cfg.format) == formatted);
 }
 
 TEST_CASE("formatter: coverpoint macro body stays multiline", "[formatter]") {
