@@ -161,19 +161,21 @@ memory u_mem2 (
     .read_write (          )
 );
 
-memory u_mem5(.i_clk(i_clk),
-              .address(addr),
-              .data_in(data_in),
+memory u_mem5 ( //test
+    // input
+    .i_clk    (i_clk     ), // input
+    .address  (addr      ), // output() .data_in  (data_in   ),
 `ifdef A
-              .data_out(kj),
+    .data_out (kj        ), // test
 `elsif B
-              .read_write(read_write),
+    .read_write (read_write),
 `endif
-              .chip_en(chip_en),
-              .www333(www333),
-              .www333(www333),
-              .zzfuk(zzfuk),
-              .zzfuk(zzfuk));
+    .chip_en  (chip_en   ),
+    .www333   (www333    ),
+    .www333   (www333    ),
+    .zzfuk    (zzfuk     ),
+    .zzfuk    (zzfuk     )
+);
 
 `ifdef RTL_SIM
 memory u_mem3 (
