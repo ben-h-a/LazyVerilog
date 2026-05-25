@@ -7167,9 +7167,9 @@ static std::string render_tokens(const std::vector<Tok>& tokens, const FormatOpt
 }
 
 // ---------------------------------------------------------------------------
-// pass0_populate_metadata — set fmt_* fields on each token
+// basic_formatting — set fmt_* fields on each token
 // ---------------------------------------------------------------------------
-static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string& input,
+static void basic_formatting(std::vector<Tok>& tokens, const std::string& input,
                                     const FormatOptions& opts) {
     // Pass 0 is the formatter's structural scan.  It does not rewrite token text;
     // it annotates each token with enough layout metadata for render_tokens():
@@ -7773,6 +7773,7 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
             //   memory u_mem (
             //       .a(a)
             //    );
+            dec = SD::MustWrap;
             spaces = 0;
         }
         if (prev_macro_role_valid && tok.kind == TokenKind::ElseKeyword &&
@@ -7921,6 +7922,21 @@ static void pass0_populate_metadata(std::vector<Tok>& tokens, const std::string&
         // render_tokens() will multiply fmt_indent by opts.indent_size if this
         // token begins a line.
         tok.fmt_indent = indent_level;
+        if (tok.fmt_newline_before && !paren_stack.empty() &&
+            paren_stack.back() == ParenKind::InstantiationPortList &&
+            !tok_is(tok, ")", TokenKind::CloseParenthesis)) {
+            // Indent any token that starts a new rendered line inside an
+            // instantiation port list as a port entry.  This covers both:
+            //
+            //   memory u_mem(
+            //       .a(a)
+            //
+            // and:
+            //
+            //   memory u_mem( // header comment
+            //       .a(a)
+            tok.fmt_indent = indent_level + opts.instance.port_indent_level;
+        }
         if (at_bol)
             at_bol = false;
 
@@ -9131,40 +9147,55 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
 
     auto tokens = collect_lexer_tokens(input);
 
-    pass0_populate_metadata(tokens, input, opts);
+    write_log(opts, "00_input.sv", render_tokens(tokens, opts));
+    basic_formatting(tokens, input, opts);
+    write_log(opts, "01_basic_formatting.sv", render_tokens(tokens, opts));
     split_semicolon_statements_pass_v2(tokens);
+    write_log(opts, "02_split_semicolon_statements_pass.sv", render_tokens(tokens, opts));
     align_define_continuation_pass_v2(tokens, opts);
+    write_log(opts, "03_align_define_continuation_pass.sv", render_tokens(tokens, opts));
 
-    std::string v2_out = render_tokens(tokens, opts);
-    if (!v2_out.empty() && v2_out.back() != '\n')
-        v2_out += '\n';
-    while (v2_out.size() >= 2 && v2_out[v2_out.size() - 1] == '\n' &&
-           v2_out[v2_out.size() - 2] == '\n')
-        v2_out.pop_back();
-    write_log(opts, "pass0_render_output.sv", v2_out);
 
     // Module-header reflow mutates token metadata directly.
     format_class_extends_parameter_pass(tokens, opts);
+    write_log(opts, "04_format_class_extends_parameter_pass.sv", render_tokens(tokens, opts));
     format_portlist_pass(tokens, opts);
+    write_log(opts, "05_format_portlist_pass.sv", render_tokens(tokens, opts));
 
-    if (opts.statement.align)
+    if (opts.statement.align) {
         align_assign_pass(tokens, opts);
-    if (opts.var_declaration.align)
+        write_log(opts, "06_align_assign_pass.sv", render_tokens(tokens, opts));
+    }
+    if (opts.var_declaration.align) {
         align_var_pass(tokens, opts);
-    if (opts.port_declaration.align)
+        write_log(opts, "07_align_var_pass.sv", render_tokens(tokens, opts));
+    }
+    if (opts.port_declaration.align) {
         align_port_pass(tokens, opts);
+        write_log(opts, "08_align_port_pass.sv", render_tokens(tokens, opts));
+    }
 
     format_enum_declaration_pass(tokens, opts);
+    write_log(opts, "09_format_enum_declaration_pass.sv", render_tokens(tokens, opts));
     format_modport_pass(tokens, opts);
-    if (opts.instance.align)
+    write_log(opts, "10_format_modport_pass.sv", render_tokens(tokens, opts));
+    if (opts.instance.align) {
         expand_instances_pass(tokens, opts);
+        write_log(opts, "11_expand_instances_pass.sv", render_tokens(tokens, opts));
+    }
     PPContext pp = build_pp_context(tokens, opts);
     format_pp_conditional_function_calls_pass(tokens, opts, pp);
+    write_log(opts, "12_format_pp_conditional_function_calls_pass.sv", render_tokens(tokens, opts));
     format_multiline_macro_arg_calls_pass(tokens, opts);
+    write_log(opts, "13_format_multiline_macro_arg_calls_pass.sv", render_tokens(tokens, opts));
     format_function_calls_pass(tokens, opts);
+    write_log(opts, "14_format_function_calls_pass.sv", render_tokens(tokens, opts));
     format_covergroup_pass(tokens, opts);
+    write_log(opts, "15_format_covergroup_pass.sv", render_tokens(tokens, opts));
     format_constraint_dist_pass(tokens, opts);
+    write_log(opts, "16_format_constraint_dist_pass.sv", render_tokens(tokens, opts));
     format_function_declaration_pass(tokens, opts);
+    write_log(opts, "17_format_function_declaration_pass.sv", render_tokens(tokens, opts));
 
     std::string out = render_tokens(tokens, opts);
 
