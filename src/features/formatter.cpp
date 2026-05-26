@@ -5776,16 +5776,123 @@ static void format_covergroup_pass(std::vector<Tok>& tokens, const FormatOptions
     int cover_depth = 0;
     int brace_depth = 0;
     int cover_base = 0;
+    auto coverpoint_block_open = [&](size_t coverpoint, size_t limit) -> size_t {
+        int paren = 0, bracket = 0, brace = 0;
+        for (size_t j = coverpoint + 1; j < limit && j < tokens.size(); ++j) {
+            if (tok_whitespace(tokens[j]) || tok_comment(tokens[j]) ||
+                (tok_directive(tokens[j]) && !is_macro_usage(tokens[j])))
+                continue;
+            if (tok_is(tokens[j], ";", TokenKind::Semicolon) && paren == 0 &&
+                bracket == 0 && brace == 0)
+                return SIZE_MAX;
+            if (tokens[j].kind == TokenKind::EndGroupKeyword && paren == 0 &&
+                bracket == 0 && brace == 0)
+                return SIZE_MAX;
+            if (tok_is(tokens[j], "(", TokenKind::OpenParenthesis)) ++paren;
+            else if (tok_is(tokens[j], ")", TokenKind::CloseParenthesis) && paren > 0) --paren;
+            else if (tok_is(tokens[j], "[", TokenKind::OpenBracket)) ++bracket;
+            else if (tok_is(tokens[j], "]", TokenKind::CloseBracket) && bracket > 0) --bracket;
+            else if (tok_is(tokens[j], "{", TokenKind::OpenBrace) ||
+                     tokens[j].kind == TokenKind::ApostropheOpenBrace) {
+                if (paren == 0 && bracket == 0 && brace == 0)
+                    return j;
+                ++brace;
+            } else if (tok_is(tokens[j], "}", TokenKind::CloseBrace) && brace > 0) {
+                --brace;
+            }
+        }
+        return SIZE_MAX;
+    };
+
+    auto force_coverpoint_block = [&](size_t point, size_t open, size_t close) {
+        int base = tokens[point].fmt_indent;
+        if (opts.statement.begin_newline) {
+            tokens[open].fmt_newline_before = true;
+            tokens[open].fmt_blank_lines = 0;
+            tokens[open].fmt_indent = base;
+            tokens[open].fmt_spaces_before = 0;
+        } else {
+            tokens[open].fmt_newline_before = false;
+            tokens[open].fmt_spaces_before = 1;
+        }
+
+        for (size_t j = open + 1; j < close && j < tokens.size(); ++j) {
+            if (tokens[j].kind == TokenKind::BinsKeyword ||
+                tokens[j].kind == TokenKind::IllegalBinsKeyword ||
+                tokens[j].kind == TokenKind::IgnoreBinsKeyword) {
+                tokens[j].fmt_newline_before = true;
+                tokens[j].fmt_blank_lines = 0;
+                tokens[j].fmt_indent = base + 1;
+                tokens[j].fmt_spaces_before = 0;
+            }
+        }
+        size_t first_body = SIZE_MAX;
+        for (size_t j = open + 1; j < close && j < tokens.size(); ++j) {
+            if (!tok_whitespace(tokens[j]) && !tok_comment(tokens[j]) &&
+                (!tok_directive(tokens[j]) || is_macro_usage(tokens[j]))) {
+                first_body = j;
+                break;
+            }
+        }
+        if (first_body != SIZE_MAX && is_macro_usage(tokens[first_body])) {
+            tokens[first_body].fmt_newline_before = true;
+            tokens[first_body].fmt_blank_lines = 0;
+            tokens[first_body].fmt_indent = base + 1;
+            tokens[first_body].fmt_spaces_before = 0;
+        }
+
+        tokens[close].fmt_newline_before = true;
+        tokens[close].fmt_blank_lines = 0;
+        tokens[close].fmt_indent = base;
+        tokens[close].fmt_spaces_before = 0;
+
+        size_t next = next_code_sig(tokens, close + 1, tokens.size());
+        if (next != SIZE_MAX && tokens[next].kind != TokenKind::Semicolon &&
+            tokens[next].kind != TokenKind::EndGroupKeyword) {
+            tokens[next].fmt_newline_before = true;
+            tokens[next].fmt_blank_lines = 0;
+            tokens[next].fmt_indent = base;
+            tokens[next].fmt_spaces_before = 0;
+        }
+    };
+
     for (size_t i = 0; i < tokens.size(); ++i) {
         if (tok_whitespace(tokens[i]) || tok_comment(tokens[i]) || tok_directive(tokens[i]))
             continue;
         if (tokens[i].kind == TokenKind::CoverGroupKeyword) {
             cover_depth++;
             cover_base = tokens[i].fmt_indent;
+            size_t semi = statement_end_semicolon(tokens, i);
+            if (semi != SIZE_MAX) {
+                size_t first_after = next_code_sig(tokens, i + 1, semi);
+                for (size_t j = i + 1; j < semi && j < tokens.size(); ++j) {
+                    if (!tok_whitespace(tokens[j]) && !tok_comment(tokens[j]) &&
+                        !tok_directive(tokens[j])) {
+                        tokens[j].fmt_newline_before = false;
+                        if (j == first_after)
+                            tokens[j].fmt_spaces_before = 1;
+                    }
+                }
+            }
         } else if (tokens[i].kind == TokenKind::EndGroupKeyword) {
             tokens[i].fmt_indent = cover_base;
             cover_depth = std::max(0, cover_depth - 1);
             brace_depth = 0;
+        } else if (cover_depth > 0 &&
+                   (tokens[i].kind == TokenKind::CoverPointKeyword ||
+                    tokens[i].kind == TokenKind::CrossKeyword) &&
+                   !tokens[i].fmt_disabled && !tokens[i].fmt_passthrough) {
+            size_t open = coverpoint_block_open(i, tokens.size());
+            if (open != SIZE_MAX) {
+                size_t close = matching_close_token(tokens, open, tokens.size(), "{", "}",
+                                                    TokenKind::OpenBrace,
+                                                    TokenKind::CloseBrace);
+                if (close != SIZE_MAX && !token_range_has_pp_conditional(tokens, open, close + 1)) {
+                    force_coverpoint_block(i, open, close);
+                    i = close;
+                    continue;
+                }
+            }
         } else if (cover_depth > 0 && !tokens[i].fmt_disabled && !tokens[i].fmt_passthrough) {
             bool close_brace = tok_is(tokens[i], "}", TokenKind::CloseBrace);
             if (tokens[i].fmt_newline_before) {
@@ -5810,7 +5917,7 @@ static void format_constraint_dist_pass(std::vector<Tok>& tokens, const FormatOp
         size_t close = matching_close_token(tokens, open, tokens.size(), "{", "}", TokenKind::OpenBrace, TokenKind::CloseBrace);
         if (close == SIZE_MAX || token_range_has_pp_conditional(tokens, i, close + 1))
             continue;
-        auto items = top_level_ranges_between(tokens, open + 1, close);
+        auto items = function_arg_ranges_between(tokens, open + 1, close);
         if (items.size() <= 1)
             continue;
         int base = tokens[i].fmt_indent;

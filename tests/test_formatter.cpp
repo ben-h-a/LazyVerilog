@@ -2202,6 +2202,42 @@ TEST_CASE("formatter: coverpoint macro body stays multiline", "[formatter]") {
     CHECK(format_source(formatted, cfg.format) == formatted);
 }
 
+TEST_CASE("formatter: coverpoint blocks follow statement begin_newline option",
+          "[formatter]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+
+    std::string input = "covergroup cg @(posedge clk);\n"
+                        "op_cp: coverpoint op { bins read_write[] = {[0:1]}; bins idle = {2}; }\n"
+                        "burst_cp: coverpoint burst_len { bins short = {[1:4]}; }\n"
+                        "endgroup\n";
+
+    opts.statement.begin_newline = true;
+    CHECK(format_source(input, opts) == "covergroup cg @(posedge clk);\n"
+                                       "    op_cp: coverpoint op\n"
+                                       "    {\n"
+                                       "        bins read_write[] = {[0:1]};\n"
+                                       "        bins idle = {2};\n"
+                                       "    }\n"
+                                       "    burst_cp: coverpoint burst_len\n"
+                                       "    {\n"
+                                       "        bins short = {[1:4]};\n"
+                                       "    }\n"
+                                       "endgroup\n");
+
+    opts.statement.begin_newline = false;
+    CHECK(format_source(input, opts) == "covergroup cg @(posedge clk);\n"
+                                        "    op_cp: coverpoint op {\n"
+                                        "        bins read_write[] = {[0:1]};\n"
+                                        "        bins idle = {2};\n"
+                                        "    }\n"
+                                        "    burst_cp: coverpoint burst_len {\n"
+                                        "        bins short = {[1:4]};\n"
+                                        "    }\n"
+                                        "endgroup\n");
+}
+
 TEST_CASE("formatter: constraint dist list stays multiline", "[formatter]") {
     Config cfg = load_config(".");
     std::string input =
