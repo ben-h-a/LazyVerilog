@@ -8859,17 +8859,20 @@ static void format_enum_declaration_pass(std::vector<Tok>& tokens, const FormatO
         int name_width = tab_aligned_width(eo.enum_name_min_width, opts);
         int value_width = tab_aligned_width(eo.enum_value_min_width, opts);
         std::vector<size_t> eqs(items.size(), SIZE_MAX);
+        bool sp_before = binary_space_before(opts.spacing.assignment_operator_spacing);
+        bool sp_after = binary_space_after(opts.spacing.assignment_operator_spacing);
+        int eq_gap = (sp_before ? 1 : 0) + 1 + (sp_after ? 1 : 0); // spaces_before_eq + '=' + spaces_after_val
         if (eo.align && !eo.align_adaptive) {
             for (size_t k = 0; k < items.size(); ++k) {
                 eqs[k] = find_top_level_token(tokens, items[k].first, items[k].second, "=", TokenKind::Unknown);
                 size_t name_end = eqs[k] == SIZE_MAX ? items[k].second : eqs[k];
-                name_width = std::max(name_width, token_range_width_compact(tokens, items[k].first, name_end) + 1);
+                name_width = std::max(name_width, token_range_width_compact(tokens, items[k].first, name_end) + (sp_before ? 1 : 0));
                 if (eqs[k] != SIZE_MAX)
                     value_width = std::max(value_width, token_range_width_compact(tokens, eqs[k] + 1, items[k].second));
             }
             if (opts.tab_align) {
                 name_width = snap_to_indent_grid(item_base_col + name_width, opts.indent_size) - item_base_col;
-                value_width = snap_to_indent_grid(item_base_col + name_width + 2 + value_width, opts.indent_size) - item_base_col - name_width - 2;
+                value_width = snap_to_indent_grid(item_base_col + name_width + eq_gap + value_width, opts.indent_size) - item_base_col - name_width - eq_gap;
             }
         }
         tokens[open].fmt_newline_before = false;
@@ -8885,19 +8888,19 @@ static void format_enum_declaration_pass(std::vector<Tok>& tokens, const FormatO
                 int nw = token_range_width_compact(tokens, first, eq);
                 int cur_name_width = name_width;
                 if (eo.align_adaptive) {
-                    cur_name_width = std::max(tab_aligned_width(eo.enum_name_min_width, opts), nw) + 1;
+                    cur_name_width = std::max(tab_aligned_width(eo.enum_name_min_width, opts), nw) + (sp_before ? 1 : 0);
                     if (opts.tab_align)
                         cur_name_width = snap_to_indent_grid(item_base_col + cur_name_width, opts.indent_size) - item_base_col;
                 }
-                tokens[eq].fmt_spaces_before = std::max(1, cur_name_width - nw);
+                tokens[eq].fmt_spaces_before = std::max(sp_before ? 1 : 0, cur_name_width - nw);
                 size_t val = next_code_sig(tokens, eq + 1, items[k].second);
                 if (val != SIZE_MAX)
-                    tokens[val].fmt_spaces_before = 1;
+                    tokens[val].fmt_spaces_before = sp_after ? 1 : 0;
             } else if (eq != SIZE_MAX) {
-                tokens[eq].fmt_spaces_before = 1;
+                tokens[eq].fmt_spaces_before = sp_before ? 1 : 0;
                 size_t val = next_code_sig(tokens, eq + 1, items[k].second);
                 if (val != SIZE_MAX)
-                    tokens[val].fmt_spaces_before = 1;
+                    tokens[val].fmt_spaces_before = sp_after ? 1 : 0;
             }
             size_t comma = find_top_level_token(tokens, items[k].second, close, ",", TokenKind::Comma);
             if (comma != SIZE_MAX) {
@@ -8909,11 +8912,11 @@ static void format_enum_declaration_pass(std::vector<Tok>& tokens, const FormatO
                         tokens[comma].fmt_spaces_before = std::max(0, cvw - vw);
                     } else {
                         int nw_full = token_range_width_compact(tokens, first, items[k].second);
-                        int cnw = std::max(tab_aligned_width(eo.enum_name_min_width, opts), nw_full) + 1;
+                        int cnw = std::max(tab_aligned_width(eo.enum_name_min_width, opts), nw_full) + (sp_before ? 1 : 0);
                         if (opts.tab_align)
                             cnw = snap_to_indent_grid(item_base_col + cnw, opts.indent_size) - item_base_col;
                         int cvw = tab_aligned_width(eo.enum_value_min_width, opts);
-                        tokens[comma].fmt_spaces_before = std::max(0, cnw - nw_full + 2 + cvw);
+                        tokens[comma].fmt_spaces_before = std::max(0, cnw - nw_full + 1 + (sp_after ? 1 : 0) + cvw);
                     }
                 } else if (eo.align) {
                     if (eq != SIZE_MAX) {
@@ -8923,7 +8926,7 @@ static void format_enum_declaration_pass(std::vector<Tok>& tokens, const FormatO
                     } else {
                         int nw_full = token_range_width_compact(tokens, first, items[k].second);
                         tokens[comma].fmt_spaces_before = std::max(0, name_width - nw_full +
-                            (value_width > 0 ? 2 + value_width : 0));
+                            (value_width > 0 ? 1 + (sp_after ? 1 : 0) + value_width : 0));
                     }
                 } else {
                     tokens[comma].fmt_spaces_before = 0;
@@ -9000,8 +9003,17 @@ static void format_modport_pass(std::vector<Tok>& tokens, const FormatOptions& o
                 else if (rem != SIZE_MAX)
                     tokens[rem].fmt_spaces_before = 1;
                 size_t comma = find_top_level_token(tokens, item.second, close, ",", TokenKind::Comma);
-                if (comma != SIZE_MAX)
-                    tokens[comma].fmt_spaces_before = 0;
+                if (comma != SIZE_MAX) {
+                    if (mo.align) {
+                        int sw = rem != SIZE_MAX ? token_range_width_compact(tokens, rem, item.second) : 0;
+                        int cur_sig_width = mo.align_adaptive
+                            ? std::max(tab_aligned_width(mo.signal_min_width, opts), sw)
+                            : sig_width;
+                        tokens[comma].fmt_spaces_before = std::max(0, cur_sig_width - sw);
+                    } else {
+                        tokens[comma].fmt_spaces_before = 0;
+                    }
+                }
             }
             tokens[close].fmt_newline_before = true;
             tokens[close].fmt_blank_lines = 0;
