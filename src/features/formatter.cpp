@@ -5863,6 +5863,9 @@ static void format_function_calls_pass(std::vector<Tok>& tokens, const FormatOpt
         if (find_simple_call_tokens(tokens, i, semi + 1, name, open, close, true) == SIZE_MAX ||
             !is_format_function_call_name(tokens[name], macro_classifier) || tokens[name].in_modport)
             continue;
+        if (tokens[name].in_function_decl || tokens[name].in_task_decl ||
+            tokens[name].in_module_header || tokens[name].in_class_decl)
+            continue;
         bool has_macro = false;
         for (size_t k = open + 1; k < close; ++k)
             has_macro = has_macro || tok_text(tokens[k]).find('`') != std::string::npos;
