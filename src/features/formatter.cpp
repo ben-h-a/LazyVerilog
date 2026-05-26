@@ -67,6 +67,12 @@ struct Tok {
     std::shared_ptr<const TokLexeme> lex;
     TokenKind kind{TokenKind::Unknown};
 
+    // --- Non-rendering pass metadata ---
+    // Populated before basic_formatting() for structural facts reused by later
+    // passes. These fields must not directly affect render_tokens(); rendering is
+    // controlled only by fmt_* fields below.
+    bool in_modport{false};
+
     // --- Mutable formatting metadata (set/updated by passes) ---
     int fmt_indent{0};            // indentation level at this token
     int fmt_spaces_before{0};     // spaces before this token (within a line)
@@ -5099,6 +5105,25 @@ static size_t statement_end_semicolon(const std::vector<Tok>& tokens, size_t sta
     return SIZE_MAX;
 }
 
+static void populate_nonrender_metadata_pass(std::vector<Tok>& tokens) {
+    for (auto& tok : tokens)
+        tok.in_modport = false;
+
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (tokens[i].kind != TokenKind::ModPortKeyword)
+            continue;
+
+        size_t semi = statement_end_semicolon(tokens, i);
+        if (semi == SIZE_MAX)
+            continue;
+
+        for (size_t k = i; k <= semi && k < tokens.size(); ++k)
+            tokens[k].in_modport = true;
+
+        i = semi;
+    }
+}
+
 static void format_enum_declaration_pass(std::vector<Tok>& tokens, const FormatOptions& opts) {
     const auto& eo = opts.enum_declaration;
     for (size_t i = 0; i < tokens.size(); ++i) {
@@ -5644,17 +5669,6 @@ static bool is_format_function_call_name(const Tok& tok, const MacroClassifier& 
 static void format_function_calls_pass(std::vector<Tok>& tokens, const FormatOptions& opts) {
     const auto& fo = opts.function;
     MacroClassifier macro_classifier(opts.macros);
-    std::vector<bool> in_modport(tokens.size(), false);
-    for (size_t i = 0; i < tokens.size(); ++i) {
-        if (tokens[i].kind != TokenKind::ModPortKeyword)
-            continue;
-        size_t semi = statement_end_semicolon(tokens, i);
-        if (semi == SIZE_MAX)
-            continue;
-        for (size_t k = i; k <= semi && k < tokens.size(); ++k)
-            in_modport[k] = true;
-        i = semi;
-    }
 
     // Statement-range path for calls that are already split across physical
     // lines, plus calls with macro arguments.  The line-based pass below cannot
@@ -5666,7 +5680,7 @@ static void format_function_calls_pass(std::vector<Tok>& tokens, const FormatOpt
     //
     // because each physical line is scanned independently.
     for (size_t i = 0; i < tokens.size(); ++i) {
-        if (tokens[i].fmt_disabled || tokens[i].fmt_passthrough || in_modport[i] ||
+        if (tokens[i].fmt_disabled || tokens[i].fmt_passthrough || tokens[i].in_modport ||
             tok_define_block(tokens[i]) || tok_whitespace(tokens[i]) || tok_comment(tokens[i]))
             continue;
         size_t semi = statement_end_semicolon(tokens, i);
@@ -5676,7 +5690,7 @@ static void format_function_calls_pass(std::vector<Tok>& tokens, const FormatOpt
             continue;
         size_t name, open, close;
         if (find_simple_call_tokens(tokens, i, semi + 1, name, open, close, true) == SIZE_MAX ||
-            !is_format_function_call_name(tokens[name], macro_classifier) || in_modport[name])
+            !is_format_function_call_name(tokens[name], macro_classifier) || tokens[name].in_modport)
             continue;
         bool has_macro = false;
         for (size_t k = open + 1; k < close; ++k)
@@ -5726,7 +5740,7 @@ static void format_function_calls_pass(std::vector<Tok>& tokens, const FormatOpt
         size_t s = starts[li], e = (li + 1 < starts.size()) ? starts[li + 1] : tokens.size();
         bool line_in_modport = false;
         for (size_t k = s; k < e && k < tokens.size(); ++k)
-            line_in_modport = line_in_modport || in_modport[k];
+            line_in_modport = line_in_modport || tokens[k].in_modport;
         if (line_in_modport || token_range_disabled_or_passthrough(tokens, s, e) ||
             token_range_has_pp_conditional(tokens, s, e) || token_range_has_define_block(tokens, s, e))
             continue;
@@ -5985,6 +5999,7 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
 
     auto tokens = collect_lexer_tokens(input);
     write_log(opts, "00_input.sv", input);
+    populate_nonrender_metadata_pass(tokens);
     basic_formatting(tokens, input, opts);
     write_log(opts, "01_basic_formatting.sv", render_tokens(tokens, opts));
     align_define_continuation_pass_v2(tokens, opts);
