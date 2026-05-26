@@ -1960,6 +1960,51 @@ TEST_CASE("formatter: conditional instance headers do not corrupt following inst
     CHECK(formatted.find("u_req (\n    .in_i(p)") == std::string::npos);
 }
 
+TEST_CASE("formatter: instance port list continues wrapping after preprocessor conditionals",
+          "[formatter]") {
+    FormatOptions opts;
+    opts.safe_mode = true;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+
+    const std::string input =
+        "module top;\n"
+        "memory u_mem5( //test\n"
+        "// input\n"
+        ".i_clk(i_clk), // input\n"
+        ".address(addr), // output\n"
+        "`ifdef A\n"
+        ".data_out(kj), // test\n"
+        "`elsif B\n"
+        ".read_write(read_write),\n"
+        "`endif\n"
+        ".chip_en(chip_en), .www333(www333), .www333(www333), .zzfuk(zzfuk), .zzfuk(zzfuk));\n"
+        "endmodule\n";
+
+    const std::string expected =
+        "module top;\n"
+        "memory u_mem5( //test\n"
+        "    // input\n"
+        "    .i_clk(i_clk), // input\n"
+        "    .address(addr), // output\n"
+        "`ifdef A\n"
+        "    .data_out(kj), // test\n"
+        "`elsif B\n"
+        "    .read_write(read_write),\n"
+        "`endif\n"
+        "    .chip_en(chip_en),\n"
+        "    .www333(www333),\n"
+        "    .www333(www333),\n"
+        "    .zzfuk(zzfuk),\n"
+        "    .zzfuk(zzfuk)\n"
+        ");\n"
+        "endmodule\n";
+
+    const std::string formatted = format_source(input, opts);
+    CHECK(formatted == expected);
+    CHECK(format_source(formatted, opts) == formatted);
+}
+
 TEST_CASE("formatter: ANSI port directives do not receive commas", "[formatter]") {
     FormatOptions opts;
     opts.safe_mode = true;

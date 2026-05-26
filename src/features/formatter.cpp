@@ -7461,7 +7461,26 @@ static void basic_formatting(std::vector<Tok>& tokens, const std::string& input,
         bool saw_named_connection = false;
         bool expect_item_start = true;
         int paren = 0, bracket = 0, brace = 0;
+        bool skip_pp_cond_line = false;
         for (size_t idx = open_idx + 1; idx < close_idx && idx < tokens.size(); ++idx) {
+            if (skip_pp_cond_line) {
+                if (tok_whitespace(tokens[idx]) &&
+                    tok_text(tokens[idx]).find('\n') != std::string::npos)
+                    skip_pp_cond_line = false;
+                continue;
+            }
+            if ((is_line_directive(tokens[idx]) &&
+                 is_pp_conditional(tok_directive_kind(tokens[idx]))) ||
+                is_pp_conditional_text(tok_text(tokens[idx]))) {
+                // Slang lexes conditionals like "`ifdef A" as a directive token
+                // followed by ordinary identifier tokens for the condition.  For
+                // list classification, the whole directive line is structural
+                // trivia; otherwise the condition name ("A") is mistaken for a
+                // non-.port item and the enclosing instance port list stops
+                // wrapping after the conditional.
+                skip_pp_cond_line = tok_text(tokens[idx]).find('\n') == std::string::npos;
+                continue;
+            }
             if (tok_whitespace(tokens[idx]) || tok_comment(tokens[idx]) || tok_directive(tokens[idx]))
                 continue;
             if (tok_is(tokens[idx], "(", TokenKind::OpenParenthesis)) {
