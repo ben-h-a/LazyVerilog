@@ -1059,7 +1059,8 @@ static int spaces_req(const Tok& L, const Tok& R, const FormatOptions& opts, boo
     if (lx == "}")
         return 1;
     if (R.kind == TokenKind::OpenBrace)
-        return (is_keyword(L) || is_identifier(L) || L.kind == TokenKind::CloseParenthesis) ? 1 : 0;
+        return (is_keyword(L) || is_identifier(L) || L.kind == TokenKind::CloseParenthesis ||
+                L.kind == TokenKind::CloseBracket) ? 1 : 0;
     if (rx == "[") {
         if (lx == "]")
             return 0;
@@ -8774,7 +8775,7 @@ static std::vector<std::pair<size_t, size_t>> top_level_ranges_between(
         else if (tok_is(tokens[i], "{", TokenKind::OpenBrace) || tokens[i].kind == TokenKind::ApostropheOpenBrace) ++brace;
         else if (tok_is(tokens[i], "}", TokenKind::CloseBrace) && brace > 0) --brace;
         else if (tok_is(tokens[i], ",", TokenKind::Comma) && paren == 0 && bracket == 0 && brace == 0) {
-            size_t end = prev_code_sig(tokens, start, i + 1);
+            size_t end = prev_code_sig(tokens, start, i);
             if (start != SIZE_MAX && end != SIZE_MAX && end < i)
                 ranges.push_back({start, i});
             if (last_comma)
@@ -8884,7 +8885,7 @@ static void format_enum_declaration_pass(std::vector<Tok>& tokens, const FormatO
                 int nw = token_range_width_compact(tokens, first, eq);
                 int cur_name_width = name_width;
                 if (eo.align_adaptive) {
-                    cur_name_width = std::max(tab_aligned_width(eo.enum_name_min_width, opts), nw + 1);
+                    cur_name_width = std::max(tab_aligned_width(eo.enum_name_min_width, opts), nw) + 1;
                     if (opts.tab_align)
                         cur_name_width = snap_to_indent_grid(item_base_col + cur_name_width, opts.indent_size) - item_base_col;
                 }
@@ -8899,8 +8900,35 @@ static void format_enum_declaration_pass(std::vector<Tok>& tokens, const FormatO
                     tokens[val].fmt_spaces_before = 1;
             }
             size_t comma = find_top_level_token(tokens, items[k].second, close, ",", TokenKind::Comma);
-            if (comma != SIZE_MAX)
-                tokens[comma].fmt_spaces_before = 0;
+            if (comma != SIZE_MAX) {
+                if (eo.align && eo.align_adaptive) {
+                    if (eq != SIZE_MAX) {
+                        size_t val = next_code_sig(tokens, eq + 1, items[k].second);
+                        int vw = val != SIZE_MAX ? token_range_width_compact(tokens, val, items[k].second) : 0;
+                        int cvw = std::max(tab_aligned_width(eo.enum_value_min_width, opts), vw);
+                        tokens[comma].fmt_spaces_before = std::max(0, cvw - vw);
+                    } else {
+                        int nw_full = token_range_width_compact(tokens, first, items[k].second);
+                        int cnw = std::max(tab_aligned_width(eo.enum_name_min_width, opts), nw_full) + 1;
+                        if (opts.tab_align)
+                            cnw = snap_to_indent_grid(item_base_col + cnw, opts.indent_size) - item_base_col;
+                        int cvw = tab_aligned_width(eo.enum_value_min_width, opts);
+                        tokens[comma].fmt_spaces_before = std::max(0, cnw - nw_full + 2 + cvw);
+                    }
+                } else if (eo.align) {
+                    if (eq != SIZE_MAX) {
+                        size_t val = next_code_sig(tokens, eq + 1, items[k].second);
+                        int vw = val != SIZE_MAX ? token_range_width_compact(tokens, val, items[k].second) : 0;
+                        tokens[comma].fmt_spaces_before = std::max(0, value_width - vw);
+                    } else {
+                        int nw_full = token_range_width_compact(tokens, first, items[k].second);
+                        tokens[comma].fmt_spaces_before = std::max(0, name_width - nw_full +
+                            (value_width > 0 ? 2 + value_width : 0));
+                    }
+                } else {
+                    tokens[comma].fmt_spaces_before = 0;
+                }
+            }
         }
         tokens[close].fmt_newline_before = true;
         tokens[close].fmt_blank_lines = 0;

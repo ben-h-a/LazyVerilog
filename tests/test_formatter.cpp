@@ -1499,9 +1499,9 @@ TEST_CASE("formatter: enum declaration alignment supports strict and adaptive mo
     opts.enum_declaration.align_adaptive = true;
     CHECK(format_source("typedef enum {A=1,LONG_NAME=22,C=333333} e_t;\n", opts) ==
           "typedef enum {\n"
-          "    A       = 1     ,\n"
+          "    A        = 1     ,\n"
           "    LONG_NAME = 22    ,\n"
-          "    C       = 333333\n"
+          "    C        = 333333\n"
           "} e_t;\n");
 }
 
@@ -1578,6 +1578,26 @@ TEST_CASE("formatter: enum strict alignment does not leave trailing spaces on fi
           "    IDLE    ,\n"
           "    FETCH   ,\n"
           "    EXECUTE ,\n"
+          "    ERROR\n"
+          "} state_t;\n");
+}
+
+TEST_CASE("formatter: enum adaptive alignment with min widths and mixed value/no-value members",
+          "[formatter]") {
+    FormatOptions opts;
+    opts.indent_size = 4;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.enum_declaration.align = true;
+    opts.enum_declaration.align_adaptive = true;
+    opts.enum_declaration.enum_name_min_width = 10;
+    opts.enum_declaration.enum_value_min_width = 12;
+
+    CHECK(format_source(
+              "typedef enum logic [1:0] {IDLE=2'd0,FETCH,EXECUTE=2'd2,ERROR} state_t;\n", opts) ==
+          "typedef enum logic [1:0] {\n"
+          "    IDLE       = 2'd0        ,\n"
+          "    FETCH                    ,\n"
+          "    EXECUTE    = 2'd2        ,\n"
           "    ERROR\n"
           "} state_t;\n");
 }
