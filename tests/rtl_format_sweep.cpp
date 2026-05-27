@@ -28,6 +28,11 @@ struct Failure {
     std::string message;
 };
 
+struct SlowFile {
+    fs::path path;
+    long long elapsed_ms{0};
+};
+
 struct CommandResult {
     int exit_code{0};
     bool interrupted{false};
@@ -124,6 +129,7 @@ static std::vector<fs::path> collect_sv_files(const fs::path& root) {
 
 static void print_usage(const char* argv0) {
     std::cerr << "usage: " << argv0 << " [--perf] <formatter-binary> <rtl-root>\n";
+    std::cerr << "  --perf    print per-file timing and report files taking more than 1000ms\n";
 }
 
 int main(int argc, char** argv) {
@@ -133,13 +139,22 @@ int main(int argc, char** argv) {
     bool perf = false;
     std::vector<fs::path> args;
     for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--perf") == 0)
+        if (std::strcmp(argv[i], "--perf") == 0) {
             perf = true;
-        else
+        } else if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
+            print_usage(argv[0]);
+            return 0;
+        } else if (argv[i][0] == '-') {
+            std::cerr << "warning: invalid option: " << argv[i] << "\n";
+            print_usage(argv[0]);
+            return 2;
+        } else {
             args.emplace_back(argv[i]);
+        }
     }
 
     if (args.size() != 2) {
+        std::cerr << "warning: expected <formatter-binary> and <rtl-root>\n";
         print_usage(argv[0]);
         return 2;
     }
@@ -157,6 +172,7 @@ int main(int argc, char** argv) {
 
     std::vector<Failure> failures;
     std::vector<Failure> not_idempotent;
+    std::vector<SlowFile> slow_files;
     const auto files = collect_sv_files(root);
     if (files.empty()) {
         std::cerr << "No .sv or .svh files found under " << root << "\n";
@@ -227,9 +243,17 @@ int main(int argc, char** argv) {
             const auto file_end = std::chrono::steady_clock::now();
             const auto elapsed_ms =
                 std::chrono::duration_cast<std::chrono::milliseconds>(file_end - file_start).count();
+            if (elapsed_ms > 1000)
+                slow_files.push_back({file, elapsed_ms});
             std::cout << " time=" << elapsed_ms << "ms";
         }
         std::cout << " " << file << "\n" << std::flush;
+    }
+
+    if (perf) {
+        std::cout << "  slow >1000ms: " << slow_files.size() << "\n";
+        for (const auto& slow : slow_files)
+            std::cout << "slow: " << slow.elapsed_ms << "ms: " << slow.path << "\n";
     }
 
     if (failures.empty() && not_idempotent.empty()) {
