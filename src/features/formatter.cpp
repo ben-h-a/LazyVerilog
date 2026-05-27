@@ -1258,6 +1258,28 @@ static std::vector<Tok> collect_lexer_tokens(const std::string& source) {
         }
     };
 
+    for (size_t line_start = 0; line_start < source.size();) {
+        size_t first = line_start;
+        while (first < source.size() && (source[first] == ' ' || source[first] == '\t'))
+            ++first;
+        if (first < source.size() && source.compare(first, 7, "`define") == 0 &&
+            (first + 7 == source.size() ||
+             !(std::isalnum((unsigned char)source[first + 7]) ||
+               source[first + 7] == '_' || source[first + 7] == '$'))) {
+            size_t end = scan_directive_end(source, first, source.size());
+            if (end < source.size() && source[end] == '\n')
+                ++end;
+            define_ranges.push_back(
+                {line_start, end, syntax::SyntaxKind::DefineDirective});
+            line_start = end;
+        } else {
+            size_t nl = source.find('\n', line_start);
+            if (nl == std::string::npos)
+                break;
+            line_start = nl + 1;
+        }
+    }
+
     SourceManager sm;
     auto buffer = sm.assignText(source);
     BumpAllocator alloc;
@@ -1279,8 +1301,24 @@ static std::vector<Tok> collect_lexer_tokens(const std::string& source) {
             continue;
         if (off < cursor)
             continue;
-        bool token_define_block = find_define_range(off) != nullptr;
+        if (const DefineRange* dr = find_define_range(off)) {
+            if (cursor < dr->start)
+                append_gap(cursor, dr->start);
+            append_gap(std::max(cursor, dr->start), dr->end);
+            cursor = std::max(cursor, dr->end);
+            continue;
+        }
         std::string raw(token.rawText());
+        if (token.kind == TokenKind::Directive && !raw.empty() && raw[0] != '`') {
+            size_t tick = raw.find('`');
+            if (tick != std::string::npos) {
+                off += tick;
+                raw.erase(0, tick);
+                if (off > source.size() || off < cursor)
+                    continue;
+            }
+        }
+        bool token_define_block = find_define_range(off) != nullptr;
         if (!raw.empty() && raw[0] == '`') {
             size_t line_start = off;
             while (line_start > 0 && source[line_start - 1] != '\n')
@@ -1294,7 +1332,7 @@ static std::vector<Tok> collect_lexer_tokens(const std::string& source) {
                 bool has_continuation = false;
                 size_t end = scan_directive_end(source, off, source.size(), &has_continuation);
                 if (token.directiveKind() == syntax::SyntaxKind::DefineDirective) {
-                    if (!has_continuation && end < source.size() && source[end] == '\n')
+                    if (end < source.size() && source[end] == '\n')
                         ++end;
                     // Treat leading indentation on the directive line as part
                     // of the define block so the whole macro definition can be
@@ -3856,6 +3894,9 @@ static void basic_formatting(std::vector<Tok>& tokens, const std::string& input,
             // Macro definitions are whitespace-sensitive.  Preserve every token
             // in the collected define range verbatim instead of reconstructing
             // spacing/indentation metadata.
+            bool starts_define_block = !(prev && tok_define_block(*prev));
+            if (starts_define_block && !at_bol)
+                tok.fmt_newline_before = true;
             apply_newline(i);
             tok.fmt_passthrough = true;
             at_bol = !tok_text(tok).empty() && tok_text(tok).back() == '\n';
@@ -4028,6 +4069,18 @@ static void basic_formatting(std::vector<Tok>& tokens, const std::string& input,
                 dec = SD::MustWrap;
             }
         }
+        if (tok_is_macro && original_newline_before_token && !at_bol)
+            dec = SD::MustWrap;
+        if (prev && is_macro_usage(*prev) && original_newline_before_token &&
+            !tok_whitespace(tok) && !tok_comment(tok) &&
+            !tok_is(tok, "(", TokenKind::OpenParenthesis)) {
+            dec = SD::MustWrap;
+        }
+        if (prev && prev->in_covergroup && tok.in_covergroup &&
+            tok_is(*prev, "}", TokenKind::CloseBrace) &&
+            original_newline_before_token && !tok_comment(tok)) {
+            dec = SD::MustWrap;
+        }
 
         // --- D. Inline-comment suppression ---
         // If a line comment was originally inline, do not let a pending newline
@@ -4055,6 +4108,19 @@ static void basic_formatting(std::vector<Tok>& tokens, const std::string& input,
                 dec = SD::MustWrap;
             function_macro_newline_candidate = false;
             function_macro_newline_depth = -1;
+        }
+        if (prev && tok_block_comment(*prev) && original_newline_before_token &&
+            paren_depth > 0) {
+            // A formatter-inserted newline between a trailing block comment
+            // argument marker (for example /*num=*/) and the next argument
+            // token should not become part of basic_formatting's baseline.
+            // Later function-call passes decide whether the call is multiline
+            // from the rendered token layout.
+            dec = SD::MustAppend;
+            if (tok_is(tok, ")", TokenKind::CloseParenthesis))
+                spaces = 0;
+            else
+                spaces = std::max(spaces, 1);
         }
         bool disable_target = prev && tok_kind(*prev) == TokenKind::DisableKeyword;
         bool wait_fork_target = prev && tok_kind(*prev) == TokenKind::WaitKeyword &&
@@ -4181,6 +4247,8 @@ static void basic_formatting(std::vector<Tok>& tokens, const std::string& input,
         }
         if (at_bol)
             at_bol = false;
+        if (tok.in_covergroup && tok.fmt_newline_before)
+            tok.fmt_blank_lines = 0;
 
         // --- J. Update bracket/paren/dim depth counters ---
         // Update grouping state after annotating the current token.  This makes
@@ -5607,6 +5675,13 @@ static void format_arg_list_metadata(std::vector<Tok>& tokens, size_t open, size
     auto args = function_arg_ranges_between(tokens, open + 1, close);
     if (args.empty())
         return;
+    bool trailing_line_comment = false;
+    for (size_t k = args.back().second; k < close && k < tokens.size(); ++k) {
+        if (tok_line_comment(tokens[k])) {
+            trailing_line_comment = true;
+            break;
+        }
+    }
     if (hanging) {
         bool leading_line_comment = false;
         for (size_t k = open + 1; k < args[0].first && k < tokens.size(); ++k) {
@@ -5634,7 +5709,9 @@ static void format_arg_list_metadata(std::vector<Tok>& tokens, size_t open, size
             tokens[args[k].first].fmt_indent = hanging_indent;
             tokens[args[k].first].fmt_spaces_before = hanging_spaces;
         }
-        tokens[close].fmt_newline_before = false;
+        tokens[close].fmt_newline_before = trailing_line_comment;
+        tokens[close].fmt_blank_lines = 0;
+        tokens[close].fmt_indent = base_indent;
         tokens[close].fmt_spaces_before = 0;
     } else {
         for (auto r : args) {
@@ -5783,9 +5860,13 @@ static void format_function_calls_pass(std::vector<Tok>& tokens, const FormatOpt
         if (tokens[name].in_function_decl || tokens[name].in_task_decl ||
             tokens[name].in_module_header || tokens[name].in_class_decl)
             continue;
+        if (is_macro_usage(tokens[name]))
+            continue;
         bool has_macro = false;
         for (size_t k = open + 1; k < close; ++k)
             has_macro = has_macro || tok_text(tokens[k]).find('`') != std::string::npos;
+        if (has_macro)
+            continue;
         auto args = function_arg_ranges_between(tokens, open + 1, close);
         // Decide from the current normalized/rendered layout only.  Do not
         // inspect whitespace token text here: whitespace tokens preserve source
@@ -5795,11 +5876,10 @@ static void format_function_calls_pass(std::vector<Tok>& tokens, const FormatOpt
         bool already_multiline = tokens[close].fmt_newline_before;
         for (auto r : args)
             already_multiline = already_multiline || tokens[r.first].fmt_newline_before;
-        if ((!has_macro && !already_multiline) || args.size() <= 1)
+        if (!already_multiline || args.size() <= 1)
             continue;
         bool do_break = false;
-        if (has_macro) do_break = true;
-        else if (fo.break_policy == "always") do_break = true;
+        if (fo.break_policy == "always") do_break = true;
         else if (fo.break_policy == "auto") do_break = fo.arg_count >= 0 && (int)args.size() >= fo.arg_count;
         tokens[open].fmt_spaces_before = fo.space_before_paren ? 1 : 0;
         if (!do_break || fo.break_policy == "never") {
@@ -5811,7 +5891,7 @@ static void format_function_calls_pass(std::vector<Tok>& tokens, const FormatOpt
         }
         int hang = tokens[name].fmt_indent;
         int hang_spaces = 0;
-        bool hanging = has_macro || fo.layout == "hanging";
+        bool hanging = fo.layout == "hanging";
         if (hanging)
             column_to_indent_spaces(rendered_column_after_token(tokens, i, open, opts), opts,
                                     hang, hang_spaces);
@@ -5843,14 +5923,17 @@ static void format_function_calls_pass(std::vector<Tok>& tokens, const FormatOpt
         if (tokens[name].in_function_decl || tokens[name].in_task_decl ||
             tokens[name].in_module_header || tokens[name].in_class_decl)
             continue;
+        if (is_macro_usage(tokens[name]))
+            continue;
         auto args = function_arg_ranges_between(tokens, open + 1, close);
         bool has_macro_arg = false;
         for (auto r : args)
             for (size_t k = r.first; k < r.second; ++k)
                 has_macro_arg = has_macro_arg || tok_text(tokens[k]).find('`') != std::string::npos;
+        if (has_macro_arg)
+            continue;
         bool do_break = false;
-        if (has_macro_arg && args.size() > 1) do_break = true;
-        else if (fo.break_policy == "always") do_break = !args.empty();
+        if (fo.break_policy == "always") do_break = !args.empty();
         else if (fo.break_policy == "auto") do_break = fo.arg_count >= 0 && (int)args.size() >= fo.arg_count;
         tokens[open].fmt_spaces_before = fo.space_before_paren ? 1 : 0;
         if (!do_break || fo.break_policy == "never") {
@@ -5964,18 +6047,6 @@ static void format_covergroup_pass(std::vector<Tok>& tokens, const FormatOptions
             continue;
         if (tok_kind(tokens[i]) == TokenKind::CoverGroupKeyword) {
             cover_base = tokens[i].fmt_indent;
-            size_t semi = tokens[i].stmt_end;
-            if (semi != SIZE_MAX) {
-                size_t first_after = next_code_sig(tokens, i + 1, semi);
-                for (size_t j = i + 1; j < semi && j < tokens.size(); ++j) {
-                    if (!tok_whitespace(tokens[j]) && !tok_comment(tokens[j]) &&
-                        !tok_directive(tokens[j])) {
-                        tokens[j].fmt_newline_before = false;
-                        if (j == first_after)
-                            tokens[j].fmt_spaces_before = 1;
-                    }
-                }
-            }
         } else if (tok_kind(tokens[i]) == TokenKind::EndGroupKeyword) {
             tokens[i].fmt_indent = cover_base;
             brace_depth = 0;
