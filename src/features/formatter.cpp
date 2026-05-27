@@ -5506,7 +5506,8 @@ static void format_modport_pass(std::vector<Tok>& tokens, const FormatOptions& o
 static void expand_instances_pass(std::vector<Tok>& tokens, const FormatOptions& opts) {
     for (size_t i = 0; i < tokens.size(); ++i) {
         if (tok_whitespace(tokens[i]) || tok_comment(tokens[i]) || tok_directive(tokens[i]) ||
-            tokens[i].fmt_disabled || tokens[i].fmt_passthrough || !is_identifier(tokens[i]))
+            tokens[i].fmt_disabled || tokens[i].fmt_passthrough || !is_identifier(tokens[i]) ||
+            tok_define_block(tokens[i]))
             continue;
         size_t mod = i;
         if (is_keyword(tokens[mod]))
@@ -6172,9 +6173,6 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
     populate_nonrender_metadata_pass(tokens);
     basic_formatting(tokens, input, opts);
     write_log(opts, "01_basic_formatting.sv", render_tokens(tokens, opts));
-    align_define_continuation_pass_v2(tokens, opts);
-    write_log(opts, "03_align_define_continuation_pass.sv", render_tokens(tokens, opts));
-
 
     // Module-header reflow mutates token metadata directly.
     format_class_extends_parameter_pass(tokens, opts);
@@ -6194,6 +6192,10 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
         align_port_pass(tokens, opts);
         write_log(opts, "08_align_port_pass.sv", render_tokens(tokens, opts));
     }
+    // Must run after all alignment passes so fmt_spaces_before for define-block tokens
+    // reflects the final aligned spacing, giving a stable content_col for \ placement.
+    align_define_continuation_pass_v2(tokens, opts);
+    write_log(opts, "08b_align_define_continuation_pass.sv", render_tokens(tokens, opts));
 
     format_enum_declaration_pass(tokens, opts);
     write_log(opts, "09_format_enum_declaration_pass.sv", render_tokens(tokens, opts));
