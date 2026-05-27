@@ -5428,6 +5428,16 @@ static void format_modport_pass(std::vector<Tok>& tokens, const FormatOptions& o
         int base = tokens[i].fmt_indent;
         for (auto mp : modports) {
             size_t name = mp.first;
+            size_t line_head = name;
+            bool has_explicit_modport_keyword = false;
+            if (tok_kind(tokens[name]) == TokenKind::ModPortKeyword) {
+                has_explicit_modport_keyword = true;
+                line_head = name;
+                size_t explicit_name = next_code_sig(tokens, name + 1, mp.second);
+                if (explicit_name == SIZE_MAX)
+                    continue;
+                name = explicit_name;
+            }
             size_t open = SIZE_MAX;
             for (size_t j = name + 1; j < mp.second; ++j)
                 if (tok_is(tokens[j], "(", TokenKind::OpenParenthesis)) { open = j; break; }
@@ -5460,11 +5470,13 @@ static void format_modport_pass(std::vector<Tok>& tokens, const FormatOptions& o
                 size_t comma = prev_code_sig(tokens, i + 1, name);
                 if (comma != SIZE_MAX && tok_is(tokens[comma], ",", TokenKind::Comma))
                     tokens[comma].fmt_spaces_before = 0;
-                tokens[name].fmt_newline_before = true;
-                tokens[name].fmt_blank_lines = 0;
-                tokens[name].fmt_indent = base;
+                tokens[line_head].fmt_newline_before = true;
+                tokens[line_head].fmt_blank_lines = 0;
+                tokens[line_head].fmt_indent = base;
+                tokens[line_head].fmt_spaces_before = 0;
                 tokens[name].fmt_spaces_before = 0;
-                tokens[name].fmt_text_before = "modport ";
+                if (has_explicit_modport_keyword)
+                    tokens[name].fmt_spaces_before = 1;
             }
             tokens[open].fmt_spaces_before = 1;
             for (size_t k = 0; k < items.size(); ++k) {

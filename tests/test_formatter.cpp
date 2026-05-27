@@ -1655,7 +1655,7 @@ TEST_CASE("formatter: interface modports are expanded and aligned", "[formatter]
                                  "    input  clk ,\n"
                                  "    output data\n"
                                  "),\n"
-                                 "modport slave (\n"
+                                 "slave (\n"
                                  "    output clk ,\n"
                                  "    input  data\n"
                                  ");\n"
