@@ -1280,10 +1280,6 @@ static std::vector<Tok> collect_lexer_tokens(const std::string& source) {
         if (off < cursor)
             continue;
         bool token_define_block = find_define_range(off) != nullptr;
-        // Fill gap between cursor and this token with trivia text
-        // (handles comments, directives, strings in gaps)
-        if (cursor < off)
-            append_gap(cursor, off);
         std::string raw(token.rawText());
         if (!raw.empty() && raw[0] == '`') {
             size_t line_start = off;
@@ -1300,9 +1296,17 @@ static std::vector<Tok> collect_lexer_tokens(const std::string& source) {
                 if (token.directiveKind() == syntax::SyntaxKind::DefineDirective) {
                     if (!has_continuation && end < source.size() && source[end] == '\n')
                         ++end;
-                    define_ranges.push_back({off, end, token.directiveKind()});
-                    append_gap(off, end);
+                    // Treat leading indentation on the directive line as part
+                    // of the define block so the whole macro definition can be
+                    // rendered verbatim.
+                    size_t range_start = line_start >= cursor ? line_start : off;
+                    define_ranges.push_back({range_start, end, token.directiveKind()});
+                    if (cursor < range_start)
+                        append_gap(cursor, range_start);
+                    append_gap(range_start, end);
                 } else {
+                    if (cursor < off)
+                        append_gap(cursor, off);
                     push_tok(toks, token.kind, source.substr(off, end - off), (int)off,
                              false, false, true, token.directiveKind());
                 }
@@ -1318,12 +1322,19 @@ static std::vector<Tok> collect_lexer_tokens(const std::string& source) {
                        (std::isalnum((unsigned char)source[name_end]) ||
                         source[name_end] == '_' || source[name_end] == '$'))
                     ++name_end;
+                if (cursor < off)
+                    append_gap(cursor, off);
                 push_tok(toks, token.kind, source.substr(off, name_end - off), (int)off,
                          false, false, true, token.directiveKind(), token_define_block);
                 cursor = std::max(cursor, name_end);
                 continue;
             }
         }
+        // Fill gap between cursor and this token with trivia text for all
+        // non-define tokens.  Define directives handle their own range above
+        // so their leading indentation can be preserved as part of the block.
+        if (cursor < off)
+            append_gap(cursor, off);
         if (!raw.empty() && std::isdigit((unsigned char)raw[0])) {
             size_t end = off + raw.size();
             if (end < source.size() && source[end] == '\'') {
@@ -2371,6 +2382,10 @@ static void align_define_continuation_pass_v2(std::vector<Tok>& tokens,
         for (size_t j = s; j < e; ++j) {
             if (tok_whitespace(tokens[j]))
                 continue;
+            if (tok_define_block(tokens[j])) {
+                info.disabled = true;
+                break;
+            }
             if (tokens[j].in_disabled_region) {
                 info.disabled = true;
                 break;
@@ -2500,7 +2515,7 @@ static void align_assign_pass_v2(std::vector<Tok>& tokens, const FormatOptions& 
             const auto& tok = tokens[k];
             if (tok_whitespace(tok))
                 continue;
-            if (tok.in_disabled_region)
+            if (tok.in_disabled_region || tok.fmt_passthrough || tok_define_block(tok))
                 ln.disabled = true;
             if (tok_directive(tok) && is_pp_conditional(tok_directive_kind(tok)))
                 ln.has_pp_cond = true;
@@ -3063,7 +3078,9 @@ static void align_var_pass_v2(std::vector<Tok>& tokens, const FormatOptions& opt
 
         for (size_t k = cur_line_start; k < end_idx; ++k) {
             if (tok_whitespace(tokens[k])) continue;
-            if (tokens[k].in_disabled_region) ln.disabled = true;
+            if (tokens[k].in_disabled_region || tokens[k].fmt_passthrough ||
+                tok_define_block(tokens[k]))
+                ln.disabled = true;
             if (tok_directive(tokens[k]) && is_pp_conditional(tok_directive_kind(tokens[k])))
                 ln.has_pp_cond = true;
 
@@ -3454,7 +3471,6 @@ static void basic_formatting(std::vector<Tok>& tokens, const std::string& input,
 
     // True only while formatting the trailing while of a do-while construct.
     bool do_while_tail = false;
-    int define_spaces_pending = 0;
 
     // import/export and extern declarations can contain function/task keywords
     // that must not open normal function/task indentation scopes.
@@ -3837,33 +3853,13 @@ static void basic_formatting(std::vector<Tok>& tokens, const std::string& input,
         }
 
         if (tok_define_block(tok)) {
-            if (tok_whitespace(tok)) {
-                int cols = 0;
-                bool saw_newline = false;
-                for (char ch : tok_text(tok)) {
-                    if (ch == '\n') {
-                        saw_newline = true;
-                        cols = 0;
-                    } else if (ch == ' ' || ch == '\t') {
-                        ++cols;
-                    }
-                }
-                if (tok_text(tok).find('\n') != std::string::npos) {
-                    pending_nl = true;
-                    at_bol = true;
-                }
-                if (saw_newline)
-                    define_spaces_pending = cols;
-                else
-                    define_spaces_pending += cols;
-                original_newline_before_token = tok_text(tok).find('\n') != std::string::npos;
-                continue;
-            }
+            // Macro definitions are whitespace-sensitive.  Preserve every token
+            // in the collected define range verbatim instead of reconstructing
+            // spacing/indentation metadata.
             apply_newline(i);
-            tok.fmt_spaces_before = define_spaces_pending;
-            define_spaces_pending = 0;
-            tok.fmt_indent = 0;
-            at_bol = false;
+            tok.fmt_passthrough = true;
+            at_bol = !tok_text(tok).empty() && tok_text(tok).back() == '\n';
+            prev_macro_role_valid = false;
             prev = &tok;
             original_newline_before_token = false;
             continue;
@@ -5006,10 +5002,10 @@ static size_t statement_end_semicolon(const std::vector<Tok>& tokens, size_t sta
 //   - whitespace with no newlines → " "  (single space)
 //
 // Blank-line counts are preserved (newline count is kept), but leading/trailing
-// spaces and mixed indentation are discarded.  In particular, define-block
-// whitespace spaces are zeroed so that align_define_continuation_pass_v2
-// always starts from a clean baseline instead of whatever spacing the previous
-// format run produced.
+// spaces and mixed indentation are discarded.  Define-block whitespace is left
+// untouched here because macro continuation bodies are whitespace-sensitive;
+// basic_formatting/align_define_continuation_pass_v2 handle their render
+// metadata without rewriting token text.
 //
 // Result: same non-whitespace token sequence → same fmt_* values every run
 // (idempotency guarantee).

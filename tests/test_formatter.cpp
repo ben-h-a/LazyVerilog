@@ -3,6 +3,7 @@
 #include <cctype>
 #include <catch2/catch_test_macros.hpp>
 #include <fstream>
+#include <filesystem>
 #include <sstream>
 #include <iostream>
 #include <vector>
@@ -532,6 +533,39 @@ TEST_CASE("formatter: parameter declarations are aligned by statement pass", "[f
           "parameter int DATA_WIDTH    = 32;\n");
 }
 
+
+TEST_CASE("formatter: define continuation block is preserved through basic formatting", "[formatter]") {
+    namespace fs = std::filesystem;
+    const fs::path base = fs::temp_directory_path() / "lazyverilog_define_basic_formatting_test";
+    fs::remove_all(base);
+
+    FormatOptions opts;
+    const std::string src = "`define FOO                                     \\\n"
+                            "  a();                 \\\n"
+                            "  b();\n";
+
+    const std::string once = format_source(src, opts);
+
+    opts.log_path = (base / "org").string();
+    (void)format_source(src, opts);
+    opts.log_path = (base / "once").string();
+    (void)format_source(once, opts);
+
+    auto read_file = [](const fs::path& path) {
+        std::ifstream in(path);
+        std::stringstream ss;
+        ss << in.rdbuf();
+        return ss.str();
+    };
+
+    CHECK(read_file(base / "org" / "01_normalization_pass.sv") ==
+          read_file(base / "once" / "01_normalization_pass.sv"));
+    CHECK(read_file(base / "org" / "02_basic_formatting.sv") ==
+          read_file(base / "once" / "02_basic_formatting.sv"));
+
+    fs::remove_all(base);
+}
+
 TEST_CASE("formatter: define macro body not reformatted", "[formatter]") {
     FormatOptions opts;
     opts.function.break_policy = "always";
@@ -539,13 +573,7 @@ TEST_CASE("formatter: define macro body not reformatted", "[formatter]") {
                             "    for (int ii=STARTBYTE; ii<STARTBYTE+NUMBYTES; ii++) begin \\\n"
                             "        $display(\"0x%x \", ARR[ii]); \\\n"
                             "    end\n";
-    // Backslash alignment pass aligns '\' to common column; body content unchanged.
-    const std::string expected =
-        "`define print_bytes(ARR, STARTBYTE, NUMBYTES)                 \\\n"
-        "    for (int ii=STARTBYTE; ii<STARTBYTE+NUMBYTES; ii++) begin \\\n"
-        "        $display(\"0x%x \", ARR[ii]);                           \\\n"
-        "    end\n";
-    CHECK(format_source(src, opts) == expected);
+    CHECK(format_source(src, opts) == src);
 }
 
 TEST_CASE("formatter: instance formatting skips define macro body", "[formatter]") {
