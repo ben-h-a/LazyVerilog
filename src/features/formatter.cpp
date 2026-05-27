@@ -5876,8 +5876,6 @@ static void format_function_calls_pass(std::vector<Tok>& tokens, const FormatOpt
         if (tokens[name].in_function_decl || tokens[name].in_task_decl ||
             tokens[name].in_module_header || tokens[name].in_class_decl)
             continue;
-        if (is_macro_usage(tokens[name]))
-            continue;
         bool has_macro = false;
         for (size_t k = open + 1; k < close; ++k)
             if (!tokens[k].is_pp_conditional_directive && !tokens[k].in_pp_conditional_line_tail)
@@ -5939,8 +5937,6 @@ static void format_function_calls_pass(std::vector<Tok>& tokens, const FormatOpt
             continue;
         if (tokens[name].in_function_decl || tokens[name].in_task_decl ||
             tokens[name].in_module_header || tokens[name].in_class_decl)
-            continue;
-        if (is_macro_usage(tokens[name]))
             continue;
         auto args = function_arg_ranges_between(tokens, open + 1, close);
         bool has_macro_arg = false;
