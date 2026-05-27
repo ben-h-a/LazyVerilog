@@ -5847,6 +5847,27 @@ static bool is_format_function_call_name(const Tok& tok, const MacroClassifier& 
     return cls.role == MacroRole::FunctionLikeExpr && !cls.whitespace_sensitive;
 }
 
+static bool has_unsafe_macro_call_argument(const std::vector<Tok>& tokens, size_t first,
+                                           size_t last, const MacroClassifier& macros) {
+    for (size_t k = first; k < last && k < tokens.size(); ++k) {
+        if (!is_macro_usage(tokens[k]))
+            continue;
+        size_t next = next_code_sig(tokens, k + 1, last);
+        bool has_args = next != SIZE_MAX &&
+                        tok_is(tokens[next], "(", TokenKind::OpenParenthesis);
+        MacroClassification cls = classify_macro(tokens[k], has_args, macros);
+        if (cls.whitespace_sensitive ||
+            (has_args && cls.role == MacroRole::FunctionLikeExpr) ||
+            cls.role == MacroRole::StatementLike ||
+            cls.role == MacroRole::DeclarationLike ||
+            cls.role == MacroRole::ControlFlowLike ||
+            cls.role == MacroRole::BlockBeginLike ||
+            cls.role == MacroRole::BlockEndLike)
+            return true;
+    }
+    return false;
+}
+
 static void format_function_calls_pass(std::vector<Tok>& tokens, const FormatOptions& opts) {
     const auto& fo = opts.function;
     MacroClassifier macro_classifier(opts.macros);
@@ -5876,11 +5897,7 @@ static void format_function_calls_pass(std::vector<Tok>& tokens, const FormatOpt
         if (tokens[name].in_function_decl || tokens[name].in_task_decl ||
             tokens[name].in_module_header || tokens[name].in_class_decl)
             continue;
-        bool has_macro = false;
-        for (size_t k = open + 1; k < close; ++k)
-            if (!tokens[k].is_pp_conditional_directive && !tokens[k].in_pp_conditional_line_tail)
-                has_macro = has_macro || tok_text(tokens[k]).find('`') != std::string::npos;
-        if (has_macro)
+        if (has_unsafe_macro_call_argument(tokens, open + 1, close, macro_classifier))
             continue;
         auto args = function_arg_ranges_between(tokens, open + 1, close);
         // Decide from the current normalized/rendered layout only.  Do not
@@ -5939,11 +5956,7 @@ static void format_function_calls_pass(std::vector<Tok>& tokens, const FormatOpt
             tokens[name].in_module_header || tokens[name].in_class_decl)
             continue;
         auto args = function_arg_ranges_between(tokens, open + 1, close);
-        bool has_macro_arg = false;
-        for (auto r : args)
-            for (size_t k = r.first; k < r.second; ++k)
-                has_macro_arg = has_macro_arg || tok_text(tokens[k]).find('`') != std::string::npos;
-        if (has_macro_arg)
+        if (has_unsafe_macro_call_argument(tokens, open + 1, close, macro_classifier))
             continue;
         bool do_break = false;
         if (fo.break_policy == "always") do_break = !args.empty();
