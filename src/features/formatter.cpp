@@ -50,6 +50,12 @@ static void write_log(const FormatOptions& opts, const std::string& filename,
 
 using slang::parsing::TokenKind;
 
+enum class CommentKind {
+    None,
+    Line,
+    Block,
+};
+
 struct TokLexeme {
     TokenKind kind{TokenKind::Unknown};
     std::string text;
@@ -57,6 +63,7 @@ struct TokLexeme {
     int pos{0};
     bool whitespace{false};
     bool comment{false};
+    CommentKind comment_kind{CommentKind::None};
     bool directive{false};
     bool define_block{false};
     syntax::SyntaxKind directive_kind{syntax::SyntaxKind::Unknown};
@@ -102,6 +109,8 @@ static const std::string& tok_lo(const Tok& tok) { return tok.lex->lo; }
 static int tok_pos(const Tok& tok) { return tok.lex->pos; }
 static bool tok_whitespace(const Tok& tok) { return tok.lex->whitespace; }
 static bool tok_comment(const Tok& tok) { return tok.lex->comment; }
+static bool tok_line_comment(const Tok& tok) { return tok.lex->comment_kind == CommentKind::Line; }
+static bool tok_block_comment(const Tok& tok) { return tok.lex->comment_kind == CommentKind::Block; }
 static bool tok_directive(const Tok& tok) { return tok.lex->directive; }
 static bool tok_define_block(const Tok& tok) { return tok.lex->define_block; }
 static syntax::SyntaxKind tok_directive_kind(const Tok& tok) { return tok.lex->directive_kind; }
@@ -752,12 +761,9 @@ static bool is_indexed_part_select_op(const Tok& t) { return tok_text(t) == "+:"
 // ---------------------------------------------------------------------------
 
 static bool is_format_control_comment(const Tok& tok, const std::regex& pattern) {
-    if (!tok_comment(tok))
+    if (!tok_line_comment(tok))
         return false;
-    const std::string& text = tok_text(tok);
-    if (text.rfind("//", 0) != 0)
-        return false;
-    return std::regex_search(text, pattern);
+    return std::regex_search(tok_text(tok), pattern);
 }
 
 // ---------------------------------------------------------------------------
@@ -938,7 +944,7 @@ static SD break_dec(const Tok& L, const Tok& R, const FormatOptions& opts, bool 
         return SD::MustWrap;
     if (tok_comment(L) && tok_text(L).find('\n') != std::string::npos)
         return SD::MustWrap;
-    if (tok_comment(L) && tok_text(L).rfind("//", 0) == 0)
+    if (tok_line_comment(L))
         return SD::MustWrap;
     if (is_unary_op(L))
         return SD::MustAppend;
@@ -968,7 +974,8 @@ static SD break_dec(const Tok& L, const Tok& R, const FormatOptions& opts, bool 
 static void push_tok(std::vector<Tok>& toks, TokenKind kind, std::string text, int pos,
                      bool whitespace = false, bool comment = false, bool directive = false,
                      syntax::SyntaxKind directive_kind = syntax::SyntaxKind::Unknown,
-                     bool define_block = false) {
+                     bool define_block = false,
+                     CommentKind comment_kind = CommentKind::None) {
     auto lex = std::make_shared<TokLexeme>();
     lex->kind = kind;
     lex->lo = lower(text);
@@ -976,6 +983,7 @@ static void push_tok(std::vector<Tok>& toks, TokenKind kind, std::string text, i
     lex->pos = pos;
     lex->whitespace = whitespace;
     lex->comment = comment;
+    lex->comment_kind = comment ? comment_kind : CommentKind::None;
     lex->directive = directive;
     lex->define_block = define_block;
     lex->directive_kind = directive_kind;
@@ -1055,7 +1063,7 @@ static void append_trivia_text(std::vector<Tok>& toks, const std::string& source
             while (j < end && source[j] != '\n')
                 ++j;
             push_tok(toks, TokenKind::Unknown, source.substr(i, j - i), (int)i, false, true,
-                     false, syntax::SyntaxKind::Unknown, define_block);
+                     false, syntax::SyntaxKind::Unknown, define_block, CommentKind::Line);
             i = j;
         } else if (source[i] == '/' && i + 1 < end && source[i + 1] == '*') {
             // Block comment: consume up to and including the closing */.
@@ -1065,7 +1073,7 @@ static void append_trivia_text(std::vector<Tok>& toks, const std::string& source
             if (j + 1 < end)
                 j += 2;
             push_tok(toks, TokenKind::Unknown, source.substr(i, j - i), (int)i, false, true,
-                     false, syntax::SyntaxKind::Unknown, define_block);
+                     false, syntax::SyntaxKind::Unknown, define_block, CommentKind::Block);
             i = j;
         } else if (source[i] == '`') {
             // Backtick: compiler directive or macro identifier.
@@ -1641,7 +1649,7 @@ static std::string take_leading_portlist_block_comments_tokenized(std::string& p
     for (const auto& tok : collect_lexer_tokens(ports_str)) {
         if (tok_whitespace(tok))
             continue;
-        if (!tok_comment(tok) || !starts_with_chars(tok_text(tok), '/', '*'))
+        if (!tok_block_comment(tok))
             break;
         comments += ports_str.substr(erase_end, (size_t)tok_pos(tok) + tok_text(tok).size() - erase_end);
         erase_end = (size_t)tok_pos(tok) + tok_text(tok).size();
@@ -4074,7 +4082,7 @@ static void basic_formatting(std::vector<Tok>& tokens, const std::string& input,
         if (inline_comment && pending_nl) {
             if (!case_label_pending_nl)
                 pending_nl = false;
-        } else if (tok_comment(tok) && tok_text(tok).rfind("//", 0) == 0) {
+        } else if (tok_line_comment(tok)) {
             size_t line_start = input.rfind('\n', (size_t)tok_pos(tok));
             line_start = (line_start == std::string::npos) ? 0 : line_start + 1;
             bool standalone_comment = true;
@@ -5007,7 +5015,7 @@ static size_t statement_end_semicolon(const std::vector<Tok>& tokens, size_t sta
 // (idempotency guarantee).
 static void normalization_pass(std::vector<Tok>& tokens) {
     for (auto& tok : tokens) {
-        if (tok.in_disabled_region)
+        if (tok.in_disabled_region || tok_define_block(tok))
             continue;
         if (!tok_whitespace(tok))
             continue;
@@ -5604,8 +5612,26 @@ static void format_arg_list_metadata(std::vector<Tok>& tokens, size_t open, size
     if (args.empty())
         return;
     if (hanging) {
-        tokens[args[0].first].fmt_newline_before = false;
-        tokens[args[0].first].fmt_spaces_before = 0;
+        bool leading_line_comment = false;
+        for (size_t k = open + 1; k < args[0].first && k < tokens.size(); ++k) {
+            if (tok_line_comment(tokens[k])) {
+                leading_line_comment = true;
+                break;
+            }
+        }
+        if (leading_line_comment) {
+            // Do not pull the first real argument up after a leading // comment.
+            // That would make the argument part of the comment text on the next
+            // formatter run, changing the token stream even when the rendered
+            // normalized layout looked identical.
+            tokens[args[0].first].fmt_newline_before = true;
+            tokens[args[0].first].fmt_blank_lines = 0;
+            tokens[args[0].first].fmt_indent = hanging_indent;
+            tokens[args[0].first].fmt_spaces_before = hanging_spaces;
+        } else {
+            tokens[args[0].first].fmt_newline_before = false;
+            tokens[args[0].first].fmt_spaces_before = 0;
+        }
         for (size_t k = 1; k < args.size(); ++k) {
             tokens[args[k].first].fmt_newline_before = true;
             tokens[args[k].first].fmt_blank_lines = 0;
