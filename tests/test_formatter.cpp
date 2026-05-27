@@ -33,6 +33,27 @@ TEST_CASE("formatter: member function calls support hanging layout", "[formatter
           "             .lsb_pos(0));\n");
 }
 
+TEST_CASE("formatter: function call pass ignores hidden source whitespace", "[formatter]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+
+    const std::string src =
+        "function void f();\n"
+        "  if (cfg.is_chip == 0) begin\n"
+        "    foreach (cfg.ral_models[i]) begin\n"
+        "      if (cfg.ral_models[i].has_shadowed_regs() &&\n"
+        "          !uvm_config_db#(rst_shadowed_vif)::get(this, \"\", \"rst_shadowed_vif\",\n"
+        "                                                 cfg.rst_shadowed_vif)) begin\n"
+        "        `uvm_fatal(get_full_name(), \"failed\")\n"
+        "      end\n"
+        "    end\n"
+        "  end\n"
+        "endfunction\n";
+
+    const std::string once = format_source(src, opts);
+    CHECK(format_source(once, opts) == once);
+}
+
 
 TEST_CASE("formatter: macro before function declaration is split", "[formatter]") {
     FormatOptions opts;
@@ -921,6 +942,27 @@ TEST_CASE("formatter: verilog_format on marker does not gain blank line", "[form
                          "\n"
                          "// verilog_format: on\n") != std::string::npos);
     CHECK(format_source(formatted, opts) == formatted);
+}
+
+TEST_CASE("formatter: custom format control comment regex", "[formatter]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.format_off_comment_pattern = R"(//\s*lazyverilog\s+off\b)";
+    opts.format_on_comment_pattern = R"(//\s*lazyverilog\s+on\b)";
+
+    const std::string src = "module top;\n"
+                            "// lazyverilog off\n"
+                            "assign   a=b;\n"
+                            "// lazyverilog on\n"
+                            "assign   c=d;\n"
+                            "endmodule\n";
+
+    CHECK(format_source(src, opts) == "module top;\n"
+                                     "// lazyverilog off\n"
+                                     "assign   a=b;\n"
+                                     "// lazyverilog on\n"
+                                     "assign c = d;\n"
+                                     "endmodule\n");
 }
 
 TEST_CASE("formatter: calls with empty positional arguments are preserved", "[formatter]") {
