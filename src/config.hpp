@@ -160,6 +160,8 @@ struct FormatOptions {
     bool tab_align{false};
     bool enable_format_on_save{false};
     bool safe_mode{false};
+    std::string format_off_comment_pattern{R"(//\s*verilog[-_]format\s*:\s*off\b)"};
+    std::string format_on_comment_pattern{R"(//\s*verilog[-_]format\s*:\s*on\b)"};
     std::string log_path;
     StatementOptions statement;
     PortDeclarationOptions port_declaration;

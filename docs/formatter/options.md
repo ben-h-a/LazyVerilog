@@ -123,6 +123,26 @@ safe_mode = true
 
 ---
 
+### `format_off_comment_pattern` / `format_on_comment_pattern`
+
+Regex patterns used to detect line comments that disable and re-enable formatting.
+The regex is matched against the comment token text, for example `// verilog_format: off`.
+
+```toml
+[format]
+format_off_comment_pattern = '//\s*verilog[-_]format\s*:\s*off\b'
+format_on_comment_pattern = '//\s*verilog[-_]format\s*:\s*on\b'
+```
+
+```systemverilog
+// verilog_format: off
+assign   a=b;      // preserved verbatim
+// verilog_format: on
+assign a = b;      // formatted normally
+```
+
+---
+
 ## `[format.spacing]`
 
 Controls whitespace around operators, keywords, and delimiters.

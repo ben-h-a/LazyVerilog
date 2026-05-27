@@ -165,6 +165,10 @@ Config load_config(const std::filesystem::path& root, std::string* warning,
                 cfg.format.safe_mode = *v;
             if (auto v = (*f)["tab_align"].value<bool>())
                 cfg.format.tab_align = *v;
+            if (auto v = (*f)["format_off_comment_pattern"].value<std::string>())
+                cfg.format.format_off_comment_pattern = *v;
+            if (auto v = (*f)["format_on_comment_pattern"].value<std::string>())
+                cfg.format.format_on_comment_pattern = *v;
             // Nested subtables
             if (auto st = (*f)["statement"].as_table()) {
                 if (auto v = (*st)["align"].value<bool>())
