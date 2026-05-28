@@ -3392,7 +3392,9 @@ static void align_var_pass_v2(std::vector<Tok>& tokens, const FormatOptions& opt
         for (size_t k = cur_line_start; k < end_idx; ++k) {
             if (tok_whitespace(tokens[k])) continue;
             if (tokens[k].in_disabled_region || tokens[k].fmt_passthrough ||
-                tok_define_block(tokens[k]))
+                tok_define_block(tokens[k]) ||
+                tokens[k].layout_owner == LayoutOwner::ModuleHeaderParameterList ||
+                tokens[k].layout_owner == LayoutOwner::ModuleHeaderPortList)
                 ln.disabled = true;
             if (tok_directive(tokens[k]) && is_pp_conditional(tok_directive_kind(tokens[k])))
                 ln.has_pp_cond = true;
@@ -5555,13 +5557,18 @@ static void passthrough_regions_pass(std::vector<Tok>& tokens, const FormatOptio
         auto& tok = tokens[i];
         bool is_pt = tok.in_disabled_region || tok_define_block(tok);
         if (!is_pt) {
-            if (!tok_whitespace(tok))
-                in_passthrough = false;
+            in_passthrough = false;
             continue;
         }
-        // Mark whitespace tokens verbatim but don't set newline/indent metadata.
+        // Leading whitespace before the first non-whitespace token of a passthrough
+        // region (e.g. indentation spaces before a `define) must not be emitted
+        // verbatim: they would appear as trailing spaces on the preceding line once
+        // the intervening newline token (which is outside the define range) is
+        // dropped by render_tokens.  Only internal whitespace (after the region's
+        // first non-whitespace token) needs to be preserved verbatim.
         if (tok_whitespace(tok)) {
-            tok.fmt_passthrough = true;
+            if (in_passthrough)
+                tok.fmt_passthrough = true;
             continue;
         }
         tok.fmt_passthrough = true;
