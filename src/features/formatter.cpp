@@ -5921,14 +5921,23 @@ static void format_function_calls_pass(std::vector<Tok>& tokens, const FormatOpt
             tokens[i].stmt_has_define_block)
             continue;
         size_t name, open, close;
-        if (find_simple_call_tokens(tokens, i, semi + 1, name, open, close, true) == SIZE_MAX ||
-            !is_format_function_call_name(tokens[name], macro_classifier) || tokens[name].in_modport)
+        if (find_simple_call_tokens(tokens, i, semi + 1, name, open, close, true) == SIZE_MAX) {
+            i = semi; // No call in statement — skip to avoid O(stmt_len²) rescanning
             continue;
+        }
+        if (!is_format_function_call_name(tokens[name], macro_classifier) || tokens[name].in_modport) {
+            i = name; // Skip past this non-qualifying identifier
+            continue;
+        }
         if (tokens[name].in_function_decl || tokens[name].in_task_decl ||
-            tokens[name].in_module_header || tokens[name].in_class_decl)
+            tokens[name].in_module_header || tokens[name].in_class_decl) {
+            i = name;
             continue;
-        if (has_unsafe_macro_call_argument(tokens, open + 1, close, macro_classifier))
+        }
+        if (has_unsafe_macro_call_argument(tokens, open + 1, close, macro_classifier)) {
+            i = name;
             continue;
+        }
         auto args = function_arg_ranges_between(tokens, open + 1, close);
         // Decide from the current normalized/rendered layout only.  Do not
         // inspect whitespace token text here: whitespace tokens preserve source
@@ -5938,8 +5947,10 @@ static void format_function_calls_pass(std::vector<Tok>& tokens, const FormatOpt
         bool already_multiline = tokens[close].fmt_newline_before;
         for (auto r : args)
             already_multiline = already_multiline || tokens[r.first].fmt_newline_before;
-        if (!already_multiline || args.size() <= 1)
+        if (!already_multiline || args.size() <= 1) {
+            i = name;
             continue;
+        }
         bool do_break = false;
         if (fo.break_policy == "always") do_break = true;
         else if (fo.break_policy == "auto") do_break = fo.arg_count >= 0 && (int)args.size() >= fo.arg_count;
