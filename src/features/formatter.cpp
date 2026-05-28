@@ -2185,7 +2185,47 @@ static bool range_has_port_separator_comment_barrier(const std::vector<Tok>& tok
 }
 
 static void format_comment_layout_pass(std::vector<Tok>& tokens, const FormatOptions& opts) {
-    (void)opts;
+    // Pass 1: set baseline fmt_* for every Comment-owned token using its pre-classified
+    // comment_role.  The port-list fixup below may override specific cases.
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (!tok_comment(tokens[i])) continue;
+        if (tokens[i].layout_owner != LayoutOwner::Comment) continue;
+        auto& ctok = tokens[i];
+
+        if (comment_role_inline_rendered(ctok.comment_role)) {
+            ctok.fmt_newline_before = false;
+            ctok.fmt_blank_lines   = 0;
+            ctok.fmt_spaces_before = 1;
+            ctok.fmt_indent        = 0;
+        } else {
+            // Own-line (standalone) comment: indent to match the next Basic token.
+            ctok.fmt_newline_before = true;
+            ctok.fmt_spaces_before  = 0;
+
+            int indent = 0;
+            for (size_t j = i + 1; j < tokens.size(); ++j) {
+                if (tok_whitespace(tokens[j])) continue;
+                if (tokens[j].layout_owner == LayoutOwner::Basic) {
+                    indent = tokens[j].fmt_indent;
+                    break;
+                }
+            }
+            ctok.fmt_indent = indent;
+
+            // Preserve blank lines visible in the source whitespace before this comment.
+            int blank = 0;
+            for (size_t j = i; j > 0; --j) {
+                if (!tok_whitespace(tokens[j - 1])) break;
+                int nl = (int)std::count(tok_text(tokens[j - 1]).begin(),
+                                          tok_text(tokens[j - 1]).end(), '\n');
+                blank = std::max(0, nl - 1);
+            }
+            ctok.fmt_blank_lines = std::min(blank, opts.blank_lines_between_items);
+        }
+    }
+
+    // Pass 2: port-list comment fixup (overrides the baseline above for comments
+    // that appear inside module/interface header port or parameter lists).
     for (size_t i = 0; i < tokens.size(); ++i) {
         if (tok_whitespace(tokens[i]) || tok_comment(tokens[i]) || tok_directive(tokens[i]) ||
             tokens[i].in_disabled_region || tokens[i].fmt_passthrough)
@@ -2456,6 +2496,14 @@ static void format_portlist_pass(std::vector<Tok>& tokens, const FormatOptions& 
             continue;
 
         tokens[port_open].fmt_spaces_before = 0;
+        // If a statement (e.g. import p::*;) precedes the port list on the same
+        // line, the opening '(' should start on a new line.  basic_formatting
+        // used to propagate pending_nl here; format_portlist_pass must now do it.
+        {
+            size_t prev_sig = prev_code_sig(tokens, i, port_open);
+            if (prev_sig != SIZE_MAX && tok_is(tokens[prev_sig], ";", TokenKind::Semicolon))
+                tokens[port_open].fmt_newline_before = true;
+        }
         for (size_t ei = 0; ei < entries.size(); ++ei) {
             auto& e = entries[ei];
             if (!e.valid)
@@ -2484,6 +2532,35 @@ static void format_portlist_pass(std::vector<Tok>& tokens, const FormatOptions& 
         tokens[port_close].fmt_spaces_before = 0;
         tokens[semi].fmt_newline_before = false;
         tokens[semi].fmt_spaces_before = 0;
+
+        // Set fmt_spaces_before for all tokens within parameter and port ranges
+        // using spaces_req.  The delimiter tokens already have fmt_newline_before /
+        // fmt_indent set above; here we fill in horizontal spacing so that
+        // within-port declarations (e.g. "input logic [W-1:0] name") render with
+        // correct token-pair spacing even though basic_formatting no longer writes
+        // to these tokens.  This must run BEFORE align_header_ports_metadata so
+        // the alignment pass can adjust rather than clobber these baseline spaces.
+        auto apply_intra_spacing = [&](size_t open_idx, size_t close_idx) {
+            const Tok* prev_sig = nullptr;
+            int dim = 0;
+            for (size_t j = open_idx; j <= close_idx && j < tokens.size(); ++j) {
+                if (tok_whitespace(tokens[j])) continue;
+                if (tok_comment(tokens[j])) continue;
+                // Don't override spacing for line-start tokens; their indent
+                // is already set and fmt_spaces_before should stay 0.
+                if (!tokens[j].fmt_newline_before && prev_sig != nullptr) {
+                    tokens[j].fmt_spaces_before =
+                        spaces_req(*prev_sig, tokens[j], opts,
+                                   dim > 0, false, true, ParenKind::Ordinary, false);
+                }
+                if (tok_is(tokens[j], "[", TokenKind::OpenBracket))      ++dim;
+                else if (tok_is(tokens[j], "]", TokenKind::CloseBracket) && dim > 0) --dim;
+                prev_sig = &tokens[j];
+            }
+        };
+        if (hash_idx != SIZE_MAX && param_close != SIZE_MAX)
+            apply_intra_spacing(hash_idx, param_close);
+        apply_intra_spacing(port_open, port_close);
 
         if (ansi && opts.port_declaration.align)
             align_header_ports_metadata(tokens, entries, opts);
@@ -3597,6 +3674,38 @@ static std::string render_tokens(const std::vector<Tok>& tokens, const FormatOpt
 }
 
 // ---------------------------------------------------------------------------
+// Format metadata snapshot helpers — used by basic_formatting and later passes
+// ---------------------------------------------------------------------------
+
+struct FormatMetadataSnapshot {
+    int fmt_indent{0};
+    int fmt_spaces_before{0};
+    std::string fmt_text_before;
+    bool fmt_newline_before{false};
+    int fmt_blank_lines{0};
+    bool fmt_passthrough{false};
+};
+
+static FormatMetadataSnapshot snapshot_format_metadata(const Tok& tok) {
+    return {tok.fmt_indent,
+            tok.fmt_spaces_before,
+            tok.fmt_text_before,
+            tok.fmt_newline_before,
+            tok.fmt_blank_lines,
+            tok.fmt_passthrough};
+}
+
+
+static bool format_metadata_changed(const Tok& tok, const FormatMetadataSnapshot& before) {
+    return tok.fmt_indent != before.fmt_indent ||
+           tok.fmt_spaces_before != before.fmt_spaces_before ||
+           tok.fmt_text_before != before.fmt_text_before ||
+           tok.fmt_newline_before != before.fmt_newline_before ||
+           tok.fmt_blank_lines != before.fmt_blank_lines ||
+           tok.fmt_passthrough != before.fmt_passthrough;
+}
+
+// ---------------------------------------------------------------------------
 // basic_formatting — set fmt_* fields on each token
 // ---------------------------------------------------------------------------
 static void basic_formatting(std::vector<Tok>& tokens, const std::string& input,
@@ -3792,12 +3901,14 @@ static void basic_formatting(std::vector<Tok>& tokens, const std::string& input,
             single_stmt_active = false;
         }
     };
-    auto apply_newline = [&](size_t idx) {
+    auto apply_newline = [&](size_t idx, bool write_fmt = true) {
         // Materialize a deferred newline/blank-line request on the current token.
         // Once attached to fmt_* metadata, the pending request is consumed.
         if (pending_nl || blank_pend > 0) {
-            tokens[idx].fmt_newline_before = true;
-            tokens[idx].fmt_blank_lines = blank_pend;
+            if (write_fmt) {
+                tokens[idx].fmt_newline_before = true;
+                tokens[idx].fmt_blank_lines = blank_pend;
+            }
             pending_nl = false;
             blank_pend = 0;
             at_bol = true;
@@ -4093,12 +4204,18 @@ static void basic_formatting(std::vector<Tok>& tokens, const std::string& input,
         if (tok_define_block(tok)) {
             // Macro definitions are whitespace-sensitive.  Preserve every token
             // in the collected define range verbatim instead of reconstructing
-            // spacing/indentation metadata.
+            // spacing/indentation metadata.  fmt_passthrough and fmt_newline_before
+            // are set by passthrough_regions_pass; here we only update local state.
             bool starts_define_block = !(prev && tok_define_block(*prev));
-            if (starts_define_block && !at_bol)
-                tok.fmt_newline_before = true;
-            apply_newline(i);
-            tok.fmt_passthrough = true;
+            if (starts_define_block && !at_bol) {
+                // Consume pending_nl and treat as if a newline was emitted.
+                pending_nl = true;
+            }
+            if (pending_nl || blank_pend > 0) {
+                pending_nl = false;
+                blank_pend = 0;
+                at_bol = true;
+            }
             at_bol = !tok_text(tok).empty() && tok_text(tok).back() == '\n';
             prev_macro_role_valid = false;
             prev = &tok;
@@ -4109,8 +4226,13 @@ static void basic_formatting(std::vector<Tok>& tokens, const std::string& input,
         // --- A. Disabled region ---
         if (tok.in_disabled_region) {
             // verilog_format/verilog-format:off regions are preserved exactly.
-            apply_newline(i);
-            tok.fmt_passthrough = true;
+            // fmt_passthrough and fmt_newline_before are set by passthrough_regions_pass;
+            // here we only consume pending_nl to keep local state consistent.
+            if (pending_nl || blank_pend > 0) {
+                pending_nl = false;
+                blank_pend = 0;
+                at_bol = true;
+            }
             at_bol = !tok_text(tok).empty() && tok_text(tok).back() == '\n';
             after_dis = !at_bol;
             continue;
@@ -4361,10 +4483,14 @@ static void basic_formatting(std::vector<Tok>& tokens, const std::string& input,
         //   MustWrap   attach an explicit newline to this token
         //   MustAppend consume any pending newline and keep this token inline
         //   Undecided  honor pending newlines, otherwise use normal spacing
+        // Non-Basic tokens (Comment, PortList, ParameterList) still run through
+        // this state machine so at_bol / pending_nl stay consistent, but their
+        // owning passes set fmt_* instead.
+        const bool is_basic_owned = (tok.layout_owner == LayoutOwner::Basic);
         if (dec == SD::MustWrap) {
             pending_nl = false;
-            tok.fmt_newline_before = true;
-            tok.fmt_blank_lines = blank_pend;
+            if (is_basic_owned) tok.fmt_newline_before = true;
+            if (is_basic_owned) tok.fmt_blank_lines = blank_pend;
             blank_pend = 0;
             at_bol = true;
         } else if (dec == SD::MustAppend) {
@@ -4372,11 +4498,11 @@ static void basic_formatting(std::vector<Tok>& tokens, const std::string& input,
                 pending_nl = false;
                 blank_pend = 0;
             }
-            if (!at_bol && spaces > 0)
+            if (!at_bol && spaces > 0 && is_basic_owned)
                 tok.fmt_spaces_before = spaces;
         } else {
-            apply_newline(i);
-            if (!at_bol && spaces > 0)
+            apply_newline(i, is_basic_owned);
+            if (!at_bol && spaces > 0 && is_basic_owned)
                 tok.fmt_spaces_before = spaces;
         }
 
@@ -4427,26 +4553,29 @@ static void basic_formatting(std::vector<Tok>& tokens, const std::string& input,
         // At this point all pre-token indentation adjustments are complete.
         // render_tokens() will multiply fmt_indent by opts.indent_size if this
         // token begins a line.
-        tok.fmt_indent = indent_level;
-        if (tok.fmt_newline_before && !paren_stack.empty() &&
-            paren_stack.back() == ParenKind::InstantiationPortList &&
-            !tok_is(tok, ")", TokenKind::CloseParenthesis)) {
-            // Indent any token that starts a new rendered line inside an
-            // instantiation port list as a port entry.  This covers both:
-            //
-            //   memory u_mem(
-            //       .a(a)
-            //
-            // and:
-            //
-            //   memory u_mem( // header comment
-            //       .a(a)
-            tok.fmt_indent = indent_level + opts.instance.port_indent_level;
+        if (is_basic_owned) {
+            tok.fmt_indent = indent_level;
+            if (tok.fmt_newline_before && !paren_stack.empty() &&
+                paren_stack.back() == ParenKind::InstantiationPortList &&
+                !tok_is(tok, ")", TokenKind::CloseParenthesis)) {
+                // Indent any token that starts a new rendered line inside an
+                // instantiation port list as a port entry.  This covers both:
+                //
+                //   memory u_mem(
+                //       .a(a)
+                //
+                // and:
+                //
+                //   memory u_mem( // header comment
+                //       .a(a)
+                tok.fmt_indent = indent_level + opts.instance.port_indent_level;
+            }
+            if (tok.in_covergroup && tok.fmt_newline_before)
+                tok.fmt_blank_lines = 0;
         }
         if (at_bol)
             at_bol = false;
-        if (tok.in_covergroup && tok.fmt_newline_before)
-            tok.fmt_blank_lines = 0;
+
 
         // --- J. Update bracket/paren/dim depth counters ---
         // Update grouping state after annotating the current token.  This makes
@@ -5417,10 +5546,49 @@ static void classify_comments_pass(std::vector<Tok>& tokens) {
     }
 }
 
+static void passthrough_regions_pass(std::vector<Tok>& tokens, const FormatOptions& opts) {
+    // Mark every token (including whitespace) inside a define block or disabled
+    // region as passthrough so render_tokens emits them verbatim.  Whitespace
+    // tokens must also be marked so their raw spacing text is preserved.
+    bool in_passthrough = false;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        auto& tok = tokens[i];
+        bool is_pt = tok.in_disabled_region || tok_define_block(tok);
+        if (!is_pt) {
+            if (!tok_whitespace(tok))
+                in_passthrough = false;
+            continue;
+        }
+        // Mark whitespace tokens verbatim but don't set newline/indent metadata.
+        if (tok_whitespace(tok)) {
+            tok.fmt_passthrough = true;
+            continue;
+        }
+        tok.fmt_passthrough = true;
+        if (!in_passthrough) {
+            tok.fmt_newline_before = true;
+            // Count blank lines from preceding whitespace
+            int blank = 0;
+            for (size_t j = i; j > 0; --j) {
+                if (!tok_whitespace(tokens[j - 1])) break;
+                int nl = (int)std::count(tok_text(tokens[j - 1]).begin(),
+                                         tok_text(tokens[j - 1]).end(), '\n');
+                blank = std::max(0, nl - 1);
+            }
+            tok.fmt_blank_lines = std::min(blank, opts.blank_lines_between_items);
+        }
+        in_passthrough = true;
+    }
+}
+
 static void set_layout_owner_if_unowned(std::vector<Tok>& tokens, size_t first, size_t last,
                                          LayoutOwner owner) {
     for (size_t k = first; k < last && k < tokens.size(); ++k) {
         if (tok_whitespace(tokens[k]))
+            continue;
+        // Directive tokens (e.g. `ifdef, `endif) are always owned by Basic so
+        // basic_formatting can emit them as passthrough regardless of context.
+        if (tok_directive(tokens[k]))
             continue;
         if (tokens[k].layout_owner == LayoutOwner::None)
             tokens[k].layout_owner = owner;
@@ -5511,11 +5679,18 @@ static void assign_layout_owners_pass(std::vector<Tok>& tokens) {
                 }
             }
         }
-        if (hash_idx != SIZE_MAX && param_close != SIZE_MAX)
-            set_layout_owner_if_unowned(tokens, hash_idx, param_close + 1,
-                                        LayoutOwner::ModuleHeaderParameterList);
-        set_layout_owner_if_unowned(tokens, port_open, port_close + 1,
-                                    LayoutOwner::ModuleHeaderPortList);
+        // Skip PortList/ParameterList ownership when the header contains PP
+        // conditionals or passthrough regions — format_portlist_pass already
+        // skips those headers, so their tokens stay Basic and basic_formatting
+        // handles them (including the in_pp_cond passthrough paths).
+        if (!token_range_has_pp_conditional(tokens, i, semi + 1) &&
+            !token_range_disabled_or_passthrough(tokens, i, semi + 1)) {
+            if (hash_idx != SIZE_MAX && param_close != SIZE_MAX)
+                set_layout_owner_if_unowned(tokens, hash_idx, param_close + 1,
+                                            LayoutOwner::ModuleHeaderParameterList);
+            set_layout_owner_if_unowned(tokens, port_open, port_close + 1,
+                                        LayoutOwner::ModuleHeaderPortList);
+        }
         set_layout_owner_if_unowned(tokens, i, semi + 1, LayoutOwner::Basic);
         i = semi;
     }
@@ -5524,33 +5699,6 @@ static void assign_layout_owners_pass(std::vector<Tok>& tokens) {
         if (!tok_whitespace(tok) && tok.layout_owner == LayoutOwner::None)
             tok.layout_owner = LayoutOwner::Basic;
     }
-}
-
-struct FormatMetadataSnapshot {
-    int fmt_indent{0};
-    int fmt_spaces_before{0};
-    std::string fmt_text_before;
-    bool fmt_newline_before{false};
-    int fmt_blank_lines{0};
-    bool fmt_passthrough{false};
-};
-
-static FormatMetadataSnapshot snapshot_format_metadata(const Tok& tok) {
-    return {tok.fmt_indent,
-            tok.fmt_spaces_before,
-            tok.fmt_text_before,
-            tok.fmt_newline_before,
-            tok.fmt_blank_lines,
-            tok.fmt_passthrough};
-}
-
-static bool format_metadata_changed(const Tok& tok, const FormatMetadataSnapshot& before) {
-    return tok.fmt_indent != before.fmt_indent ||
-           tok.fmt_spaces_before != before.fmt_spaces_before ||
-           tok.fmt_text_before != before.fmt_text_before ||
-           tok.fmt_newline_before != before.fmt_newline_before ||
-           tok.fmt_blank_lines != before.fmt_blank_lines ||
-           tok.fmt_passthrough != before.fmt_passthrough;
 }
 
 static const char* layout_owner_name(LayoutOwner owner) {
@@ -6788,7 +6936,11 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
     assign_layout_owners_pass(tokens);
     normalization_pass(tokens);
     write_log(opts, "01_normalization_pass.sv", render_tokens(tokens, opts));
-    basic_formatting(tokens, input, opts);
+    run_layout_owned_pass("passthrough_regions_pass", tokens,
+                          {LayoutOwner::DefineBlock, LayoutOwner::DisabledRegion},
+                          [&] { passthrough_regions_pass(tokens, opts); });
+    run_layout_owned_pass("basic_formatting", tokens, {LayoutOwner::Basic},
+                          [&] { basic_formatting(tokens, input, opts); });
     write_log(opts, "02_basic_formatting.sv", render_tokens(tokens, opts));
 
     run_layout_owned_pass("format_comment_layout_pass", tokens,
