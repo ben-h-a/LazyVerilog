@@ -1,42 +1,62 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-12 | Updated: 2026-04-12 -->
+<!-- Generated: 2026-05-28 | Updated: 2026-05-28 -->
 
 # src
 
 ## Purpose
-Core LSP server implementation. Currently contains a single stub that establishes the LSP message loop — reading `Content-Length`-framed JSON-RPC messages from stdin and writing responses to stdout. This is the entry point for the language server that editors will launch as a subprocess.
+C++ source for the lazyverilog LSP server. Split into server core (root of this directory) and feature implementations (`features/`). All files communicate via shared analyzer, syntax index, config, and document state infrastructure.
 
 ## Key Files
 
 | File | Description |
 |------|-------------|
-| `main.cpp` | LSP server entry point: `readLSPMessage()` parses headers and reads payload; `writeLSPMessage()` writes framed JSON; `main()` loops forever echoing a placeholder response |
+| `main.cpp` | Entry point — initializes and runs the LSP server |
+| `server.cpp` | JSON-RPC dispatch — routes LSP requests to feature handlers |
+| `server.hpp` | Server class interface |
+| `analyzer.cpp` | AST construction and traversal over SystemVerilog source |
+| `analyzer.hpp` | Analyzer interface |
+| `syntax_index.cpp` | Fast symbol lookup index built from parsed AST |
+| `syntax_index.hpp` | Syntax index interface |
+| `background_compiler.cpp` | Incremental background parsing service |
+| `background_compiler.hpp` | Background compiler interface |
+| `document_state.hpp` | Header-only document state tracking (no .cpp) |
+| `config.cpp` | Loads and parses `lazyverilog.toml` configuration |
+| `config.hpp` | Configuration structs |
+
+## Subdirectories
+
+| Directory | Purpose |
+|-----------|---------|
+| `features/` | One file per LSP feature/command (see `features/AGENTS.md`) |
 
 ## For AI Agents
 
+### Dependency Flow
+1. `main.cpp` → initializes server, loads config
+2. `server.cpp` → dispatches JSON-RPC to feature modules
+3. Features depend on: `analyzer`, `syntax_index`, `background_compiler`, `config`
+
 ### Working In This Directory
-- The LSP stub currently ignores request content and always replies `{"jsonrpc":"2.0","id":1,"result":"Hello from LSP"}`. Real handlers need to dispatch on the `method` field of the parsed JSON.
-- Next steps likely involve: integrating `LspCpp` for protocol parsing, hooking Slang for `textDocument/publishDiagnostics`, and implementing `initialize` / `shutdown` lifecycle.
-- Use `slang::SourceManager` + `slang::CompilationUnit` to parse `.sv` files passed via LSP `textDocument/didOpen`.
+- Add new LSP commands in `features/`, register them in `server.cpp`
+- `document_state.hpp` is header-only; keep it so
+- Config changes: update `config.hpp` struct + `config.cpp` parser + `lazyverilog.toml` + `docs/formatter/options.md`
 
 ### Testing Requirements
-- Build: `cmake --build build --target main`
-- Manual test: echo a valid LSP initialize message and pipe to `./build/main`
-  ```bash
-  printf 'Content-Length: 47\r\n\r\n{"jsonrpc":"2.0","id":1,"method":"initialize"}' | ./build/main
-  ```
+- Feature tests live in `../tests/test_<feature>.cpp`
+- Run: `ctest --test-dir ../build`
 
 ### Common Patterns
-- LSP framing: `Content-Length: <N>\r\n\r\n<body>` — no other headers currently used.
-- All I/O is synchronous on `std::cin` / `std::cout`; `std::cerr` for diagnostics.
+- JSON-RPC over stdin/stdout
+- Config reloaded on every `workspace/didChangeConfiguration`
+- Config search: walk up from opened file → `rootUri` → `current_path()`
 
 ## Dependencies
 
 ### Internal
-- Links against `slang::slang` (via CMake target in root `CMakeLists.txt`)
+- All features depend on `analyzer.hpp`, `syntax_index.hpp`, `config.hpp`, `document_state.hpp`
 
 ### External
-- `slang` — will be used for SV parsing and diagnostics
-- `LspCpp` — intended for LSP protocol handling (not yet integrated in this file)
+- slang — SystemVerilog parser
+- nlohmann/json — JSON-RPC messages
 
-<!-- MANUAL: Any manually added notes below this line are preserved on regeneration -->
+<!-- MANUAL: -->

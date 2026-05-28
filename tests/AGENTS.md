@@ -1,35 +1,64 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-12 | Updated: 2026-04-12 -->
+<!-- Generated: 2026-05-28 | Updated: 2026-05-28 -->
 
 # tests
 
 ## Purpose
-SystemVerilog source fixtures used for manual testing of the LSP server and Slang integration. These files serve as sample inputs when exercising the parser, diagnostics pipeline, or LSP handlers.
+Unit and integration tests for all lazyverilog LSP features. Uses Catch2 framework. Each feature has its own test file. `test_main.cpp` is a placeholder entry point — do not add test cases to it.
 
 ## Key Files
 
 | File | Description |
 |------|-------------|
-| `test.sv` | 8-bit synchronous memory module: 256-entry register file with address/data_in/data_out ports and read/write control — a simple but complete SV module for parser smoke tests |
+| `test_main.cpp` | Catch2 placeholder entry point (no test cases here) |
+| `test_formatter.cpp` | Formatter pass tests — idempotency and correctness |
+| `test_lint.cpp` | Linter/diagnostics tests |
+| `test_config.cpp` | Config loading and defaults tests |
+| `test_autoff.cpp` | Auto flip-flop connection feature tests |
+| `test_definition.cpp` | Go-to-definition tests |
+| `test_references.cpp` | Find-all-references tests |
+| `test_rename.cpp` | Symbol rename tests |
+| `test_syntax_index.cpp` | Syntax index lookup tests |
+| `test_document_sync.cpp` | Document sync / incremental update tests |
+| `test_lsp_features.cpp` | General LSP feature integration tests |
+| `test_inlay_hints.cpp` | Inlay hints tests |
+| `rtl_format_sweep.cpp` | Large-scale formatter performance sweep against real RTL |
+| `test.sv` | SystemVerilog fixture used by tests |
 
 ## For AI Agents
 
+### Running Tests
+```bash
+# All tests
+ctest --test-dir ../build
+
+# Single feature (by tag)
+../build/lazyverilog-tests "[config]"
+
+# Single named test
+../build/lazyverilog-tests "config: missing file returns defaults"
+```
+
 ### Working In This Directory
-- Add `.sv` files here as test cases for new LSP features (e.g., a file with intentional syntax errors to test diagnostics, a module hierarchy to test go-to-definition).
-- Files here are **not** compiled by CMake — they are fed to the LSP server or Slang API directly.
-- Use `test.sv` as the baseline smoke test when verifying Slang can parse a file without errors.
+- New feature → add `test_<feature>.cpp`, register in `../CMakeLists.txt`
+- Mirror `src/features/<feature>.cpp` with `tests/test_<feature>.cpp`
+- Tags: use `[<feature>]` Catch2 tag on each test case
+- Do NOT add cases to `test_main.cpp`
 
 ### Testing Requirements
-- To parse with Slang CLI (if built): `./build/external/slang/driver/slang tests/test.sv`
-- To test via LSP: open `tests/test.sv` in an editor configured to use `./build/main` as the SV language server.
+- Tests must pass before merging
+- Formatter tests must verify idempotency (format twice, result unchanged)
 
 ### Common Patterns
-- Prefer traditional Verilog port style (separate port list + direction declarations) to test older SV syntax compatibility.
-- Include both well-formed and intentionally broken `.sv` files as the test suite grows.
+- Catch2 `TEST_CASE("name", "[tag]")` structure
+- SV fixture strings inline or loaded from `test.sv`
 
 ## Dependencies
 
-### External
-- Parsed by `slang` (external submodule)
+### Internal
+- All test files link against the lazyverilog static library built from `../src/`
 
-<!-- MANUAL: Any manually added notes below this line are preserved on regeneration -->
+### External
+- Catch2 — test framework
+
+<!-- MANUAL: -->
