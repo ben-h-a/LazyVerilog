@@ -1342,6 +1342,59 @@ TEST_CASE("formatter: user-defined output port type stays in type section", "[fo
     CHECK(formatted.find("output packet_t   [0:0]") != std::string::npos);
 }
 
+TEST_CASE("formatter: non-ANSI port declarations keep five-section alignment", "[formatter]") {
+    FormatOptions opts;
+    opts.safe_mode = true;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+    opts.port_declaration.align = true;
+    opts.port_declaration.align_adaptive = true;
+    opts.port_declaration.section1_min_width = 10;
+    opts.port_declaration.section2_min_width = 11;
+    opts.port_declaration.section3_min_width = 12;
+    opts.port_declaration.section4_min_width = 13;
+    opts.port_declaration.section5_min_width = 14;
+
+    const std::string input =
+        "module memory_top;\n"
+        "input i_clk;\n"
+        "input i_rst_n;\n"
+        "input logic [1:0] i_data [7:0]; // input\n"
+        "input var byte i_data2;\n"
+        "input i_data3;\n"
+        "input i_dd;\n"
+        "input i_dd22222;\n"
+        "input dd22222;\n"
+        "input i_d33333;\n"
+        "input i_d44333, i_dd44321;\n"
+        "input i_d44334;\n"
+        "output logic unsigned [0:0] VDD, VSS; // output\n"
+        "output packet_tttttttttttttt [0:0] test, VSS; /* output */ // test\n"
+        "endmodule\n";
+
+    const std::string expected =
+        "module memory_top;\n"
+        "input                            i_clk                           ;\n"
+        "input                            i_rst_n                         ;\n"
+        "input     logic      [1:0]       i_data            [7:0]         ; // input\n"
+        "input     var byte               i_data2                         ;\n"
+        "input                            i_data3                         ;\n"
+        "input                            i_dd                            ;\n"
+        "input                            i_dd22222                       ;\n"
+        "input                            dd22222                         ;\n"
+        "input                            i_d33333                        ;\n"
+        "input                            i_d44333                        , i_dd44321                  ;\n"
+        "input                            i_d44334                        ;\n"
+        "output    logic unsigned [0:0]   VDD                             , VSS                        ; // output\n"
+        "output    packet_tttttttttttttt [0:0] test                       , VSS                        ; /* output */ // test\n"
+        "endmodule\n";
+
+    std::string formatted;
+    REQUIRE_NOTHROW(formatted = format_source(input, opts));
+    CHECK(formatted == expected);
+    CHECK(format_source(formatted, opts) == formatted);
+}
+
 TEST_CASE("formatter: var declarations inside typedef struct are aligned", "[formatter]") {
     FormatOptions opts;
     opts.var_declaration.align = true;

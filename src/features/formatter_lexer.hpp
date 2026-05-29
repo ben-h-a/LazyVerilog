@@ -62,8 +62,23 @@ public:
             // Slang comments and preprocessor directives can arrive as leading
             // trivia.  Promote comments to ordinary formatter tokens so every
             // pass sees one immutable linear token stream.
+            //
+            // Important: trivia does not always carry an explicit location, but
+            // it is stored immediately before the parent token in source order.
+            // Derive each trivia offset from the parent token offset instead of
+            // searching for the raw text.  Searching is ambiguous for repeated
+            // comments and, worse, can make cursor accounting drift so rendered
+            // output drops or duplicates non-whitespace text.
+            size_t token_pos = token.location().valid() ? token.location().offset()
+                                                        : find_from_cursor(token.rawText());
+            size_t trivia_total = 0;
             for (const auto& trivia : token.trivia())
-                collect_trivia(trivia);
+                trivia_total += trivia.getRawText().size();
+            size_t trivia_pos = token_pos >= trivia_total ? token_pos - trivia_total : cursor_;
+            for (const auto& trivia : token.trivia()) {
+                collect_trivia(trivia, trivia_pos);
+                trivia_pos += trivia.getRawText().size();
+            }
 
             if (disabled_) {
                 add_raw_until_token(token);
@@ -146,30 +161,18 @@ private:
         pending_indent_ = 0;
     }
 
-    void collect_trivia(const slang::parsing::Trivia& trivia) {
+    void collect_trivia(const slang::parsing::Trivia& trivia, size_t pos) {
         using TK = slang::parsing::TokenKind;
         using TV = slang::parsing::TriviaKind;
         std::string_view raw = trivia.getRawText();
         if (raw.empty()) return;
-        //
-        // Slang attaches comments that appear after a preprocessor directive
-        // (for example ``endif // FOO`) as leading trivia on the next real
-        // token.  Our directive handling below intentionally freezes the whole
-        // directive source line as one atomic token, including that trailing
-        // comment, so re-emitting the same trivia later would duplicate
-        // non-whitespace text and trip safe mode.
-        //
-        // Therefore trivia is only collectable if its raw text still appears at
-        // or after the formatter cursor.  If the cursor has already consumed it
-        // as part of an atomic directive or disabled passthrough chunk, the
-        // trivia is stale from the formatter's point of view and must be
-        // ignored.  This is a source-position bookkeeping check, not a syntax
-        // classification heuristic; syntax decisions still come from slang
-        // token kinds.
-        size_t found = source_.find(std::string(raw), cursor_);
-        if (found == std::string::npos)
+        if (pos + raw.size() <= cursor_)
             return;
-        size_t pos = found;
+        if (pos < cursor_) {
+            raw.remove_prefix(cursor_ - pos);
+            pos = cursor_;
+            if (raw.empty()) return;
+        }
 
         if (disabled_) {
             size_t end = pos + raw.size();

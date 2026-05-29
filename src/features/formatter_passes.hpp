@@ -164,6 +164,15 @@ inline int compact_width(const TokenStream& tokens, size_t first, size_t end) {
     return w;
 }
 
+inline int token_text_width(const TokenStream& tokens, size_t first, size_t end) {
+    int w = 0;
+    for (size_t i = first; i < end && i < tokens.size(); ++i) {
+        if (is_code_token(tokens[i]))
+            w += token_width(tokens[i]);
+    }
+    return w;
+}
+
 inline int canonical_space_between(const Tok& left, const Tok& right) {
     if (no_space_before(right.lex->kind) || no_space_after(left.lex->kind))
         return 0;
@@ -582,7 +591,10 @@ public:
                     if (tokens[j].lex->is_comment &&
                         tokens[j].immutable.comment.role == CommentRole::Trailing) {
                         t.mutable_.wrap.must_break_after = false;
+                        if (j > i + 1 && tokens[j - 1].lex->is_comment)
+                            tokens[j - 1].mutable_.wrap.must_break_after = false;
                         tokens[j].mutable_.wrap.must_break_after = true;
+                        continue;
                     }
                     break;
                 }
@@ -1392,8 +1404,201 @@ public:
         }
 
         if (opts_.port_declaration.align) {
+            // Non-ANSI port declarations live as ordinary statements after the
+            // module header, for example:
+            //
+            //   input logic [1:0] i_data [7:0];
+            //   output packet_t [0:0] test, VSS;
+            //
+            // They are not list items inside the module-header parentheses, so
+            // the ModulePorts list aligner below cannot own them.  Treat each
+            // declaration line as a five-section record:
+            //
+            //   direction | type/signing | packed dim | first name | unpacked dim / separator
+            //
+            // The target columns are derived only from TokenKind structure and
+            // formatter options.  We deliberately clear earlier declaration
+            // alignment for the line because the generic var-declaration path
+            // identifies the last identifier before ';' as the name, which is
+            // wrong for comma-separated ports (`a, b`) and creates the compact
+            // misalignment seen in memory_top.sv.
             for (const auto& ln : lines) {
-                if (ln.first == npos || !is_port_direction(tokens[ln.first].lex->kind))
+                if (ln.first == npos || !is_port_direction(tokens[ln.first].lex->kind) ||
+                    tokens[ln.first].immutable.syntax.paren_depth != 0)
+                    continue;
+
+                size_t semi = npos;
+                int pd = 0, bd = 0, brd = 0;
+                for (size_t k = ln.first + 1; k < ln.end; ++k) {
+                    if (!is_code_token(tokens[k])) continue;
+                    if (kind_is(tokens[k], TK::OpenParenthesis)) ++pd;
+                    else if (kind_is(tokens[k], TK::CloseParenthesis) && pd > 0) --pd;
+                    else if (kind_is(tokens[k], TK::OpenBracket)) ++bd;
+                    else if (kind_is(tokens[k], TK::CloseBracket) && bd > 0) --bd;
+                    else if (kind_is(tokens[k], TK::OpenBrace) || kind_is(tokens[k], TK::ApostropheOpenBrace)) ++brd;
+                    else if (kind_is(tokens[k], TK::CloseBrace) && brd > 0) --brd;
+                    if (pd == 0 && bd == 0 && brd == 0 && kind_is(tokens[k], TK::Semicolon)) {
+                        semi = k;
+                        break;
+                    }
+                }
+                if (semi == npos)
+                    continue;
+
+                for (size_t k = ln.first; k <= semi && k < tokens.size(); ++k) {
+                    tokens[k].mutable_.align.enabled = false;
+                    tokens[k].mutable_.align.target_column = -1;
+                }
+
+                auto previous_declarator_name = [&](size_t begin, size_t end) {
+                    int local_pd = 0, local_brd = 0;
+                    for (size_t n = end; n > begin; --n) {
+                        size_t k = n - 1;
+                        if (!is_code_token(tokens[k])) continue;
+                        if (kind_is(tokens[k], TK::CloseParenthesis)) ++local_pd;
+                        else if (kind_is(tokens[k], TK::OpenParenthesis) && local_pd > 0) --local_pd;
+                        else if (kind_is(tokens[k], TK::CloseBrace)) ++local_brd;
+                        else if ((kind_is(tokens[k], TK::OpenBrace) ||
+                                  kind_is(tokens[k], TK::ApostropheOpenBrace)) && local_brd > 0) --local_brd;
+                        if (local_pd != 0 || local_brd != 0)
+                            continue;
+
+                        // Skip unpacked dimensions that belong to the
+                        // declarator name rather than the type.
+                        if (kind_is(tokens[k], TK::CloseBracket)) {
+                            size_t open = tokens[k].immutable.syntax.matching_token;
+                            if (open != npos && open > begin && open < k)
+                                n = open + 1;
+                            continue;
+                        }
+                        if (is_identifier_like(tokens[k]))
+                            return k;
+                    }
+                    return npos;
+                };
+
+                size_t first_delim = semi;
+                bd = 0;
+                for (size_t k = ln.first + 1; k < semi; ++k) {
+                    if (!is_code_token(tokens[k])) continue;
+                    if (kind_is(tokens[k], TK::OpenBracket)) ++bd;
+                    else if (kind_is(tokens[k], TK::CloseBracket) && bd > 0) --bd;
+                    else if (bd == 0 && kind_is(tokens[k], TK::Comma)) {
+                        first_delim = k;
+                        break;
+                    }
+                }
+
+                size_t first_name = previous_declarator_name(ln.first + 1, first_delim);
+                if (first_name == npos)
+                    continue;
+
+                size_t type_first = next_code(tokens, ln.first + 1, first_name);
+                size_t packed_dim = npos;
+                for (size_t k = ln.first + 1; k < first_name; ++k) {
+                    if (kind_is(tokens[k], TK::OpenBracket)) {
+                        packed_dim = k;
+                        break;
+                    }
+                }
+                if (type_first != npos && packed_dim != npos && type_first >= packed_dim)
+                    type_first = npos;
+                if (type_first == first_name)
+                    type_first = npos;
+
+                size_t unpacked_dim = npos;
+                for (size_t k = first_name + 1; k < first_delim; ++k) {
+                    if (kind_is(tokens[k], TK::OpenBracket)) {
+                        unpacked_dim = k;
+                        break;
+                    }
+                }
+
+                const int base = tokens[ln.first].mutable_.indent.base_indent;
+                const int s1 = option_width(opts_.port_declaration.section1_min_width, opts_);
+                const int s2 = option_width(opts_.port_declaration.section2_min_width, opts_);
+                const int s3 = option_width(opts_.port_declaration.section3_min_width, opts_);
+                const int s4 = option_width(opts_.port_declaration.section4_min_width, opts_);
+                const int s5 = option_width(opts_.port_declaration.section5_min_width, opts_);
+
+                const int type_col = base + option_width(std::max(opts_.port_declaration.section1_min_width,
+                                                                   token_width(tokens[ln.first]) + 1), opts_);
+                const int packed_min_col = type_col + s2;
+                const int name_min_col = type_col + s2 + s3;
+                const int trailing_gap = opts_.tab_align ? 0 : 5;
+                const int unpacked_col = name_min_col + s4 + trailing_gap;
+                const int first_sep_col = unpacked_col + s5;
+
+                if (type_first != npos) {
+                    tokens[type_first].mutable_.align.enabled = true;
+                    tokens[type_first].mutable_.align.target_column = type_col;
+                }
+
+                int packed_col = packed_min_col;
+                if (packed_dim != npos) {
+                    if (type_first != npos) {
+                        int type_width = canonical_width(tokens, type_first, packed_dim);
+                        int type_end_col = type_col + type_width;
+                        if (is_identifier_like(tokens[type_first]) && type_width < s2)
+                            packed_col = type_end_col + 3;
+                        else
+                            packed_col = std::max(packed_col, type_end_col + 1);
+                    }
+                    tokens[packed_dim].mutable_.align.enabled = true;
+                    tokens[packed_dim].mutable_.align.target_column = packed_col;
+                }
+
+                int name_col = name_min_col;
+                if (packed_dim != npos) {
+                    size_t packed_close = tokens[packed_dim].immutable.syntax.matching_token;
+                    if (packed_close != npos && packed_close < first_name)
+                        name_col = std::max(name_col, packed_col + token_text_width(tokens, packed_dim, packed_close + 1) + 1);
+                }
+                tokens[first_name].mutable_.align.enabled = true;
+                tokens[first_name].mutable_.align.target_column = name_col;
+
+                if (unpacked_dim != npos) {
+                    tokens[unpacked_dim].mutable_.align.enabled = true;
+                    tokens[unpacked_dim].mutable_.align.target_column = unpacked_col;
+                }
+                tokens[first_delim].mutable_.align.enabled = true;
+                tokens[first_delim].mutable_.align.target_column = first_sep_col;
+
+                // Align any remaining comma-separated names after the first
+                // declarator.  Each subsequent name starts just after the
+                // previous comma; the terminating semicolon receives the same
+                // name-field width used by the configured section4/section5
+                // pair.
+                int next_name_col = first_sep_col + 2;
+                size_t item_begin = first_delim + 1;
+                while (first_delim != semi) {
+                    size_t delim = semi;
+                    bd = 0;
+                    for (size_t k = item_begin; k < semi; ++k) {
+                        if (!is_code_token(tokens[k])) continue;
+                        if (kind_is(tokens[k], TK::OpenBracket)) ++bd;
+                        else if (kind_is(tokens[k], TK::CloseBracket) && bd > 0) --bd;
+                        else if (bd == 0 && kind_is(tokens[k], TK::Comma)) {
+                            delim = k;
+                            break;
+                        }
+                    }
+                    size_t name = previous_declarator_name(item_begin, delim);
+                    if (name != npos) {
+                        tokens[name].mutable_.align.enabled = true;
+                        tokens[name].mutable_.align.target_column = next_name_col;
+                        tokens[delim].mutable_.align.enabled = true;
+                        tokens[delim].mutable_.align.target_column = next_name_col + s4 + s5;
+                    }
+                    first_delim = delim;
+                    item_begin = delim + 1;
+                    next_name_col = next_name_col + s4 + s5 + 2;
+                }
+            }
+
+            for (const auto& ln : lines) {
+                if (ln.first == npos || !is_port_direction(tokens[ln.first].lex->kind) ||
+                    tokens[ln.first].immutable.syntax.paren_depth == 0)
                     continue;
                 size_t dim = npos;
                 for (size_t k = ln.first + 1; k < ln.end; ++k) {
