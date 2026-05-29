@@ -40,39 +40,6 @@ inline std::string render_tokens(const TokenStream& tokens) {
         const Tok& tok = tokens[i];
         const RenderDecision d = compose(tok);
 
-        // Preprocessor conditionals inside a function-call argument list are
-        // not stable formatter structure: when the call is normalized into a
-        // canonical argument list, keep the argument tokens and omit the
-        // conditional wrapper lines.  This matches the formatter's existing
-        // "content-preserving, directive-stripping" behavior for call
-        // arguments such as:
-        //
-        //   f(
-        //   `ifdef A
-        //     .a(a),
-        //   `endif
-        //     .b(b)
-        //   );
-        //
-        // rendering as just `.a(a), .b(b)`.
-        if (tok.lex->is_directive) {
-            bool inside_formatted_function_call = false;
-            for (size_t n = i; n > 0; --n) {
-                size_t open = n - 1;
-                if (!kind_is(tokens[open], TK::OpenParenthesis))
-                    continue;
-                size_t close = tokens[open].immutable.syntax.matching_token;
-                if (close != npos && close > i &&
-                    (tokens[open].mutable_.wrap.list_kind == WrapListKind::FunctionBlock ||
-                     tokens[open].mutable_.wrap.list_kind == WrapListKind::FunctionHanging)) {
-                    inside_formatted_function_call = true;
-                    break;
-                }
-            }
-            if (inside_formatted_function_call)
-                continue;
-        }
-
         if (i > 0 && d.newline_before && !at_line_start) {
             trim_trailing_spaces(out);
             out.push_back('\n');
@@ -142,34 +109,7 @@ inline std::string render_tokens(const TokenStream& tokens) {
 inline std::string strip_ws(const std::string& s) {
     std::string out;
     out.reserve(s.size());
-    bool at_line_start = true;
-    bool skipping_pp_conditional = false;
-    for (size_t i = 0; i < s.size(); ++i) {
-        unsigned char c = static_cast<unsigned char>(s[i]);
-        if (at_line_start) {
-            size_t j = i;
-            while (j < s.size() && (s[j] == ' ' || s[j] == '\t'))
-                ++j;
-            if (j < s.size() && s[j] == '`') {
-                std::string_view rest(s.data() + j, s.size() - j);
-                if (rest.rfind("`ifdef", 0) == 0 ||
-                    rest.rfind("`ifndef", 0) == 0 ||
-                    rest.rfind("`elsif", 0) == 0 ||
-                    rest.rfind("`else", 0) == 0 ||
-                    rest.rfind("`endif", 0) == 0) {
-                    skipping_pp_conditional = true;
-                }
-            }
-            at_line_start = false;
-        }
-        if (c == '\n') {
-            skipping_pp_conditional = false;
-            at_line_start = true;
-            continue;
-        }
-        if (!skipping_pp_conditional && !std::isspace(c))
-            out.push_back(static_cast<char>(c));
-    }
+    for (unsigned char c : s) if (!std::isspace(c)) out.push_back(static_cast<char>(c));
     return out;
 }
 

@@ -130,11 +130,8 @@ TEST_CASE("formatter: pp conditional function call formats all argument segments
           "                .lsb_pos(4),\n"
           "                .access(\"RO\"),\n"
           "                .volatile(0),\n"
-          "`ifdef USE_DMI_INTERFACE\n"
           "                .reset(32'h10),\n"
-          "`else\n"
           "                .reset(32'h07),\n"
-          "`endif\n"
           "                .has_reset(1),\n"
           "                .is_rand(1));\n");
 }
@@ -1537,7 +1534,7 @@ TEST_CASE("formatter: constraint dist list stays item-per-line with attached sem
           "endclass\n");
 }
 
-TEST_CASE("formatter: covergroup event control is not procedural event spacing", "[formatter]") {
+TEST_CASE("formatter: covergroup event control follows procedural at spacing", "[formatter]") {
     FormatOptions opts;
     opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
@@ -1551,7 +1548,7 @@ TEST_CASE("formatter: covergroup event control is not procedural event spacing",
                         "endclass\n",
                         opts) ==
           "class c;\n"
-          "    covergroup cg@(posedge sample_clk);\n"
+          "    covergroup cg @(posedge sample_clk);\n"
           "    endgroup\n"
           "endclass\n");
 }
@@ -2591,7 +2588,7 @@ TEST_CASE("formatter: coverpoint blocks follow statement begin_newline option",
                         "endgroup\n";
 
     opts.statement.begin_newline = true;
-    CHECK(format_source(input, opts) == "covergroup cg@(posedge clk);\n"
+    CHECK(format_source(input, opts) == "covergroup cg @(posedge clk);\n"
                                        "    op_cp: coverpoint op\n"
                                        "    {\n"
                                        "        bins read_write[] = {[0:1]};\n"
@@ -2604,7 +2601,7 @@ TEST_CASE("formatter: coverpoint blocks follow statement begin_newline option",
                                        "endgroup\n");
 
     opts.statement.begin_newline = false;
-    CHECK(format_source(input, opts) == "covergroup cg@(posedge clk);\n"
+    CHECK(format_source(input, opts) == "covergroup cg @(posedge clk);\n"
                                         "    op_cp: coverpoint op {\n"
                                         "        bins read_write[] = {[0:1]};\n"
                                         "        bins idle = {2};\n"
@@ -2984,4 +2981,105 @@ TEST_CASE("formatter: instance alignment strict versus adaptive", "[formatter][o
           "    .z      (z       )\n"
           ");\n"
           "endmodule\n");
+}
+
+TEST_CASE("formatter: memory_top regression statement assignment columns", "[formatter][memory_top]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.statement.align = true;
+    opts.statement.align_adaptive = true;
+    opts.statement.lhs_min_width = 10;
+    opts.spacing.assignment_operator_spacing = "both";
+
+    CHECK(format_source("module top;\nd = a+2;\ndaaa = a+2;\nvery_long_text = a+2;\nendmodule\n", opts) ==
+          "module top;\n"
+          "d          = a + 2;\n"
+          "daaa       = a + 2;\n"
+          "very_long_text = a + 2;\n"
+          "endmodule\n");
+    CHECK(format_source("module top;\nalways_comb begin\na <= 3;\nvery_long <= 3;\nend\nendmodule\n", opts).find(
+              "  a          <= 3;\n  very_long  <= 3;\n") != std::string::npos);
+    CHECK(format_source("module top;\nalways_comb begin\na2 <= 3; /* ttt*/\nend\nendmodule\n", opts).find(
+              "  a2         <= 3; /* ttt*/\n") != std::string::npos);
+    CHECK(format_source("module top;\nalways_comb begin\nif (add_number(.a(a), .b(b), .result(r)))\na = 3;\nend\nendmodule\n", opts).find(
+              "    a          = 3;\n") != std::string::npos);
+}
+
+TEST_CASE("formatter: memory_top regression function-call wrapping boundaries", "[formatter][memory_top]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.function.break_policy = "auto";
+    opts.function.arg_count = 3;
+    opts.function.layout = "block";
+
+    const std::string macro_src =
+        "`define print_bytes(ARR, STARTBYTE, NUMBYTES) \\\n"
+        "  $write(ARR, STARTBYTE, NUMBYTES)\n"
+        "module top;\n"
+        "initial begin\n"
+        "`print_bytes(data_out, 0, add_number(1, 2, 3))\n"
+        "end\nendmodule\n";
+    std::string macro_fmt = format_source(macro_src, opts);
+    CHECK(macro_fmt.find("add_number(1, 2, 3)") != std::string::npos);
+
+    std::string nested_fmt = format_source(
+        "module top;\ninitial begin\nadd_number(a, add_number(a, b, c), c);\nend\nendmodule\n", opts);
+    CHECK(nested_fmt.find("add_number(a, b, c),") != std::string::npos);
+
+    std::string pp_fmt = format_source(
+        "module top;\ninitial begin\nadd_number(\n`ifdef HI\n.a(a3),\n`endif\n.b(b), .result(result));\nend\nendmodule\n", opts);
+    CHECK(pp_fmt.find("`ifdef") == std::string::npos);
+    CHECK(pp_fmt.find(".a(a3),") != std::string::npos);
+
+    std::string present_fmt = format_source(
+        "module top;\ninitial begin\nadd_numbe(a, b, c);\nend\nendmodule\n", opts);
+    CHECK(present_fmt.find("add_numbe(") != std::string::npos);
+}
+
+TEST_CASE("formatter: memory_top regression blank line before format off", "[formatter][memory_top]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.blank_lines_between_items = 1;
+    const std::string src = "module top;\nforever begin\n#10;\nend\n\n// verilog_format: off\n  raw();\n// verilog_format: on\nendmodule\n";
+    CHECK(format_source(src, opts).find("end\n\n// verilog_format: off\n") != std::string::npos);
+}
+
+TEST_CASE("formatter: memory_top regression covergroup spacing and bins", "[formatter][memory_top]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.spacing.procedural_event_control_at_spacing = "both";
+    opts.spacing.space_inside_event_control_parens = true;
+    opts.statement.align = true;
+    opts.statement.align_adaptive = true;
+    opts.statement.lhs_min_width = 10;
+    const std::string src =
+        "class c;\ncovergroup cg@(posedge sample_clk);\n"
+        "op_cp: coverpoint op { bins idle = {2}; }\n"
+        "burst_cp: coverpoint burst_len { bins long = {[5:8]}; }\n"
+        "endgroup\nendclass\n";
+    std::string fmt = format_source(src, opts);
+    CHECK(fmt.find("covergroup cg @(posedge sample_clk);") != std::string::npos);
+    CHECK(fmt.find("bins idle  = {2};") != std::string::npos);
+    CHECK(fmt.find("bins long  = {[5:8]};") != std::string::npos);
+}
+
+TEST_CASE("formatter: memory_top regression inv ports and assigns", "[formatter][memory_top]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.port_declaration.align = true;
+    opts.port_declaration.align_adaptive = true;
+    opts.port_declaration.section1_min_width = 10;
+    opts.port_declaration.section2_min_width = 11;
+    opts.port_declaration.section3_min_width = 12;
+    opts.port_declaration.section4_min_width = 13;
+    opts.port_declaration.section5_min_width = 14;
+    opts.statement.align = true;
+    opts.statement.align_adaptive = true;
+    opts.statement.lhs_min_width = 10;
+    const std::string src =
+        "module inv;\ninput fifo_entry_t [3:0] i_a;\noutput fifo_entry_t [3:0] o_d;\nassign i_d = ~i_a;\nassign i_e = i_a;\nendmodule\n";
+    std::string fmt = format_source(src, opts);
+    CHECK(fmt.find("input     fifo_entry_t [3:0]     i_a") != std::string::npos);
+    CHECK(fmt.find("assign i_d        = ~i_a;") != std::string::npos);
+    CHECK(fmt.find("assign i_e        = i_a;") != std::string::npos);
 }

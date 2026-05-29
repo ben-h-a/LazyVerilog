@@ -108,6 +108,35 @@ inline bool is_numeric(const Tok& t) {
            t.lex->kind == TK::TimeLiteral;
 }
 
+inline bool is_based_literal_body_piece(const Tok& t) {
+    // Slang lexes based literals by kind, not as one raw token.  For example:
+    //
+    //   12'h7c4  -> IntegerLiteral("12"), IntegerBase("'h"),
+    //               IntegerLiteral("7"), Identifier("c4")
+    //   4'b10xz  -> IntegerLiteral("4"),  IntegerBase("'b"),
+    //               IntegerLiteral("10"), Identifier("xz")
+    //
+    // The formatter must keep every body piece adjacent to the preceding
+    // IntegerBase; otherwise it can render illegal/changed literals such as
+    // `12'h7 c4`.
+    return t.lex->kind == TK::IntegerLiteral ||
+           t.lex->kind == TK::UnbasedUnsizedLiteral ||
+           t.lex->kind == TK::Identifier;
+}
+
+inline bool is_based_literal_continuation(const TokenStream& tokens, size_t idx) {
+    if (idx >= tokens.size() || !is_based_literal_body_piece(tokens[idx]))
+        return false;
+    for (size_t n = idx; n > 0; --n) {
+        size_t p = n - 1;
+        if (kind_is(tokens[p], TK::IntegerBase))
+            return true;
+        if (!is_based_literal_body_piece(tokens[p]))
+            return false;
+    }
+    return false;
+}
+
 inline bool is_identifier_like(const Tok& t) {
     return t.lex->kind == TK::Identifier || t.lex->kind == TK::SystemIdentifier ||
            t.lex->kind == TK::MacroUsage;
@@ -324,6 +353,65 @@ inline size_t find_header_keyword_before(const TokenStream& tokens, size_t open)
 }
 
 inline bool is_instance_port_open(const TokenStream& tokens, size_t open) {
+    auto follows_sv_item_boundary = [&](size_t prev) {
+        if (prev == npos)
+            return true;
+
+        // A module/interface instantiation is a module item / generate item.
+        // It can therefore appear after the usual item terminators and after a
+        // generate block opener:
+        //
+        //   foo u_foo (...);
+        //   begin
+        //     foo u_foo (...);
+        //   end
+        //
+        // It can also appear after a named generate block header.  In concrete
+        // token form the item boundary before `foo u_foo` is the label name in
+        //
+        //   begin : gen_label
+        //     foo u_foo (...);
+        //
+        // or the colon in a labeled generate item:
+        //
+        //   gen_label : foo u_foo (...);
+        //
+        // Accept those label forms as boundaries, but keep the check structural
+        // (TokenKind only) so we do not mistake arbitrary identifier pairs for
+        // instantiations.
+        if (kind_is(tokens[prev], TK::Semicolon) ||
+            kind_is(tokens[prev], TK::BeginKeyword) ||
+            kind_is(tokens[prev], TK::EndKeyword) ||
+            kind_is(tokens[prev], TK::GenerateKeyword) ||
+            kind_is(tokens[prev], TK::EndGenerateKeyword))
+            return true;
+
+        if (is_identifier_like(tokens[prev])) {
+            size_t colon = prev_code(tokens, prev);
+            size_t opener = colon == npos ? npos : prev_code(tokens, colon);
+            if (colon != npos && kind_is(tokens[colon], TK::Colon) &&
+                opener != npos &&
+                (kind_is(tokens[opener], TK::BeginKeyword) ||
+                 kind_is(tokens[opener], TK::ForkKeyword)))
+                return true;
+        }
+
+        if (kind_is(tokens[prev], TK::Colon)) {
+            size_t label = prev_code(tokens, prev);
+            size_t before_label = label == npos ? npos : prev_code(tokens, label);
+            if (label != npos && is_identifier_like(tokens[label]) &&
+                (before_label == npos ||
+                 kind_is(tokens[before_label], TK::Semicolon) ||
+                 kind_is(tokens[before_label], TK::BeginKeyword) ||
+                 kind_is(tokens[before_label], TK::EndKeyword) ||
+                 kind_is(tokens[before_label], TK::GenerateKeyword) ||
+                 kind_is(tokens[before_label], TK::EndGenerateKeyword)))
+                return true;
+        }
+
+        return false;
+    };
+
     size_t inst = prev_code(tokens, open);
     if (inst != npos && kind_is(tokens[inst], TK::CloseBracket)) {
         size_t br = tokens[inst].immutable.syntax.matching_token;
@@ -345,8 +433,7 @@ inline bool is_instance_port_open(const TokenStream& tokens, size_t open) {
     }
     if (mod == npos || !is_identifier_like(tokens[mod])) return false;
     size_t prev = prev_code(tokens, mod);
-    return prev == npos || kind_is(tokens[prev], TK::Semicolon) ||
-           kind_is(tokens[prev], TK::BeginKeyword) || kind_is(tokens[prev], TK::EndKeyword);
+    return follows_sv_item_boundary(prev);
 }
 
 // SyntaxPass is the early fact-freeze pass.  It writes SyntaxFacts,
@@ -781,6 +868,23 @@ public:
                 bool prev_is_end_or_brace = (i > 0 && (kind_is(tokens[i-1], TK::EndKeyword) || kind_is(tokens[i-1], TK::CloseBrace)));
                 if (!prev_is_end_or_brace)
                     t.mutable_.wrap.must_break_before = true;
+            }
+
+            // Any statement/block terminator that is followed by a same-line
+            // trailing comment should keep that comment attached and move the
+            // physical line break after the comment.  The semicolon path above
+            // handles ordinary statements, but EOF comments after final
+            // `endmodule` / `endclass` labels need the same treatment.
+            if (t.mutable_.wrap.must_break_after && !t.lex->is_comment) {
+                for (size_t j = i + 1; j < tokens.size(); ++j) {
+                    if (is_passthrough(tokens[j])) continue;
+                    if (tokens[j].lex->is_comment &&
+                        tokens[j].immutable.comment.role == CommentRole::Trailing) {
+                        t.mutable_.wrap.must_break_after = false;
+                        tokens[j].mutable_.wrap.must_break_after = true;
+                    }
+                    break;
+                }
             }
         }
 
@@ -2221,6 +2325,19 @@ public:
                 spaces = 1;
             // Empty positional argument: `, ,` — keep one space so the slot is visible
             if (kind_is(t, TK::Comma) && kind_is(L, TK::Comma)) spaces = 1;
+
+            // Slang represents based literals as multiple adjacent tokens.
+            // Preserve adjacency around the base marker and all following
+            // body chunks:
+            //
+            //   12 'h 7 c4  ->  12'h7c4
+            //   4  'b 10 xz ->  4'b10xz
+            //
+            // This rule is purely TokenKind-driven and therefore remains
+            // idempotent after the first formatting pass.
+            if ((kind_is(t, TK::IntegerBase) && kind_is(L, TK::IntegerLiteral)) ||
+                is_based_literal_continuation(tokens, i))
+                spaces = 0;
 
             // Unary ops: no space after.
             // Exception: `~ &a`, `~ |a`, `~ ^a` — tilde followed by a

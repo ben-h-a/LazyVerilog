@@ -50,8 +50,30 @@ public:
 
         while (true) {
             slang::parsing::Token token = lexer.lex();
-            if (token.kind == slang::parsing::TokenKind::EndOfFile)
+            if (token.kind == slang::parsing::TokenKind::EndOfFile) {
+                // Slang can attach trivia that appears after the final real
+                // token to the EOF token.  This matters for common end labels:
+                //
+                //   endmodule  // my_module
+                //
+                // If we break immediately on EOF, that trailing comment is
+                // never promoted into the formatter token stream and safe mode
+                // correctly reports a non-whitespace deletion.  EOF itself is
+                // not rendered, but its trivia must be collected first.
+                size_t token_pos = token.location().valid() ? token.location().offset()
+                                                            : source_.size();
+                token_pos = std::min(token_pos, source_.size());
+                size_t trivia_total = 0;
+                for (const auto& trivia : token.trivia())
+                    trivia_total += trivia.getRawText().size();
+                size_t trivia_pos = token_pos >= trivia_total ? token_pos - trivia_total : cursor_;
+                for (const auto& trivia : token.trivia()) {
+                    collect_trivia(trivia, trivia_pos);
+                    trivia_pos += trivia.getRawText().size();
+                }
+                consume_gap_to(source_.size());
                 break;
+            }
 
             // Skip tokens that are inside a multiline define block already
             // consumed as a single passthrough token.
