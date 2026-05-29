@@ -978,9 +978,32 @@ function void foo(
 
 Controls module header formatting.
 
-### `parameter_layout`
+### Module header imports and preprocessor includes
 
-How to lay out `#(...)` parameter lists when broken.
+SystemVerilog permits package imports inside a module/interface/program header before
+the optional parameter and port lists. The formatter treats each header import as its
+own clause: the module name stays on the first line, each `import ...::*;` line is
+indented one level, and the following `#(...)` parameter list or `(...)` port list
+starts after the import clause.
+
+If a parameter list contains a preprocessor directive such as `` `include ``, the
+parameter list is forced to multiline. The directive is treated as an opaque
+parameter-list item: the formatter keeps it on its own indented line, does not inspect
+the included file, and does not add or remove commas around the directive.
+
+```systemverilog
+module tb_top
+  import tb_top_pkg::*;
+#(
+  parameter int MAX_CYCLES = 2_000_000,
+  `include "el2_param.vh"
+)(
+  input bit core_clk
+);
+```
+
+
+### `parameter_layout`
 
 - `"block"` — parameters indented one level
 - `"hanging"` — parameters aligned to `#(`
