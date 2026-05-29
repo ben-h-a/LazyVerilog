@@ -131,6 +131,33 @@ inline bool is_covergroup_event_at(const TokenStream& tokens, size_t at) {
     return false;
 }
 
+inline bool is_inside_argument_list(const TokenStream& tokens, size_t idx) {
+    idx = std::min(idx, tokens.size());
+    for (size_t n = idx; n > 0; --n) {
+        size_t open = n - 1;
+        if (!kind_is(tokens[open], TK::OpenParenthesis))
+            continue;
+        size_t close = tokens[open].immutable.syntax.matching_token;
+        if (close != npos && close > idx && tokens[open].immutable.topology.starts_argument_list)
+            return true;
+    }
+    return false;
+}
+
+inline bool is_nested_argument_list_open(const TokenStream& tokens, size_t open) {
+    if (open >= tokens.size() || !kind_is(tokens[open], TK::OpenParenthesis))
+        return false;
+    for (size_t n = open; n > 0; --n) {
+        size_t parent = n - 1;
+        if (!kind_is(tokens[parent], TK::OpenParenthesis))
+            continue;
+        size_t close = tokens[parent].immutable.syntax.matching_token;
+        if (close != npos && close > open && tokens[parent].immutable.topology.starts_argument_list)
+            return true;
+    }
+    return false;
+}
+
 inline size_t prev_code(const TokenStream& tokens, size_t before) {
     before = std::min(before, tokens.size());
     for (size_t n = before; n > 0; --n) {
@@ -505,6 +532,25 @@ struct MacroClassifier {
     }
 };
 
+inline std::string extract_define_name(const std::string& raw_text) {
+    constexpr std::string_view define_prefix = "`define";
+    if (raw_text.rfind(define_prefix, 0) != 0)
+        return {};
+    size_t pos = define_prefix.size();
+    while (pos < raw_text.size() && std::isspace(static_cast<unsigned char>(raw_text[pos])))
+        ++pos;
+    if (pos >= raw_text.size())
+        return {};
+    if (raw_text[pos] == '`')
+        ++pos;
+    size_t begin = pos;
+    while (pos < raw_text.size() &&
+           (std::isalnum(static_cast<unsigned char>(raw_text[pos])) ||
+            raw_text[pos] == '_' || raw_text[pos] == '$'))
+        ++pos;
+    return raw_text.substr(begin, pos - begin);
+}
+
 // MacroPass owns MacroMetadata.  It never changes wrapping or spacing directly;
 // it only marks regions/macros that downstream passes must treat conservatively.
 class MacroPass final : public IFormatPass {
@@ -513,6 +559,22 @@ public:
     const char* name() const override { return "macro"; }
     void run(TokenStream& tokens) override {
         MacroClassifier mc(opts_.macros);
+        std::unordered_set<std::string> local_whitespace_sensitive;
+        for (const auto& t : tokens) {
+            if (!t.lex->is_directive)
+                continue;
+            // Multiline `define bodies are frozen by the lexer as one
+            // whitespace-sensitive directive token.  A macro whose replacement
+            // text spans physical lines often relies on argument text being
+            // substituted exactly as written; remember its name so nested
+            // function calls inside later invocations are not independently
+            // exploded by the function-call wrapping pass.
+            if (t.lex->is_whitespace_sensitive) {
+                std::string name = extract_define_name(t.lex->text);
+                if (!name.empty())
+                    local_whitespace_sensitive.insert(std::move(name));
+            }
+        }
         for (auto& t : tokens) {
             if (t.lex->is_whitespace_sensitive) {
                 t.mutable_.macro.passthrough = true;
@@ -521,10 +583,22 @@ public:
             } else if (t.lex->is_directive) {
                 t.mutable_.macro.suppress_alignment = true;
             } else if (t.lex->kind == TK::MacroUsage) {
-                if (mc.is_whitespace_sensitive(t.lex->text)) {
-                    t.mutable_.macro.passthrough = true;
+                const std::string macro_name = MacroClassifier::extract_name(t.lex->text);
+                const bool whitespace_sensitive =
+                    mc.is_whitespace_sensitive(t.lex->text) ||
+                    local_whitespace_sensitive.count(macro_name) > 0;
+                if (whitespace_sensitive) {
                     t.mutable_.macro.suppress_alignment = true;
-                    t.mutable_.macro.suppress_wrapping = true;
+                    size_t open = next_code(tokens, &t - tokens.data() + 1, tokens.size());
+                    if (open != npos && kind_is(tokens[open], TK::OpenParenthesis)) {
+                        size_t close = tokens[open].immutable.syntax.matching_token;
+                        if (close != npos) {
+                            for (size_t k = open + 1; k < close && k < tokens.size(); ++k) {
+                                tokens[k].mutable_.macro.suppress_alignment = true;
+                                tokens[k].mutable_.macro.suppress_wrapping = true;
+                            }
+                        }
+                    }
                 } else {
                     t.mutable_.macro.suppress_alignment = true;
                     MacroRole role = mc.classify(t.lex->text);
@@ -854,6 +928,8 @@ public:
         for (size_t open = 0; open < tokens.size(); ++open) {
             if (!kind_is(tokens[open], TK::OpenParenthesis) && !kind_is(tokens[open], TK::OpenBrace))
                 continue;
+            if (tokens[open].mutable_.macro.suppress_wrapping)
+                continue;
             size_t close = tokens[open].immutable.syntax.matching_token;
             if (close == npos || close >= tokens.size())
                 continue;
@@ -942,6 +1018,8 @@ public:
             }
 
             if (tokens[open].immutable.topology.starts_argument_list) {
+                if (is_nested_argument_list_open(tokens, open))
+                    continue;
                 bool do_break = false;
                 if (opts_.function.break_policy == "always")
                     do_break = items.size() > 1;
@@ -1202,7 +1280,9 @@ public:
             size_t first{npos};
             size_t end{npos};
             size_t assign_idx{npos};
+            size_t lhs_first{npos};
             int    lhs_width{0};
+            int    lhs_prefix_width{0};
             int    indent{0};
             bool   disabled{false};
         };
@@ -1248,6 +1328,22 @@ public:
             // Find assignment op at depth 0
             int pd = 0, bd = 0, brd = 0;
             size_t scan_start = (cur_first != npos ? cur_first : cur_start);
+            if (scan_start < end_idx && kind_is(tokens[scan_start], TK::AssignKeyword)) {
+                size_t after_assign = next_code(tokens, scan_start + 1, end_idx);
+                if (after_assign != npos) {
+                    // Continuous assignments have a fixed `assign ` prefix.
+                    // Align the net LHS after that prefix to the same
+                    // lhs_min_width rule used by procedural assignments:
+                    //
+                    //   lhs_min_width = 10, spacing = both
+                    //   assign d          = a;
+                    //          ^^^^^^^^^^^ 10-column LHS field + one
+                    //                       pre-operator space
+                    ln.lhs_prefix_width = canonical_width(tokens, scan_start, after_assign) + 1;
+                    scan_start = after_assign;
+                }
+            }
+            ln.lhs_first = scan_start;
             for (size_t k = scan_start; k < end_idx; ++k) {
                 auto& tok = tokens[k];
                 if (is_passthrough(tok)) { ln.disabled = true; continue; }
@@ -1295,6 +1391,7 @@ public:
         if (opts_.statement.align) {
             // Group consecutive alignable lines and align
             const bool space_before = wants_before(opts_.spacing.assignment_operator_spacing);
+            const int op_gap = space_before ? 1 : 0;
 
             size_t li = 0;
             while (li < lines.size()) {
@@ -1305,21 +1402,25 @@ public:
                 while (j < lines.size() && !lines[j].disabled && lines[j].assign_idx != npos && lines[j].indent == base_indent)
                     ++j;
                 if (j - li >= 2) {
-                    int max_lhs = opts_.statement.lhs_min_width;
+                    int group_lhs = opts_.statement.lhs_min_width;
                     for (size_t k = li; k < j; ++k)
-                        max_lhs = std::max(max_lhs, lines[k].lhs_width);
-                    int target = opts_.tab_align
-                        ? snap_to_grid(max_lhs + 1, opts_.indent_size)
-                        : max_lhs + (opts_.statement.align_adaptive ? 0 : 1);
+                        group_lhs = std::max(group_lhs, lines[k].lhs_width);
                     for (size_t k = li; k < j; ++k) {
+                        const int lhs_field = opts_.statement.align_adaptive
+                            ? std::max(opts_.statement.lhs_min_width, lines[k].lhs_width)
+                            : group_lhs;
+                        const int target = opts_.tab_align
+                            ? snap_to_grid(lines[k].lhs_prefix_width + lhs_field + op_gap, opts_.indent_size)
+                            : lines[k].lhs_prefix_width + lhs_field + op_gap;
                         tokens[lines[k].assign_idx].mutable_.align.enabled = true;
                         tokens[lines[k].assign_idx].mutable_.align.target_column =
                             lines[k].indent + target;
                     }
                 } else if (j - li == 1 && opts_.statement.lhs_min_width > 0) {
+                    const int lhs_field = std::max(opts_.statement.lhs_min_width, lines[li].lhs_width);
                     int target = opts_.tab_align
-                        ? snap_to_grid(lines[li].lhs_width + 1, opts_.indent_size)
-                        : opts_.statement.lhs_min_width + (space_before ? 2 : 2);
+                        ? snap_to_grid(lines[li].lhs_prefix_width + lhs_field + op_gap, opts_.indent_size)
+                        : lines[li].lhs_prefix_width + lhs_field + op_gap;
                     tokens[lines[li].assign_idx].mutable_.align.enabled = true;
                     tokens[lines[li].assign_idx].mutable_.align.target_column =
                         lines[li].indent + target;
@@ -1821,7 +1922,10 @@ public:
                     tokens[unpacked_dim].mutable_.align.target_column = unpacked_col;
                 }
                 tokens[first_delim].mutable_.align.enabled = true;
-                tokens[first_delim].mutable_.align.target_column = first_sep_col;
+                tokens[first_delim].mutable_.align.target_column =
+                    (first_delim == semi && unpacked_dim == npos && packed_dim != npos)
+                        ? (name_col + s4 + s5)
+                        : first_sep_col;
 
                 // Align any remaining comma-separated names after the first
                 // declarator.  Each subsequent name starts just after the
@@ -2237,8 +2341,6 @@ public:
             // etc. get the event-control spacing applied.
             if (kind_is(t, TK::At)) {
                 bool standalone = kind_is(L, TK::Semicolon);
-                if (is_covergroup_event_at(tokens, i))
-                    standalone = true;
                 spaces = (!standalone && wants_before(opts_.spacing.procedural_event_control_at_spacing)) ? 1 : 0;
             }
             if (kind_is(L, TK::At)) {

@@ -424,12 +424,25 @@ a           = 1;
 data        = 2;
 result      = 3;
 very_long_text  = 4;
+```
 
 ---
 
 ### `lhs_min_width`
 
-Minimum character width of the left-hand side column before the assignment operator when `align` is `true`.
+Minimum character width of the left-hand side field when `align` is `true`.
+The rendered operator column also includes the configured pre-operator space
+from `assignment_operator_spacing`. For example, with `lhs_min_width = 10`:
+
+```systemverilog
+// assignment_operator_spacing = "both"
+assign d          = a+2;
+a          += 1;
+
+// assignment_operator_spacing = "before"
+assign d         = a+2;
+a         += 1;
+```
 
 ```toml
 [format.statement]
