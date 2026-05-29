@@ -151,7 +151,25 @@ private:
         using TV = slang::parsing::TriviaKind;
         std::string_view raw = trivia.getRawText();
         if (raw.empty()) return;
-        size_t pos = find_from_cursor(raw);
+        //
+        // Slang attaches comments that appear after a preprocessor directive
+        // (for example ``endif // FOO`) as leading trivia on the next real
+        // token.  Our directive handling below intentionally freezes the whole
+        // directive source line as one atomic token, including that trailing
+        // comment, so re-emitting the same trivia later would duplicate
+        // non-whitespace text and trip safe mode.
+        //
+        // Therefore trivia is only collectable if its raw text still appears at
+        // or after the formatter cursor.  If the cursor has already consumed it
+        // as part of an atomic directive or disabled passthrough chunk, the
+        // trivia is stale from the formatter's point of view and must be
+        // ignored.  This is a source-position bookkeeping check, not a syntax
+        // classification heuristic; syntax decisions still come from slang
+        // token kinds.
+        size_t found = source_.find(std::string(raw), cursor_);
+        if (found == std::string::npos)
+            return;
+        size_t pos = found;
 
         if (disabled_) {
             size_t end = pos + raw.size();

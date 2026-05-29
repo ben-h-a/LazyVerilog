@@ -46,8 +46,7 @@ inline std::string render_tokens(const TokenStream& tokens) {
         if (d.passthrough) {
             std::string_view text(tok.lex->text);
             bool after_format_off_comment =
-                i > 0 && tokens[i - 1].lex->is_comment &&
-                tokens[i - 1].lex->text.find("off") != std::string::npos;
+                i > 0 && tokens[i - 1].lex->is_comment && d.passthrough;
             if (after_format_off_comment && at_line_start && !text.empty() && text.front() == '\n' &&
                 (text.size() == 1 || text[1] != '\n'))
                 text.remove_prefix(1);
