@@ -161,6 +161,109 @@ endmodule
           "**i_data** — *port*\n\n---\n\n```\ninput logic [1:0] [7:0]\n```");
 }
 
+TEST_CASE("hover: expression lookup stays in current module scope", "[hover]") {
+    Analyzer analyzer;
+    const std::string uri = "file:///tmp/hover_scope_duplicate_names.sv";
+    const std::string text = R"(
+typedef logic [7:0] fifo_entry_t;
+
+module memory_top;
+    logic [3:0] o_d;
+    logic [3:0] sink;
+    assign sink = o_d;
+endmodule
+
+module inv(
+    i_a, o_d
+);
+input  fifo_entry_t [3:0] i_a;
+output fifo_entry_t [3:0] o_d;
+endmodule
+)";
+    analyzer.open(uri, text);
+
+    const auto offset = text.find("o_d;\nendmodule");
+    REQUIRE(offset != std::string::npos);
+
+    int line = 0;
+    int col = 0;
+    for (size_t i = 0; i < offset; ++i) {
+        if (text[i] == '\n') {
+            ++line;
+            col = 0;
+        } else {
+            ++col;
+        }
+    }
+
+    lsTextDocumentPositionParams params;
+    params.textDocument.uri.raw_uri_ = uri;
+    params.position = lsPosition(line, col);
+
+    auto hover = provide_hover(analyzer, params);
+    REQUIRE(hover.has_value());
+    REQUIRE(hover->contents.second.has_value());
+
+    // Regression for demo/memory_top.sv:
+    //
+    //   memory_top declares a local signal named o_d.
+    //   inv declares a port with the same name later in the same file.
+    //
+    // Hover used to take a SyntaxIndex fast path that searched ports by name
+    // without checking the current module scope, so hovering memory_top.o_d
+    // displayed inv.o_d.  Hover should resolve through definition_of() first so
+    // the current module's declaration wins.
+    CHECK(hover->contents.second->value ==
+          "**o_d** — *variable*\n\n---\n\n```\nlogic [3:0]\n```");
+}
+
+TEST_CASE("hover: duplicate port names prefer current module declaration", "[hover]") {
+    Analyzer analyzer;
+    const std::string uri = "file:///tmp/hover_scope_duplicate_ports.sv";
+    const std::string text = R"(
+module first(
+    o_d
+);
+output logic [9:0] o_d;
+endmodule
+
+module second(
+    o_d
+);
+output logic [3:0] o_d;
+endmodule
+)";
+    analyzer.open(uri, text);
+
+    const auto offset = text.find("o_d;\nendmodule");
+    REQUIRE(offset != std::string::npos);
+
+    int line = 0;
+    int col = 0;
+    for (size_t i = 0; i < offset; ++i) {
+        if (text[i] == '\n') {
+            ++line;
+            col = 0;
+        } else {
+            ++col;
+        }
+    }
+
+    lsTextDocumentPositionParams params;
+    params.textDocument.uri.raw_uri_ = uri;
+    params.position = lsPosition(line, col);
+
+    auto hover = provide_hover(analyzer, params);
+    REQUIRE(hover.has_value());
+    REQUIRE(hover->contents.second.has_value());
+
+    // This catches the broader version of the same scope bug: duplicate port
+    // names in different modules must not be resolved by the first name-only
+    // SyntaxIndex hit.
+    CHECK(hover->contents.second->value ==
+          "**o_d** — *port*\n\n---\n\n```\noutput logic [9:0]\n```");
+}
+
 TEST_CASE("hover: resolves instance module names through extra files", "[hover]") {
     const auto path = std::filesystem::temp_directory_path() / "lazyverilog_hover_child.sv";
     {

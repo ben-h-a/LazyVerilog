@@ -1250,30 +1250,6 @@ std::optional<SymbolInfo> Analyzer::symbol_at(const std::string& uri, int line, 
             .name = target.name, .kind = "macro", .detail = "(empty)", .line = line, .col = col};
     }
 
-    for (const auto& m : idx.modules) {
-        if (m.name == ident)
-            return SymbolInfo{.name = ident,
-                              .kind = "module",
-                              .detail = "module",
-                              .doc = module_doc_from_entry(m),
-                              .line = m.line,
-                              .col = m.col};
-        for (const auto& p : m.ports)
-            if (p.name == ident)
-                return SymbolInfo{.name = ident,
-                                  .kind = "port",
-                                  .detail = p.direction + (p.type.empty() ? "" : " " + p.type),
-                                  .line = p.line,
-                                  .col = p.col};
-    }
-    for (const auto& inst : idx.instances)
-        if (inst.instance_name == ident)
-            return SymbolInfo{.name = ident,
-                              .kind = "instance",
-                              .detail = inst.module_name,
-                              .line = inst.line,
-                              .col = 0};
-
     auto definition = definition_of(uri, line, col);
     if (definition) {
         std::string name = target.name.empty() ? ident : target.name;
