@@ -1093,11 +1093,12 @@ TEST_CASE("formatter: leading interstitial call comment moves with argument",
                                            "endmodule\n",
                                            opts);
     CHECK(once == "module top;\n"
-                  "initial foo(\n"
-                  "            a,\n"
-                  "            /*test*/ b,\n"
-                  "            c\n"
-                  "        );\n"
+                  "initial\n"
+                  "    foo(\n"
+                  "        a,\n"
+                  "        /*test*/ b,\n"
+                  "        c\n"
+                  "    );\n"
                   "endmodule\n");
     CHECK(format_source(once, opts) == once);
 }
@@ -2311,7 +2312,8 @@ TEST_CASE("formatter: event control and for semicolon spacing options", "[format
     CHECK(format_source("module top;\nalways@(posedge clk) q <= d;\n@(posedge clk);\nfor(i = 0;i < "
                         "N;i++) a = b;\nendmodule\n",
                         opts) == "module top;\n"
-                                 "always @ ( posedge clk ) q <= d;\n"
+                                 "always @ ( posedge clk )\n"
+                                 "  q <= d;\n"
                                  "@(posedge clk);\n"
                                  "for (i = 0 ; i < N ; i++)\n"
                                  "  a = b;\n"
@@ -2720,19 +2722,19 @@ TEST_CASE("formatter: assignment operator spacing supports every mode", "[format
 
     opts.spacing.assignment_operator_spacing = "none";
     CHECK(format_source("module top;\nassign a = b;\nalways_ff q <= d;\nendmodule\n", opts) ==
-          "module top;\nassign a=b;\nalways_ff q<=d;\nendmodule\n");
+          "module top;\nassign a=b;\nalways_ff\n  q<=d;\nendmodule\n");
 
     opts.spacing.assignment_operator_spacing = "before";
     CHECK(format_source("module top;\nassign a = b;\nalways_ff q <= d;\nendmodule\n", opts) ==
-          "module top;\nassign a =b;\nalways_ff q <=d;\nendmodule\n");
+          "module top;\nassign a =b;\nalways_ff\n  q <=d;\nendmodule\n");
 
     opts.spacing.assignment_operator_spacing = "after";
     CHECK(format_source("module top;\nassign a = b;\nalways_ff q <= d;\nendmodule\n", opts) ==
-          "module top;\nassign a= b;\nalways_ff q<= d;\nendmodule\n");
+          "module top;\nassign a= b;\nalways_ff\n  q<= d;\nendmodule\n");
 
     opts.spacing.assignment_operator_spacing = "both";
     CHECK(format_source("module top;\nassign a=b;\nalways_ff q<=d;\nendmodule\n", opts) ==
-          "module top;\nassign a = b;\nalways_ff q <= d;\nendmodule\n");
+          "module top;\nassign a = b;\nalways_ff\n  q <= d;\nendmodule\n");
 }
 
 TEST_CASE("formatter: binary operator spacing supports every mode", "[formatter][options]") {
@@ -2800,19 +2802,19 @@ TEST_CASE("formatter: procedural event control at spacing supports all modes", "
 
     opts.spacing.procedural_event_control_at_spacing = "none";
     CHECK(format_source("module top;\nalways @ (posedge clk) q <= d;\nendmodule\n", opts) ==
-          "module top;\nalways@(posedge clk) q <= d;\nendmodule\n");
+          "module top;\nalways@(posedge clk)\n  q <= d;\nendmodule\n");
 
     opts.spacing.procedural_event_control_at_spacing = "after";
     CHECK(format_source("module top;\nalways@(posedge clk) q <= d;\nendmodule\n", opts) ==
-          "module top;\nalways@ (posedge clk) q <= d;\nendmodule\n");
+          "module top;\nalways@ (posedge clk)\n  q <= d;\nendmodule\n");
 
     opts.spacing.procedural_event_control_at_spacing = "before";
     CHECK(format_source("module top;\nalways@(posedge clk) q <= d;\nendmodule\n", opts) ==
-          "module top;\nalways @(posedge clk) q <= d;\nendmodule\n");
+          "module top;\nalways @(posedge clk)\n  q <= d;\nendmodule\n");
 
     opts.spacing.procedural_event_control_at_spacing = "both";
     CHECK(format_source("module top;\nalways@(posedge clk) q <= d;\nendmodule\n", opts) ==
-          "module top;\nalways @ (posedge clk) q <= d;\nendmodule\n");
+          "module top;\nalways @ (posedge clk)\n  q <= d;\nendmodule\n");
 }
 
 TEST_CASE("formatter: function call spacing options work without forced line breaks", "[formatter][options]") {
@@ -2836,12 +2838,12 @@ TEST_CASE("formatter: function call auto policy breaks by line length and arg co
     opts.function.line_length = 24;
 
     CHECK(format_source("module top;\ninitial result = very_long_function_name(alpha, beta);\nendmodule\n", opts) ==
-          "module top;\ninitial result = very_long_function_name(\n                     alpha,\n                     beta\n                 );\nendmodule\n");
+          "module top;\ninitial\n    result = very_long_function_name(\n                 alpha,\n                 beta\n             );\nendmodule\n");
 
     opts.function.line_length = 200;
     opts.function.arg_count = 3;
     CHECK(format_source("module top;\ninitial result = short_name(a, b, c);\nendmodule\n", opts) ==
-          "module top;\ninitial result = short_name(\n                     a,\n                     b,\n                     c\n                 );\nendmodule\n");
+          "module top;\ninitial\n    result = short_name(\n                 a,\n                 b,\n                 c\n             );\nendmodule\n");
 }
 
 TEST_CASE("formatter: function declaration block and hanging layouts", "[formatter][options]") {

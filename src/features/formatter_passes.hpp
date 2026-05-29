@@ -79,6 +79,11 @@ inline bool is_single_stmt_control(TK k) {
     return k == TK::IfKeyword || k == TK::ForKeyword || k == TK::ForeachKeyword ||
            k == TK::WhileKeyword || k == TK::RepeatKeyword;
 }
+inline bool is_procedural_block_keyword(TK k) {
+    return k == TK::InitialKeyword || k == TK::FinalKeyword ||
+           k == TK::AlwaysKeyword || k == TK::AlwaysCombKeyword ||
+           k == TK::AlwaysFFKeyword || k == TK::AlwaysLatchKeyword;
+}
 inline bool is_unary_op(TK k) {
     return k == TK::Tilde || k == TK::Exclamation ||
            k == TK::TildeAnd || k == TK::TildeOr || k == TK::TildeXor || k == TK::XorTilde ||
@@ -216,6 +221,118 @@ inline size_t next_code(const TokenStream& tokens, size_t first, size_t end) {
     for (size_t i = first; i < end; ++i)
         if (is_code_token(tokens[i]))
             return i;
+    return npos;
+}
+
+inline size_t procedural_body_start(const TokenStream& tokens, size_t proc) {
+    if (proc >= tokens.size() || !is_procedural_block_keyword(tokens[proc].lex->kind))
+        return npos;
+
+    size_t cur = next_code(tokens, proc + 1, tokens.size());
+    if (cur == npos)
+        return npos;
+
+    // always / always_ff can be followed by an event control.  Skip the common
+    // forms `@(...)`, `@*`, `@ name`, and delay controls.  The body is the first
+    // statement token after the timing control.
+    if (kind_is(tokens[cur], TK::At) || kind_is(tokens[cur], TK::Hash)) {
+        size_t after_control = next_code(tokens, cur + 1, tokens.size());
+        if (after_control == npos)
+            return npos;
+        if ((kind_is(tokens[after_control], TK::OpenParenthesis) ||
+             kind_is(tokens[after_control], TK::OpenBrace)) &&
+            tokens[after_control].immutable.syntax.matching_token != npos) {
+            cur = next_code(tokens, tokens[after_control].immutable.syntax.matching_token + 1,
+                            tokens.size());
+        } else {
+            cur = next_code(tokens, after_control + 1, tokens.size());
+        }
+    }
+    return cur;
+}
+
+inline size_t simple_statement_end_from(const TokenStream& tokens, size_t body);
+
+inline size_t begin_end_statement_end_from(const TokenStream& tokens, size_t begin_idx) {
+    int depth = 0;
+    for (size_t i = begin_idx; i < tokens.size(); ++i) {
+        if (!is_code_token(tokens[i]))
+            continue;
+        if (kind_is(tokens[i], TK::BeginKeyword))
+            ++depth;
+        else if (kind_is(tokens[i], TK::EndKeyword)) {
+            if (depth > 0)
+                --depth;
+            if (depth == 0)
+                return i;
+        }
+    }
+    return npos;
+}
+
+inline size_t skip_leading_timing_control(const TokenStream& tokens, size_t first) {
+    size_t cur = first;
+    while (cur != npos && cur < tokens.size() &&
+           (kind_is(tokens[cur], TK::Hash) || kind_is(tokens[cur], TK::At))) {
+        size_t arg = next_code(tokens, cur + 1, tokens.size());
+        if (arg == npos)
+            return npos;
+        if ((kind_is(tokens[arg], TK::OpenParenthesis) ||
+             kind_is(tokens[arg], TK::OpenBrace)) &&
+            tokens[arg].immutable.syntax.matching_token != npos) {
+            cur = next_code(tokens, tokens[arg].immutable.syntax.matching_token + 1,
+                            tokens.size());
+        } else {
+            cur = next_code(tokens, arg + 1, tokens.size());
+        }
+    }
+    return cur;
+}
+
+inline size_t simple_statement_end_from(const TokenStream& tokens, size_t body) {
+    if (body == npos || body >= tokens.size())
+        return npos;
+
+    if (kind_is(tokens[body], TK::BeginKeyword))
+        return begin_end_statement_end_from(tokens, body);
+
+    if (kind_is(tokens[body], TK::IfKeyword)) {
+        size_t cond_open = next_code(tokens, body + 1, tokens.size());
+        if (cond_open == npos || !kind_is(tokens[cond_open], TK::OpenParenthesis) ||
+            tokens[cond_open].immutable.syntax.matching_token == npos)
+            return npos;
+        size_t then_body = next_code(tokens, tokens[cond_open].immutable.syntax.matching_token + 1,
+                                     tokens.size());
+        size_t then_end = simple_statement_end_from(tokens, then_body);
+        if (then_end == npos)
+            return npos;
+        size_t maybe_else = next_code(tokens, then_end + 1, tokens.size());
+        if (maybe_else != npos && kind_is(tokens[maybe_else], TK::ElseKeyword)) {
+            size_t else_body = next_code(tokens, maybe_else + 1, tokens.size());
+            size_t else_end = simple_statement_end_from(tokens, else_body);
+            return else_end == npos ? then_end : else_end;
+        }
+        return then_end;
+    }
+
+    if (kind_is(tokens[body], TK::ForeverKeyword)) {
+        size_t nested = skip_leading_timing_control(tokens, next_code(tokens, body + 1, tokens.size()));
+        return nested == npos ? npos : simple_statement_end_from(tokens, nested);
+    }
+
+    int pd = 0, bd = 0, brd = 0;
+    for (size_t i = body; i < tokens.size(); ++i) {
+        if (!is_code_token(tokens[i]))
+            continue;
+        if (kind_is(tokens[i], TK::OpenParenthesis)) ++pd;
+        else if (kind_is(tokens[i], TK::CloseParenthesis) && pd > 0) --pd;
+        else if (kind_is(tokens[i], TK::OpenBracket)) ++bd;
+        else if (kind_is(tokens[i], TK::CloseBracket) && bd > 0) --bd;
+        else if (kind_is(tokens[i], TK::OpenBrace) || kind_is(tokens[i], TK::ApostropheOpenBrace)) ++brd;
+        else if (kind_is(tokens[i], TK::CloseBrace) && brd > 0) --brd;
+        if (pd == 0 && bd == 0 && brd == 0 && kind_is(tokens[i], TK::Semicolon))
+            return i;
+    }
     return npos;
 }
 
@@ -1064,6 +1181,27 @@ public:
             return false;
         };
 
+        // Precompute whether an opening parenthesis is nested inside another
+        // argument-list parenthesis.  Calling is_nested_argument_list_open()
+        // used to scan backward from each function-call open, which is
+        // quadratic on generated files with thousands of calls.
+        std::vector<bool> nested_argument_open(tokens.size(), false);
+        std::vector<size_t> argument_stack;
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            if (!is_code_token(tokens[i]))
+                continue;
+            if (kind_is(tokens[i], TK::OpenParenthesis)) {
+                nested_argument_open[i] = !argument_stack.empty();
+                if (tokens[i].immutable.topology.starts_argument_list)
+                    argument_stack.push_back(i);
+            } else if (kind_is(tokens[i], TK::CloseParenthesis) &&
+                       tokens[i].immutable.syntax.matching_token != npos) {
+                size_t open = tokens[i].immutable.syntax.matching_token;
+                if (!argument_stack.empty() && argument_stack.back() == open)
+                    argument_stack.pop_back();
+            }
+        }
+
         for (size_t open = 0; open < tokens.size(); ++open) {
             if (!kind_is(tokens[open], TK::OpenParenthesis) && !kind_is(tokens[open], TK::OpenBrace))
                 continue;
@@ -1071,9 +1209,6 @@ public:
                 continue;
             size_t close = tokens[open].immutable.syntax.matching_token;
             if (close == npos || close >= tokens.size())
-                continue;
-            auto items = top_level_list_items(tokens, open + 1, close);
-            if (items.empty())
                 continue;
 
             if (kind_is(tokens[open], TK::OpenBrace)) {
@@ -1097,6 +1232,9 @@ public:
             if (tokens[open].immutable.topology.starts_parameter_list) {
                 if (find_header_keyword_before(tokens, open) == npos &&
                     !is_class_extends_parameter_list(tokens, open))
+                    continue;
+                auto items = top_level_list_items(tokens, open + 1, close);
+                if (items.empty())
                     continue;
                 bool block = opts_.module.parameter_layout != "hanging";
                 bool expand = block || items.size() > 1 ||
@@ -1157,7 +1295,10 @@ public:
             }
 
             if (tokens[open].immutable.topology.starts_argument_list) {
-                if (is_nested_argument_list_open(tokens, open))
+                if (open < nested_argument_open.size() && nested_argument_open[open])
+                    continue;
+                auto items = top_level_list_items(tokens, open + 1, close);
+                if (items.empty())
                     continue;
                 bool do_break = false;
                 if (opts_.function.break_policy == "always")
@@ -1178,6 +1319,7 @@ public:
             }
         }
 
+        apply_procedural_block_wrap(tokens);
         apply_single_statement_control_wrap(tokens);
 
         // Final comment line-boundary normalization belongs in WrapPass, not
@@ -1199,6 +1341,25 @@ public:
         }
     }
 private:
+    static void apply_procedural_block_wrap(TokenStream& tokens) {
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            if (!is_procedural_block_keyword(tokens[i].lex->kind))
+                continue;
+            size_t body = procedural_body_start(tokens, i);
+            if (body == npos || body >= tokens.size())
+                continue;
+            // Blocks that already use begin/fork can keep the existing project
+            // style (`always_comb begin`).  Single-statement procedural blocks
+            // and procedural blocks whose body is an if/forever/etc. get a
+            // mandatory line break so the controlled statement is visually
+            // nested under the always/initial/final header.
+            if (!kind_is(tokens[body], TK::BeginKeyword) &&
+                !kind_is(tokens[body], TK::ForkKeyword)) {
+                tokens[body].mutable_.wrap.must_break_before = true;
+            }
+        }
+    }
+
     static void apply_single_statement_control_wrap(TokenStream& tokens) {
         bool ctrl_expr_pending = false;
         int ctrl_paren_open = 0;
@@ -1280,6 +1441,20 @@ public:
         int  paren_depth = 0;
 
         bool ctrl_just_closed = false; // defers single_stmt_pending resolution by one token
+        std::vector<size_t> procedural_body_end(tokens.size(), npos);
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            if (!is_procedural_block_keyword(tokens[i].lex->kind))
+                continue;
+            size_t body = procedural_body_start(tokens, i);
+            if (body == npos || body >= tokens.size())
+                continue;
+            if (kind_is(tokens[body], TK::BeginKeyword) || kind_is(tokens[body], TK::ForkKeyword))
+                continue;
+            size_t body_end = simple_statement_end_from(tokens, body);
+            procedural_body_end[body] = body_end == npos ? tokens[i].immutable.syntax.stmt_end : body_end;
+        }
+        bool procedural_body_active = false;
+        size_t procedural_body_stmt_end = npos;
 
         for (size_t i = 0; i < tokens.size(); ++i) {
             auto& t = tokens[i];
@@ -1335,6 +1510,12 @@ public:
             }
             ctrl_just_closed = false;
 
+            if (i < procedural_body_end.size() && procedural_body_end[i] != npos) {
+                ++level;
+                procedural_body_active = true;
+                procedural_body_stmt_end = procedural_body_end[i];
+            }
+
             t.mutable_.indent.base_indent = level * opts_.indent_size;
             if (is_outer_close(t.lex->kind))
                 t.mutable_.indent.base_indent = 0;
@@ -1363,6 +1544,11 @@ public:
             if (single_stmt_active && kind_is(t, TK::Semicolon) && paren_depth == single_stmt_paren_depth) {
                 level = std::max(0, level - 1);
                 single_stmt_active = false;
+            }
+            if (procedural_body_active && i == procedural_body_stmt_end) {
+                level = std::max(0, level - 1);
+                procedural_body_active = false;
+                procedural_body_stmt_end = npos;
             }
         }
 
@@ -1502,6 +1688,46 @@ public:
         size_t cur_first = npos;
         size_t cur_start = 0;
 
+        // Assignment alignment is intentionally disabled inside single-stmt
+        // control blocks such as `for (...) begin ... end` because generated
+        // loop bodies often contain repeated assignments where local vertical
+        // alignment is noisier than useful.  Older code rediscovered this fact
+        // by scanning backward from every rendered line to find a controlling
+        // `begin`, which made large generated register files quadratic.
+        //
+        // Compute the same lexical containment once with a lightweight
+        // begin/end stack.  This is approximate in the same direction as the
+        // previous heuristic: it only tracks procedural `begin`/`end`, and it
+        // only treats a begin as control-owned when it follows a parenthesized
+        // for/foreach/while/repeat header.
+        std::vector<bool> inside_control_begin(tokens.size(), false);
+        std::vector<bool> begin_stack;
+        int control_begin_depth = 0;
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            if (is_passthrough(tokens[i]))
+                continue;
+            inside_control_begin[i] = control_begin_depth > 0;
+            if (kind_is(tokens[i], TK::BeginKeyword)) {
+                bool control_owned = false;
+                size_t close_paren = prev_code(tokens, i);
+                size_t open_paren = close_paren == npos ? npos : tokens[close_paren].immutable.syntax.matching_token;
+                size_t control = open_paren == npos ? npos : prev_code(tokens, open_paren);
+                if (control != npos &&
+                    (kind_is(tokens[control], TK::ForKeyword) ||
+                     kind_is(tokens[control], TK::ForeachKeyword) ||
+                     kind_is(tokens[control], TK::WhileKeyword) ||
+                     kind_is(tokens[control], TK::RepeatKeyword))) {
+                    control_owned = true;
+                }
+                begin_stack.push_back(control_owned);
+                if (control_owned)
+                    ++control_begin_depth;
+            } else if (kind_is(tokens[i], TK::EndKeyword) && !begin_stack.empty()) {
+                if (begin_stack.back())
+                    control_begin_depth = std::max(0, control_begin_depth - 1);
+                begin_stack.pop_back();
+            }
+        }
         auto push_line = [&](size_t end_idx) {
             Line ln;
             ln.first = cur_first;
@@ -1515,27 +1741,9 @@ public:
                    kind_is(tokens[cur_first], TK::LocalParamKeyword)) &&
                   tokens[cur_first].immutable.syntax.paren_depth > 0)))
                 ln.disabled = true;
-            if (cur_first != npos) {
-                for (size_t n = cur_first; n > 0; --n) {
-                    size_t b = n - 1;
-                    if (!kind_is(tokens[b], TK::BeginKeyword)) {
-                        if (tokens[b].mutable_.indent.base_indent < ln.indent)
-                            break;
-                        continue;
-                    }
-                    size_t close_paren = prev_code(tokens, b);
-                    size_t open_paren = close_paren == npos ? npos : tokens[close_paren].immutable.syntax.matching_token;
-                    size_t control = open_paren == npos ? npos : prev_code(tokens, open_paren);
-                    if (control != npos &&
-                        (kind_is(tokens[control], TK::ForKeyword) ||
-                         kind_is(tokens[control], TK::ForeachKeyword) ||
-                         kind_is(tokens[control], TK::WhileKeyword) ||
-                         kind_is(tokens[control], TK::RepeatKeyword))) {
-                        ln.disabled = true;
-                    }
-                    break;
-                }
-            }
+            if (cur_first != npos && cur_first < inside_control_begin.size() &&
+                inside_control_begin[cur_first])
+                ln.disabled = true;
             // Find assignment op at depth 0
             int pd = 0, bd = 0, brd = 0;
             size_t scan_start = (cur_first != npos ? cur_first : cur_start);
