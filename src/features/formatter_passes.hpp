@@ -5,6 +5,7 @@
 #include <cctype>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 namespace svfmt {
 
@@ -107,6 +108,137 @@ inline bool is_identifier_like(const Tok& t) {
            t.lex->kind == TK::MacroUsage;
 }
 
+inline bool is_code_token(const Tok& t) {
+    return !t.lex->is_comment && !t.lex->is_directive && !is_passthrough(t);
+}
+
+inline size_t prev_code(const TokenStream& tokens, size_t before) {
+    before = std::min(before, tokens.size());
+    for (size_t n = before; n > 0; --n) {
+        size_t i = n - 1;
+        if (is_code_token(tokens[i]))
+            return i;
+    }
+    return npos;
+}
+
+inline size_t next_code(const TokenStream& tokens, size_t first, size_t end) {
+    end = std::min(end, tokens.size());
+    for (size_t i = first; i < end; ++i)
+        if (is_code_token(tokens[i]))
+            return i;
+    return npos;
+}
+
+inline bool is_declaration_keyword(TK k) {
+    return is_port_direction(k) || is_type_keyword(k) || k == TK::ParameterKeyword ||
+           k == TK::LocalParamKeyword || k == TK::VarKeyword || k == TK::ConstKeyword;
+}
+
+inline bool starts_module_like_header(TK k) {
+    return k == TK::ModuleKeyword || k == TK::InterfaceKeyword ||
+           k == TK::MacromoduleKeyword || k == TK::ProgramKeyword;
+}
+
+inline int snap_to_grid(int value, int indent_size) {
+    if (indent_size <= 0) return value;
+    return ((value + indent_size - 1) / indent_size) * indent_size;
+}
+
+inline int option_width(int value, const FormatOptions& opts) {
+    return opts.tab_align ? snap_to_grid(value, opts.indent_size) : value;
+}
+
+inline int compact_width(const TokenStream& tokens, size_t first, size_t end) {
+    int w = 0;
+    bool need_space = false;
+    end = std::min(end, tokens.size());
+    for (size_t i = first; i < end; ++i) {
+        const Tok& t = tokens[i];
+        if (!is_code_token(t)) continue;
+        if (need_space && !no_space_before(t.lex->kind))
+            ++w;
+        w += token_width(t);
+        need_space = !no_space_after(t.lex->kind);
+    }
+    return w;
+}
+
+inline int line_prefix_width(const TokenStream& tokens, size_t token_idx) {
+    size_t line_start = 0;
+    for (size_t i = token_idx; i > 0; --i) {
+        if (tokens[i].mutable_.wrap.must_break_before || tokens[i - 1].mutable_.wrap.must_break_after) {
+            line_start = i;
+            break;
+        }
+    }
+    return compact_width(tokens, line_start, token_idx);
+}
+
+struct ListItem {
+    size_t first{npos};
+    size_t last{npos};   // inclusive
+    size_t comma{npos};
+};
+
+inline std::vector<ListItem> top_level_list_items(const TokenStream& tokens, size_t first, size_t close) {
+    std::vector<ListItem> out;
+    size_t start = next_code(tokens, first, close);
+    size_t last = npos;
+    int pd = 0, bd = 0, brd = 0;
+    for (size_t i = first; i < close && i < tokens.size(); ++i) {
+        if (!is_code_token(tokens[i])) continue;
+        if (kind_is(tokens[i], TK::OpenParenthesis)) ++pd;
+        else if (kind_is(tokens[i], TK::CloseParenthesis) && pd > 0) --pd;
+        else if (kind_is(tokens[i], TK::OpenBracket)) ++bd;
+        else if (kind_is(tokens[i], TK::CloseBracket) && bd > 0) --bd;
+        else if (kind_is(tokens[i], TK::OpenBrace) || kind_is(tokens[i], TK::ApostropheOpenBrace)) ++brd;
+        else if (kind_is(tokens[i], TK::CloseBrace) && brd > 0) --brd;
+
+        if (kind_is(tokens[i], TK::Comma) && pd == 0 && bd == 0 && brd == 0) {
+            if (start != npos && last != npos)
+                out.push_back({start, last, i});
+            start = next_code(tokens, i + 1, close);
+            last = npos;
+        } else {
+            last = i;
+        }
+    }
+    if (start != npos && last != npos)
+        out.push_back({start, last, npos});
+    return out;
+}
+
+inline size_t find_header_keyword_before(const TokenStream& tokens, size_t open) {
+    int pd = 0;
+    for (size_t n = open; n > 0; --n) {
+        size_t i = n - 1;
+        if (!is_code_token(tokens[i])) continue;
+        if (kind_is(tokens[i], TK::CloseParenthesis)) ++pd;
+        else if (kind_is(tokens[i], TK::OpenParenthesis) && pd > 0) --pd;
+        if (pd == 0 && starts_module_like_header(tokens[i].lex->kind))
+            return i;
+        if (pd == 0 && kind_is(tokens[i], TK::Semicolon))
+            break;
+    }
+    return npos;
+}
+
+inline bool is_instance_port_open(const TokenStream& tokens, size_t open) {
+    size_t inst = prev_code(tokens, open);
+    if (inst == npos || !is_identifier_like(tokens[inst])) return false;
+    size_t mod = prev_code(tokens, inst);
+    if (mod == npos) return false;
+    if (kind_is(tokens[mod], TK::CloseBracket)) {
+        size_t br = tokens[mod].immutable.syntax.matching_token;
+        if (br != npos) mod = prev_code(tokens, br);
+    }
+    if (mod == npos || !is_identifier_like(tokens[mod])) return false;
+    size_t prev = prev_code(tokens, mod);
+    return prev == npos || kind_is(tokens[prev], TK::Semicolon) ||
+           kind_is(tokens[prev], TK::BeginKeyword) || kind_is(tokens[prev], TK::EndKeyword);
+}
+
 // SyntaxPass is the early fact-freeze pass.  It writes SyntaxFacts,
 // TopologyFacts, and CommentFacts from immutable lexemes/input trivia.  These
 // are parser-ish facts, not formatter decisions; downstream formatting-policy
@@ -117,11 +249,19 @@ public:
     void run(TokenStream& tokens) override {
         std::vector<size_t> parens, brackets, braces;
         int pd = 0, bd = 0, brd = 0;
+        bool in_function_decl = false;
+        bool in_task_decl = false;
+        bool in_class_decl = false;
+        bool in_modport = false;
         for (size_t i = 0; i < tokens.size(); ++i) {
             auto& t = tokens[i];
             t.immutable.syntax.paren_depth = pd;
             t.immutable.syntax.bracket_depth = bd;
             t.immutable.syntax.brace_depth = brd;
+            t.immutable.syntax.in_function_decl = in_function_decl;
+            t.immutable.syntax.in_task_decl = in_task_decl;
+            t.immutable.syntax.in_class_decl = in_class_decl;
+            t.immutable.syntax.in_modport = in_modport;
             // Freeze input-line topology before any wrap decision exists.
             t.immutable.topology.begins_line_construct = t.immutable.input_trivia.starts_original_line;
             t.immutable.topology.ends_line_construct = kind_is(t, TK::Semicolon) || kind_is(t, TK::Comma) ||
@@ -130,13 +270,15 @@ public:
             t.immutable.topology.closes_indent_scope = is_close_block(t.lex->kind) || is_outer_close(t.lex->kind);
 
             if (kind_is(t, TK::OpenParenthesis)) {
-                const Tok* prev = i == 0 ? nullptr : &tokens[i - 1];
+                size_t prev_i = prev_code(tokens, i);
+                const Tok* prev = prev_i == npos ? nullptr : &tokens[prev_i];
                 t.immutable.topology.starts_parameter_list = prev && kind_is(*prev, TK::Hash);
                 t.immutable.topology.starts_argument_list = prev &&
                     (kind_is(*prev, TK::Identifier) || kind_is(*prev, TK::SystemIdentifier) ||
                      kind_is(*prev, TK::MacroUsage) || kind_is(*prev, TK::CloseParenthesis));
-                t.immutable.topology.starts_port_list = prev &&
-                    (kind_is(*prev, TK::ModuleKeyword) || kind_is(*prev, TK::InterfaceKeyword));
+                t.immutable.topology.starts_port_list =
+                    find_header_keyword_before(tokens, i) != npos &&
+                    !(prev && kind_is(*prev, TK::Hash));
             }
             // ends_argument_list is set later when matching token is known (see below)
 
@@ -149,12 +291,23 @@ public:
             if (t.lex->is_directive) {
                 (void)0; // pp-conditional tracking reserved for future use
             }
+            if (kind_is(t, TK::FunctionKeyword)) in_function_decl = true;
+            if (kind_is(t, TK::TaskKeyword)) in_task_decl = true;
+            if (kind_is(t, TK::ClassKeyword)) in_class_decl = true;
+            if (kind_is(t, TK::ModPortKeyword)) in_modport = true;
             if (kind_is(t, TK::OpenParenthesis)) { parens.push_back(i); ++pd; }
             else if (kind_is(t, TK::CloseParenthesis)) { if (!parens.empty()) { auto j = parens.back(); parens.pop_back(); tokens[j].immutable.syntax.matching_token = i; t.immutable.syntax.matching_token = j; t.immutable.topology.ends_argument_list = tokens[j].immutable.topology.starts_argument_list; } pd = std::max(0, pd - 1); }
             else if (kind_is(t, TK::OpenBracket)) { brackets.push_back(i); ++bd; }
             else if (kind_is(t, TK::CloseBracket)) { if (!brackets.empty()) { auto j = brackets.back(); brackets.pop_back(); tokens[j].immutable.syntax.matching_token = i; t.immutable.syntax.matching_token = j; } bd = std::max(0, bd - 1); }
             else if (kind_is(t, TK::OpenBrace)) { braces.push_back(i); ++brd; }
             else if (kind_is(t, TK::CloseBrace)) { if (!braces.empty()) { auto j = braces.back(); braces.pop_back(); tokens[j].immutable.syntax.matching_token = i; t.immutable.syntax.matching_token = j; } brd = std::max(0, brd - 1); }
+            if (kind_is(t, TK::Semicolon)) {
+                in_function_decl = false;
+                in_task_decl = false;
+                in_modport = false;
+            }
+            if (kind_is(t, TK::EndClassKeyword))
+                in_class_decl = false;
         }
         size_t stmt_start = 0;
         for (size_t i = 0; i < tokens.size(); ++i) {
@@ -272,8 +425,10 @@ public:
             auto& t = tokens[i];
             if (t.mutable_.macro.suppress_wrapping) continue;
             t.mutable_.wrap.wrap_group = group;
-            if (i == 0 || t.immutable.input_trivia.starts_original_line || t.immutable.input_trivia.original_newlines_before > 1) t.mutable_.wrap.must_break_before = true;
-            if (t.lex->is_comment && t.immutable.comment.role == CommentRole::OwnLine) t.mutable_.wrap.must_break_before = true;
+            if (i == 0)
+                t.mutable_.wrap.must_break_before = true;
+            if (t.lex->is_comment && t.immutable.comment.role == CommentRole::OwnLine)
+                t.mutable_.wrap.must_break_before = true;
             // PP directives (ifdef/endif/else/define/…) are always on their own line.
             if (t.lex->is_directive) {
                 t.mutable_.wrap.must_break_before = true;
@@ -302,7 +457,7 @@ public:
                 for (size_t j = i + 1; j < tokens.size(); ++j) {
                     if (is_passthrough(tokens[j])) continue;
                     if (tokens[j].lex->is_comment &&
-                        !tokens[j].immutable.input_trivia.starts_original_line) {
+                        tokens[j].immutable.comment.role == CommentRole::Trailing) {
                         t.mutable_.wrap.must_break_after = false;
                         tokens[j].mutable_.wrap.must_break_after = true;
                     }
@@ -323,6 +478,196 @@ public:
                 bool prev_is_end_or_brace = (i > 0 && (kind_is(tokens[i-1], TK::EndKeyword) || kind_is(tokens[i-1], TK::CloseBrace)));
                 if (!prev_is_end_or_brace)
                     t.mutable_.wrap.must_break_before = true;
+            }
+        }
+
+        auto apply_list = [&](size_t open, WrapListKind kind, bool break_after_open,
+                              bool break_before_close, bool break_first_item) {
+            if (open >= tokens.size()) return;
+            size_t close = tokens[open].immutable.syntax.matching_token;
+            if (close == npos || close >= tokens.size()) return;
+            auto items = top_level_list_items(tokens, open + 1, close);
+            if (items.empty()) return;
+            tokens[open].mutable_.wrap.list_kind = kind;
+            tokens[open].mutable_.wrap.list_open = open;
+            if (break_after_open)
+                tokens[open].mutable_.wrap.must_break_after = true;
+            else
+                tokens[open].mutable_.wrap.must_break_after = false;
+            for (size_t n = 0; n < items.size(); ++n) {
+                const auto& item = items[n];
+                tokens[item.first].mutable_.wrap.list_kind = kind;
+                tokens[item.first].mutable_.wrap.list_open = open;
+                if (break_first_item || n > 0)
+                    tokens[item.first].mutable_.wrap.must_break_before = true;
+                else {
+                    bool preceded_by_own_line_comment = false;
+                    for (size_t p = item.first; p > open + 1; --p) {
+                        size_t c = p - 1;
+                        if (tokens[c].lex->is_comment &&
+                            tokens[c].immutable.comment.role == CommentRole::OwnLine) {
+                            preceded_by_own_line_comment = true;
+                            break;
+                        }
+                        if (is_code_token(tokens[c]))
+                            break;
+                    }
+                    if (!preceded_by_own_line_comment)
+                        tokens[item.first].mutable_.wrap.must_break_before = false;
+                }
+                if (item.comma != npos) {
+                    size_t break_token = item.comma;
+                    for (size_t c = item.comma + 1; c < tokens.size(); ++c) {
+                        if (tokens[c].lex->is_comment &&
+                            tokens[c].immutable.comment.role == CommentRole::Trailing) {
+                            break_token = c;
+                            break;
+                        }
+                        if (is_code_token(tokens[c]))
+                            break;
+                    }
+                    tokens[break_token].mutable_.wrap.must_break_after = true;
+                    tokens[item.comma].mutable_.wrap.list_kind = kind;
+                    tokens[item.comma].mutable_.wrap.list_open = open;
+                }
+            }
+            tokens[close].mutable_.wrap.list_kind = kind;
+            tokens[close].mutable_.wrap.list_open = open;
+            if (break_before_close)
+                tokens[close].mutable_.wrap.must_break_before = true;
+            else
+                tokens[close].mutable_.wrap.must_break_before = false;
+
+            size_t after_open = open + 1;
+            if (after_open < close && tokens[after_open].lex->is_comment &&
+                tokens[after_open].immutable.comment.role == CommentRole::Trailing) {
+                tokens[open].mutable_.wrap.must_break_after = false;
+                tokens[after_open].mutable_.wrap.must_break_after = true;
+            }
+
+            if (kind == WrapListKind::ModulePorts && !items.empty() &&
+                !is_declaration_keyword(tokens[items.front().first].lex->kind)) {
+                int per_line = 1;
+                if (opts_.module.non_ansi_port_per_line_enabled)
+                    per_line = std::max(1, opts_.module.non_ansi_port_per_line);
+                else if (opts_.module.non_ansi_port_max_line_length_enabled)
+                    per_line = 2;
+                for (size_t n = 0; n < items.size(); ++n) {
+                    if (n > 0 && (n % static_cast<size_t>(per_line)) != 0)
+                        tokens[items[n].first].mutable_.wrap.must_break_before = false;
+                    if (items[n].comma != npos &&
+                        ((n + 1) % static_cast<size_t>(per_line)) != 0) {
+                        tokens[items[n].comma].mutable_.wrap.must_break_after = false;
+                        for (size_t c = items[n].comma + 1; c < tokens.size(); ++c) {
+                            if (tokens[c].lex->is_comment &&
+                                tokens[c].immutable.comment.role == CommentRole::Trailing)
+                                tokens[c].mutable_.wrap.must_break_after = false;
+                            if (is_code_token(tokens[c]))
+                                break;
+                        }
+                    }
+                }
+            }
+        };
+
+        auto contains_kind = [&](size_t first, size_t end, TK kind) {
+            for (size_t j = first; j < end && j < tokens.size(); ++j)
+                if (kind_is(tokens[j], kind))
+                    return true;
+            return false;
+        };
+
+        for (size_t open = 0; open < tokens.size(); ++open) {
+            if (!kind_is(tokens[open], TK::OpenParenthesis) && !kind_is(tokens[open], TK::OpenBrace))
+                continue;
+            size_t close = tokens[open].immutable.syntax.matching_token;
+            if (close == npos || close >= tokens.size())
+                continue;
+            auto items = top_level_list_items(tokens, open + 1, close);
+            if (items.empty())
+                continue;
+
+            if (kind_is(tokens[open], TK::OpenBrace)) {
+                size_t prev = prev_code(tokens, open);
+                bool enum_body = false;
+                for (size_t j = open; j > 0; --j) {
+                    size_t k = j - 1;
+                    if (!is_code_token(tokens[k])) continue;
+                    if (kind_is(tokens[k], TK::EnumKeyword)) { enum_body = true; break; }
+                    if (kind_is(tokens[k], TK::Semicolon)) break;
+                }
+                (void)prev;
+                if (enum_body) {
+                    apply_list(open, WrapListKind::EnumBody, true, true, true);
+                }
+                continue;
+            }
+
+            if (tokens[open].immutable.topology.starts_parameter_list) {
+                bool block = opts_.module.parameter_layout != "hanging";
+                apply_list(open, block ? WrapListKind::ModuleParametersBlock
+                                       : WrapListKind::ModuleParametersHanging,
+                           block, block, block);
+                continue;
+            }
+
+            if (tokens[open].immutable.topology.starts_port_list) {
+                apply_list(open, WrapListKind::ModulePorts, true, true, true);
+                continue;
+            }
+
+            size_t prev = prev_code(tokens, open);
+            if (prev != npos && kind_is(tokens[prev], TK::Identifier)) {
+                size_t before_name = prev_code(tokens, prev);
+                if (before_name != npos && kind_is(tokens[before_name], TK::ModPortKeyword)) {
+                    apply_list(open, WrapListKind::ModportBody, true, true, true);
+                    continue;
+                }
+            }
+
+            if (is_instance_port_open(tokens, open) && opts_.instance.align) {
+                apply_list(open, WrapListKind::InstancePorts, true, true, true);
+                continue;
+            }
+
+            bool is_decl = false;
+            for (size_t j = open; j > 0; --j) {
+                size_t k = j - 1;
+                if (!is_code_token(tokens[k])) continue;
+                if (kind_is(tokens[k], TK::FunctionKeyword) || kind_is(tokens[k], TK::TaskKeyword)) {
+                    is_decl = true;
+                    break;
+                }
+                if (kind_is(tokens[k], TK::Semicolon)) break;
+            }
+            if (is_decl) {
+                int approx = line_prefix_width(tokens, open) + 1 + compact_width(tokens, open + 1, close) + 1;
+                if (approx > opts_.function_declaration.line_length) {
+                    bool hanging = opts_.function_declaration.layout == "hanging";
+                    apply_list(open, hanging ? WrapListKind::FunctionDeclHanging
+                                             : WrapListKind::FunctionDeclBlock,
+                               !hanging, !hanging, !hanging);
+                }
+                continue;
+            }
+
+            if (tokens[open].immutable.topology.starts_argument_list) {
+                bool do_break = false;
+                if (opts_.function.break_policy == "always")
+                    do_break = items.size() > 1;
+                else if (opts_.function.break_policy == "auto") {
+                    do_break = (opts_.function.arg_count >= 0 &&
+                                static_cast<int>(items.size()) >= opts_.function.arg_count);
+                    int approx = line_prefix_width(tokens, open) + 1 + compact_width(tokens, open + 1, close) + 1;
+                    if (approx > opts_.function.line_length)
+                        do_break = true;
+                }
+                if (do_break && opts_.function.break_policy != "never") {
+                    bool hanging = opts_.function.layout == "hanging";
+                    apply_list(open, hanging ? WrapListKind::FunctionHanging
+                                             : WrapListKind::FunctionBlock,
+                               !hanging, !hanging, !hanging);
+                }
             }
         }
     }
@@ -433,6 +778,110 @@ public:
                 single_stmt_active = false;
             }
         }
+
+        auto line_start_of = [&](size_t idx) {
+            size_t s = 0;
+            for (size_t n = idx; n > 0; --n) {
+                size_t i = n - 1;
+                if (tokens[n].mutable_.wrap.must_break_before || tokens[i].mutable_.wrap.must_break_after) {
+                    s = n;
+                    break;
+                }
+            }
+            return s;
+        };
+        auto column_before = [&](size_t idx) {
+            size_t s = line_start_of(idx);
+            int base = tokens[s].mutable_.indent.base_indent;
+            int col = base + compact_width(tokens, s, idx);
+            size_t prev = prev_code(tokens, idx);
+            bool call_or_hash_paren =
+                kind_is(tokens[idx], TK::OpenParenthesis) && prev != npos &&
+                (is_identifier_like(tokens[prev]) || kind_is(tokens[prev], TK::Hash));
+            if (idx != s && prev != npos && prev >= s &&
+                !call_or_hash_paren &&
+                !no_space_before(tokens[idx].lex->kind) && !no_space_after(tokens[prev].lex->kind))
+                ++col;
+            return col;
+        };
+        auto set_item_indent = [&](size_t first, size_t last, int indent) {
+            if (first >= tokens.size()) return;
+            tokens[first].mutable_.indent.base_indent = std::max(0, indent);
+            for (size_t k = first + 1; k <= last && k < tokens.size(); ++k) {
+                if (tokens[k].mutable_.wrap.must_break_before ||
+                    (tokens[k].lex->is_comment && tokens[k].immutable.comment.role == CommentRole::OwnLine))
+                    tokens[k].mutable_.indent.base_indent = std::max(0, indent);
+            }
+        };
+
+        for (size_t open = 0; open < tokens.size(); ++open) {
+            WrapListKind kind = tokens[open].mutable_.wrap.list_kind;
+            if (kind == WrapListKind::None || tokens[open].mutable_.wrap.list_open != open)
+                continue;
+            size_t close = tokens[open].immutable.syntax.matching_token;
+            if (close == npos || close >= tokens.size())
+                continue;
+            auto items = top_level_list_items(tokens, open + 1, close);
+            if (items.empty())
+                continue;
+
+            int base = tokens[line_start_of(open)].mutable_.indent.base_indent;
+            int item_indent = base + opts_.indent_size;
+            int close_indent = base;
+
+            size_t name = prev_code(tokens, open);
+            int name_col = (name == npos) ? base : column_before(name);
+            int after_open_col = column_before(open) + token_width(tokens[open]);
+
+            switch (kind) {
+            case WrapListKind::FunctionBlock:
+                item_indent = name_col + opts_.indent_size;
+                close_indent = name_col;
+                break;
+            case WrapListKind::FunctionHanging:
+                item_indent = after_open_col;
+                close_indent = after_open_col;
+                break;
+            case WrapListKind::ModuleParametersBlock:
+                item_indent = base + opts_.indent_size;
+                close_indent = base;
+                break;
+            case WrapListKind::ModuleParametersHanging:
+                item_indent = after_open_col;
+                close_indent = after_open_col;
+                break;
+            case WrapListKind::FunctionDeclBlock:
+                item_indent = base + opts_.indent_size;
+                close_indent = base;
+                break;
+            case WrapListKind::FunctionDeclHanging:
+                item_indent = after_open_col;
+                close_indent = after_open_col;
+                break;
+            case WrapListKind::InstancePorts:
+                item_indent = base + std::max(0, opts_.instance.port_indent_level) * opts_.indent_size;
+                close_indent = base;
+                break;
+            case WrapListKind::ModulePorts:
+                if (size_t hdr = find_header_keyword_before(tokens, open); hdr != npos)
+                    base = tokens[hdr].mutable_.indent.base_indent;
+                item_indent = base + opts_.indent_size;
+                close_indent = base;
+                break;
+            case WrapListKind::EnumBody:
+            case WrapListKind::ModportBody:
+                item_indent = base + opts_.indent_size;
+                close_indent = base;
+                break;
+            case WrapListKind::None:
+                break;
+            }
+
+            for (const auto& item : items)
+                set_item_indent(item.first, item.last, item_indent);
+            if (tokens[close].mutable_.wrap.must_break_before)
+                tokens[close].mutable_.indent.base_indent = std::max(0, close_indent);
+        }
     }
 private: const FormatOptions& opts_;
 };
@@ -444,8 +893,6 @@ public:
     explicit AlignPass(const FormatOptions& opts) : opts_(opts) {}
     const char* name() const override { return "alignment"; }
     void run(TokenStream& tokens) override {
-        if (!opts_.statement.align) return;
-
         struct Line {
             size_t first{npos};
             size_t end{npos};
@@ -465,6 +912,10 @@ public:
             ln.end = end_idx;
             if (cur_first != npos)
                 ln.indent = tokens[cur_first].mutable_.indent.base_indent;
+            if (cur_first != npos &&
+                (is_type_keyword(tokens[cur_first].lex->kind) ||
+                 is_port_direction(tokens[cur_first].lex->kind)))
+                ln.disabled = true;
             // Find assignment op at depth 0
             int pd = 0, bd = 0, brd = 0;
             size_t scan_start = (cur_first != npos ? cur_first : cur_start);
@@ -511,35 +962,166 @@ public:
         }
         if (cur_first != npos) push_line(tokens.size());
 
-        // Group consecutive alignable lines and align
-        const bool space_before = wants_before(opts_.spacing.assignment_operator_spacing);
-        const int  min_sp = space_before ? 1 : 0;
+        if (opts_.statement.align) {
+            // Group consecutive alignable lines and align
+            const bool space_before = wants_before(opts_.spacing.assignment_operator_spacing);
 
-        size_t li = 0;
-        while (li < lines.size()) {
-            if (lines[li].disabled || lines[li].assign_idx == npos) { ++li; continue; }
-            int base_indent = lines[li].indent;
-            // Collect group of consecutive lines with same indent that have assign ops
-            size_t j = li;
-            while (j < lines.size() && !lines[j].disabled && lines[j].assign_idx != npos && lines[j].indent == base_indent)
-                ++j;
-            if (j - li >= 2) {
-                int max_lhs = opts_.statement.lhs_min_width;
-                for (size_t k = li; k < j; ++k)
-                    max_lhs = std::max(max_lhs, lines[k].lhs_width);
-                if (opts_.statement.align_adaptive)
-                    max_lhs = opts_.statement.lhs_min_width;
-                int target = max_lhs + (space_before ? 1 : 2);
-                for (size_t k = li; k < j; ++k) {
-                    int sp = std::max(min_sp, target - lines[k].lhs_width);
-                    tokens[lines[k].assign_idx].mutable_.space.spaces_before = sp;
+            size_t li = 0;
+            while (li < lines.size()) {
+                if (lines[li].disabled || lines[li].assign_idx == npos) { ++li; continue; }
+                int base_indent = lines[li].indent;
+                // Collect group of consecutive lines with same indent that have assign ops
+                size_t j = li;
+                while (j < lines.size() && !lines[j].disabled && lines[j].assign_idx != npos && lines[j].indent == base_indent)
+                    ++j;
+                if (j - li >= 2) {
+                    int max_lhs = opts_.statement.lhs_min_width;
+                    for (size_t k = li; k < j; ++k)
+                        max_lhs = std::max(max_lhs, lines[k].lhs_width);
+                    if (opts_.statement.align_adaptive)
+                        max_lhs = opts_.statement.lhs_min_width;
+                    int target = max_lhs + (space_before ? 1 : 2);
+                    for (size_t k = li; k < j; ++k) {
+                        tokens[lines[k].assign_idx].mutable_.align.enabled = true;
+                        tokens[lines[k].assign_idx].mutable_.align.target_column =
+                            lines[k].indent + target;
+                    }
+                } else if (j - li == 1 && opts_.statement.lhs_min_width > 0) {
+                    int target = opts_.statement.lhs_min_width + (space_before ? 1 : 2);
+                    tokens[lines[li].assign_idx].mutable_.align.enabled = true;
+                    tokens[lines[li].assign_idx].mutable_.align.target_column =
+                        lines[li].indent + target;
                 }
-            } else if (j - li == 1 && opts_.statement.lhs_min_width > 0) {
-                int target = opts_.statement.lhs_min_width + (space_before ? 1 : 2);
-                int sp = std::max(min_sp, target - lines[li].lhs_width);
-                tokens[lines[li].assign_idx].mutable_.space.spaces_before = sp;
+                li = j;
             }
-            li = j;
+        }
+
+        // Instance named-port alignment.  WrapPass owns the decision to expand
+        // the list; AlignPass only assigns target columns for the connection
+        // parens and optional inside padding.
+        int group = 1000;
+        for (size_t open = 0; open < tokens.size(); ++open) {
+            if (tokens[open].mutable_.wrap.list_kind != WrapListKind::InstancePorts ||
+                tokens[open].mutable_.wrap.list_open != open)
+                continue;
+            size_t close = tokens[open].immutable.syntax.matching_token;
+            if (close == npos) continue;
+            auto items = top_level_list_items(tokens, open + 1, close);
+            int max_port = option_width(opts_.instance.instance_port_name_width, opts_);
+            int max_sig = option_width(opts_.instance.instance_port_between_paren_width, opts_);
+            struct Conn { size_t name, op, cl; int namew, sigw; };
+            std::vector<Conn> conns;
+            for (const auto& item : items) {
+                size_t dot = item.first;
+                size_t name = next_code(tokens, dot + 1, item.last + 1);
+                size_t op = name == npos ? npos : next_code(tokens, name + 1, item.last + 1);
+                if (name == npos || op == npos || !kind_is(tokens[dot], TK::Dot) ||
+                    !kind_is(tokens[op], TK::OpenParenthesis))
+                    continue;
+                size_t cl = tokens[op].immutable.syntax.matching_token;
+                if (cl == npos || cl > item.last) continue;
+                int nw = token_width(tokens[name]);
+                int sw = compact_width(tokens, op + 1, cl);
+                max_port = std::max(max_port, nw);
+                max_sig = std::max(max_sig, sw);
+                conns.push_back({name, op, cl, nw, sw});
+            }
+            for (const auto& c : conns) {
+                int item_indent = tokens[prev_code(tokens, c.name)].mutable_.indent.base_indent;
+                int port_width = opts_.instance.align_adaptive
+                    ? std::max(option_width(opts_.instance.instance_port_name_width, opts_), c.namew)
+                    : max_port;
+                int sig_width = opts_.instance.align_adaptive
+                    ? std::max(option_width(opts_.instance.instance_port_between_paren_width, opts_), c.sigw)
+                    : max_sig;
+                tokens[c.op].mutable_.align.enabled = true;
+                tokens[c.op].mutable_.align.alignment_group = group;
+                int adaptive_extra = (opts_.instance.align_adaptive &&
+                                      c.namew < option_width(opts_.instance.instance_port_name_width, opts_)) ? 0 : 1;
+                tokens[c.op].mutable_.align.target_column = item_indent + 1 + port_width + adaptive_extra;
+                tokens[c.cl].mutable_.align.enabled = true;
+                tokens[c.cl].mutable_.align.alignment_group = group;
+                tokens[c.cl].mutable_.align.target_column =
+                    tokens[c.op].mutable_.align.target_column + 1 + sig_width;
+            }
+            ++group;
+        }
+
+        for (size_t open = 0; open < tokens.size(); ++open) {
+            if (tokens[open].mutable_.wrap.list_open != open)
+                continue;
+            size_t close = tokens[open].immutable.syntax.matching_token;
+            if (close == npos) continue;
+            auto items = top_level_list_items(tokens, open + 1, close);
+            if (items.empty()) continue;
+
+            if (tokens[open].mutable_.wrap.list_kind == WrapListKind::EnumBody &&
+                opts_.enum_declaration.align) {
+                struct E { size_t first, eq, comma; int namew, valw; };
+                std::vector<E> es;
+                int namew = option_width(opts_.enum_declaration.enum_name_min_width, opts_);
+                int valw = option_width(opts_.enum_declaration.enum_value_min_width, opts_);
+                for (const auto& item : items) {
+                    size_t eq = npos;
+                    for (size_t k = item.first; k <= item.last; ++k)
+                        if (kind_is(tokens[k], TK::Equals)) { eq = k; break; }
+                    int nw = eq == npos ? compact_width(tokens, item.first, item.last + 1)
+                                         : compact_width(tokens, item.first, eq);
+                    int vw = eq == npos ? 0 : compact_width(tokens, eq + 1, item.last + 1);
+                    namew = std::max(namew, nw);
+                    valw = std::max(valw, vw);
+                    es.push_back({item.first, eq, item.comma, nw, vw});
+                }
+                int base = tokens[items.front().first].mutable_.indent.base_indent;
+                for (const auto& e : es) {
+                    int local_namew = opts_.enum_declaration.align_adaptive
+                        ? std::max(option_width(opts_.enum_declaration.enum_name_min_width, opts_), e.namew)
+                        : namew;
+                    int local_valw = opts_.enum_declaration.align_adaptive
+                        ? std::max(option_width(opts_.enum_declaration.enum_value_min_width, opts_), e.valw)
+                        : valw;
+                    int eq_target = base + local_namew + 1;
+                    if (e.eq != npos) {
+                        tokens[e.eq].mutable_.align.enabled = true;
+                        tokens[e.eq].mutable_.align.target_column = eq_target;
+                    }
+                    if (e.comma != npos) {
+                        tokens[e.comma].mutable_.align.enabled = true;
+                        tokens[e.comma].mutable_.align.target_column =
+                            (e.eq == npos) ? (eq_target + 3 + local_valw)
+                                           : (eq_target + 2 + local_valw);
+                    }
+                }
+            }
+
+            if (tokens[open].mutable_.wrap.list_kind == WrapListKind::ModportBody &&
+                opts_.modport.align) {
+                struct M { size_t dir, sig, comma; int dirw, sigw; };
+                std::vector<M> ms;
+                int dirw = option_width(opts_.modport.direction_min_width, opts_);
+                int sigw = option_width(opts_.modport.signal_min_width, opts_);
+                for (const auto& item : items) {
+                    size_t sig = next_code(tokens, item.first + 1, item.last + 1);
+                    if (sig == npos) continue;
+                    int dw = token_width(tokens[item.first]);
+                    int sw = compact_width(tokens, sig, item.last + 1);
+                    dirw = std::max(dirw, dw + 1);
+                    sigw = std::max(sigw, sw);
+                    ms.push_back({item.first, sig, item.comma, dw, sw});
+                }
+                int base = tokens[items.front().first].mutable_.indent.base_indent;
+                for (const auto& m : ms) {
+                    int local_sigw = opts_.modport.align_adaptive
+                        ? std::max(option_width(opts_.modport.signal_min_width, opts_), m.sigw)
+                        : sigw;
+                    tokens[m.sig].mutable_.align.enabled = true;
+                    tokens[m.sig].mutable_.align.target_column = base + dirw;
+                    if (m.comma != npos) {
+                        tokens[m.comma].mutable_.align.enabled = true;
+                        tokens[m.comma].mutable_.align.target_column = base + dirw + local_sigw;
+                    }
+                }
+            }
         }
     }
 private: const FormatOptions& opts_;
@@ -574,6 +1156,8 @@ public:
 
             // Basic no-space rules
             if (no_space_before(t.lex->kind) || no_space_after(L.lex->kind)) spaces = 0;
+            if (t.lex->is_comment && kind_is(L, TK::OpenParenthesis))
+                spaces = 1;
             // Empty positional argument: `, ,` — keep one space so the slot is visible
             if (kind_is(t, TK::Comma) && kind_is(L, TK::Comma)) spaces = 1;
 
@@ -618,6 +1202,13 @@ public:
             // Function/task call spacing
             if (kind_is(t, TK::OpenParenthesis) && (kind_is(L, TK::Identifier) || kind_is(L, TK::SystemIdentifier) || kind_is(L, TK::MacroUsage)))
                 spaces = opts_.function.space_before_paren ? 1 : 0;
+            if (kind_is(t, TK::OpenParenthesis) && t.mutable_.wrap.list_kind == WrapListKind::InstancePorts)
+                spaces = 1;
+            if (kind_is(t, TK::OpenParenthesis) && t.mutable_.wrap.list_kind == WrapListKind::ModportBody)
+                spaces = 1;
+            if (kind_is(t, TK::OpenParenthesis) && t.immutable.topology.starts_port_list &&
+                kind_is(L, TK::CloseParenthesis))
+                spaces = 0;
             if (kind_is(t, TK::OpenParenthesis) && is_control_keyword(L.lex->kind))
                 spaces = opts_.spacing.control_keyword_space ? 1 : 0;
             if ((kind_is(L, TK::OpenParenthesis) || kind_is(t, TK::CloseParenthesis)) && opts_.spacing.space_inside_parens) spaces = 1;
@@ -628,6 +1219,7 @@ public:
 
             // } brace: 1 space after (unless followed by ; or ,)
             if (kind_is(L, TK::CloseBrace) && !kind_is(t, TK::Semicolon) && !kind_is(t, TK::Comma)) spaces = 1;
+            if (kind_is(L, TK::CloseBrace) && kind_is(t, TK::CloseParenthesis)) spaces = 0;
 
             // Apostrophe / cast: no space
             if (kind_is(t, TK::Apostrophe) || kind_is(L, TK::Apostrophe)) spaces = 0;
@@ -721,7 +1313,9 @@ public:
 private: const FormatOptions& opts_;
 };
 
-// BlankLinePass owns BlankLineMetadata and clamps source blank lines to config.
+// BlankLinePass owns BlankLineMetadata.  It intentionally does not copy the
+// original source's blank-line count: once a syntactic blank-line boundary is
+// accepted, the rendered amount is canonical and config-driven.
 class BlankLinePass final : public IFormatPass {
 public:
     explicit BlankLinePass(const FormatOptions& opts) : opts_(opts) {}
@@ -729,8 +1323,7 @@ public:
     void run(TokenStream& tokens) override {
         for (auto& t : tokens)
             if (t.immutable.input_trivia.original_newlines_before > 1)
-                t.mutable_.blank.before = std::min(t.immutable.input_trivia.original_newlines_before - 1,
-                                                   std::max(0, opts_.blank_lines_between_items));
+                t.mutable_.blank.before = std::max(0, opts_.blank_lines_between_items);
     }
 private: const FormatOptions& opts_;
 };

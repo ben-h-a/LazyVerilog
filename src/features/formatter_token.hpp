@@ -111,7 +111,33 @@ struct InputTriviaFacts {
 // -----------------------------------------------------------------------------
 // Every family below has exactly one writer pass.  These fields are formatter
 // intent; only the renderer turns them into whitespace.
-struct WrapMetadata { bool can_break_before{false}; bool must_break_before{false}; bool can_break_after{false}; bool must_break_after{false}; bool continuation{false}; int wrap_group{-1}; };
+enum class WrapListKind {
+    None,
+    FunctionBlock,
+    FunctionHanging,
+    ModuleParametersBlock,
+    ModuleParametersHanging,
+    ModulePorts,
+    InstancePorts,
+    FunctionDeclBlock,
+    FunctionDeclHanging,
+    EnumBody,
+    ModportBody,
+};
+
+struct WrapMetadata {
+    bool can_break_before{false};
+    bool must_break_before{false};
+    bool can_break_after{false};
+    bool must_break_after{false};
+    bool continuation{false};
+    int wrap_group{-1};
+
+    // Written only by WrapPass; read by Indent/Align/Spacing to assign the
+    // concrete layout for already-classified multiline delimiter groups.
+    WrapListKind list_kind{WrapListKind::None};
+    size_t list_open{npos};
+};
 struct IndentMetadata { int base_indent{0}; int continuation_indent{0}; size_t anchor_token{npos}; };
 struct AlignMetadata { bool enabled{false}; int target_column{-1}; int alignment_group{-1}; };
 struct SpaceMetadata { int spaces_before{1}; bool suppress_space{false}; };

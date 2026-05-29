@@ -221,6 +221,22 @@ private:
             directive = false;
         }
 
+        // Keep preprocessor directive lines atomic.  Slang lexes directive
+        // keywords and directive operands as separate tokens; formatting them
+        // independently can change non-whitespace content (`ifdef FOO` ->
+        // ``ifdef\nFOO`).  Macro usages were remapped above and intentionally
+        // remain ordinary tokens.
+        if (directive) {
+            size_t line_end = source_.find('\n', pos);
+            if (line_end == std::string::npos)
+                line_end = source_.size();
+            std::string_view directive_raw(source_.data() + pos, line_end - pos);
+            add_token(kind, directive_raw, pos, false, true, false);
+            consume_text(directive_raw, false);
+            passthrough_end_ = line_end;
+            return;
+        }
+
         add_token(kind, raw, pos, false, directive, false);
         consume_text(raw, false);
     }
