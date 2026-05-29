@@ -498,6 +498,36 @@ inline std::vector<ListItem> top_level_list_items(const TokenStream& tokens, siz
     return out;
 }
 
+inline bool is_module_header_import_semicolon(const TokenStream& tokens, size_t semi) {
+    if (semi >= tokens.size() || !kind_is(tokens[semi], TK::Semicolon))
+        return false;
+
+    // SystemVerilog permits package imports in a module/interface/program
+    // header before the parameter/port lists:
+    //
+    //   module m
+    //       import p::*;
+    //   #(parameter int W = 1) (...);
+    //
+    // The semicolon after `import p::*` is not the module header terminator.
+    // Treat it as a header-internal separator when scanning backward for the
+    // owning module keyword.  This deliberately uses TokenKind structure rather
+    // than the raw text of the import.
+    for (size_t n = semi; n > 0; --n) {
+        size_t i = n - 1;
+        if (!is_code_token(tokens[i]))
+            continue;
+        if (kind_is(tokens[i], TK::ImportKeyword))
+            return true;
+        if (kind_is(tokens[i], TK::Semicolon) ||
+            is_outer_close(tokens[i].lex->kind) ||
+            is_close_block(tokens[i].lex->kind) ||
+            starts_module_like_header(tokens[i].lex->kind))
+            break;
+    }
+    return false;
+}
+
 inline size_t find_header_keyword_before(const TokenStream& tokens, size_t open) {
     int pd = 0;
     size_t direct_prev = prev_code(tokens, open);
@@ -517,12 +547,65 @@ inline size_t find_header_keyword_before(const TokenStream& tokens, size_t open)
         else if (kind_is(tokens[i], TK::OpenParenthesis) && pd > 0) --pd;
         if (pd == 0 && starts_module_like_header(tokens[i].lex->kind))
             return i;
-        if (pd == 0 && kind_is(tokens[i], TK::Semicolon) && !open_follows_header_import)
+        if (pd == 0 && kind_is(tokens[i], TK::Semicolon) &&
+            !open_follows_header_import &&
+            !is_module_header_import_semicolon(tokens, i))
             break;
         if (pd == 0 && (is_outer_close(tokens[i].lex->kind) || is_close_block(tokens[i].lex->kind)))
             break;
     }
     return npos;
+}
+
+inline size_t module_header_import_owner(const TokenStream& tokens, size_t import_idx) {
+    if (import_idx >= tokens.size() || !kind_is(tokens[import_idx], TK::ImportKeyword))
+        return npos;
+
+    bool saw_import_semicolon = false;
+    for (size_t i = import_idx + 1; i < tokens.size(); ++i) {
+        if (!is_code_token(tokens[i]))
+            continue;
+        if (kind_is(tokens[i], TK::Semicolon)) {
+            saw_import_semicolon = true;
+            break;
+        }
+        if (is_outer_close(tokens[i].lex->kind) || is_close_block(tokens[i].lex->kind))
+            return npos;
+    }
+    if (!saw_import_semicolon)
+        return npos;
+
+    for (size_t n = import_idx; n > 0; --n) {
+        size_t i = n - 1;
+        if (!is_code_token(tokens[i]))
+            continue;
+        if (starts_module_like_header(tokens[i].lex->kind))
+            return i;
+        if (kind_is(tokens[i], TK::Semicolon) &&
+            !is_module_header_import_semicolon(tokens, i))
+            break;
+        if (is_outer_close(tokens[i].lex->kind) || is_close_block(tokens[i].lex->kind))
+            break;
+    }
+    return npos;
+}
+
+inline bool parameter_list_contains_directive(const TokenStream& tokens, size_t open, size_t close) {
+    for (size_t i = open + 1; i < close && i < tokens.size(); ++i) {
+        if (tokens[i].lex->is_directive)
+            return true;
+    }
+    return false;
+}
+
+inline size_t module_header_parameter_hash_owner(const TokenStream& tokens, size_t hash) {
+    if (hash >= tokens.size() || !kind_is(tokens[hash], TK::Hash))
+        return npos;
+    size_t open = next_code(tokens, hash + 1, tokens.size());
+    if (open == npos || !kind_is(tokens[open], TK::OpenParenthesis) ||
+        !tokens[open].immutable.topology.starts_parameter_list)
+        return npos;
+    return find_header_keyword_before(tokens, open);
 }
 
 inline bool is_instance_port_open(const TokenStream& tokens, size_t open) {
@@ -922,6 +1005,13 @@ public:
                 t.mutable_.wrap.must_break_before = true;
                 t.mutable_.wrap.must_break_after = true;
             }
+            if (module_header_import_owner(tokens, i) != npos) {
+                // Header imports are visually separate clauses in the module
+                // declaration, not ordinary same-line statements.  Break
+                // before the `import` keyword so the semicolon cannot be read
+                // as terminating the whole module header.
+                t.mutable_.wrap.must_break_before = true;
+            }
             if (t.mutable_.macro.suppress_wrapping) continue;
             t.mutable_.wrap.wrap_group = group;
             // Force line break after statement-/declaration-/block-like macro invocations.
@@ -957,7 +1047,9 @@ public:
                 t.mutable_.wrap.must_break_before = true;
             if (kind_is(t, TK::Semicolon) && t.immutable.syntax.paren_depth == 0) {
                 size_t next = next_code(tokens, i + 1, tokens.size());
-                t.mutable_.wrap.must_break_after = !(next != npos && kind_is(tokens[next], TK::Hash));
+                t.mutable_.wrap.must_break_after =
+                    is_module_header_import_semicolon(tokens, i) ||
+                    !(next != npos && kind_is(tokens[next], TK::Hash));
                 ++group;
                 // If a trailing comment immediately follows on the same line,
                 // defer the line break to after the comment so it renders inline.
@@ -1280,6 +1372,7 @@ public:
                     continue;
                 bool block = opts_.module.parameter_layout != "hanging";
                 bool expand = block || items.size() > 1 ||
+                              parameter_list_contains_directive(tokens, open, close) ||
                               (line_prefix_width(tokens, open) + 1 +
                                compact_width(tokens, open + 1, close) + 1 >
                                opts_.function_declaration.line_length);
@@ -1623,6 +1716,11 @@ public:
             }
 
             t.mutable_.indent.base_indent = level * opts_.indent_size;
+            if (size_t hdr = module_header_import_owner(tokens, i); hdr != npos)
+                t.mutable_.indent.base_indent =
+                    tokens[hdr].mutable_.indent.base_indent + opts_.indent_size;
+            if (size_t hdr = module_header_parameter_hash_owner(tokens, i); hdr != npos)
+                t.mutable_.indent.base_indent = tokens[hdr].mutable_.indent.base_indent;
             if (is_outer_close(t.lex->kind))
                 t.mutable_.indent.base_indent = 0;
             else if (is_outer_open(t.lex->kind) && opts_.default_indent_level_inside_outmost_block == 0)
@@ -1773,6 +1871,11 @@ public:
                 if (tokens[k].lex->is_comment &&
                     (tokens[k].immutable.comment.role == CommentRole::OwnLine ||
                      tokens[k].mutable_.wrap.must_break_before))
+                    tokens[k].mutable_.indent.base_indent = std::max(0, item_indent);
+                if ((kind == WrapListKind::ModuleParametersBlock ||
+                     kind == WrapListKind::ModuleParametersHanging) &&
+                    tokens[k].lex->is_directive &&
+                    tokens[k].mutable_.wrap.must_break_before)
                     tokens[k].mutable_.indent.base_indent = std::max(0, item_indent);
             }
             if (tokens[close].mutable_.wrap.must_break_before)

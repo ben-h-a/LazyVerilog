@@ -209,6 +209,63 @@ TEST_CASE("formatter: module parameter layout hanging", "[formatter]") {
           "endmodule\n");
 }
 
+TEST_CASE("formatter: module header imports and include parameters are multiline", "[formatter]") {
+    FormatOptions opts;
+    opts.safe_mode = true;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+    opts.module.parameter_layout = "block";
+    opts.port_declaration.align = false;
+
+    const std::string src =
+        "module tb_top import tb_top_pkg::*; #(parameter int MAX_CYCLES = 2_000_000,\n"
+        "`include \"el2_param.vh\"\n"
+        ")(input bit core_clk);\n"
+        "endmodule\n";
+
+    const std::string expected =
+        "module tb_top\n"
+        "    import tb_top_pkg::*;\n"
+        "#(\n"
+        "    parameter int MAX_CYCLES = 2_000_000,\n"
+        "    `include \"el2_param.vh\"\n"
+        ")(\n"
+        "    input bit core_clk\n"
+        ");\n"
+        "endmodule\n";
+
+    CHECK(format_source(src, opts) == expected);
+    CHECK(format_source(expected, opts) == expected);
+}
+
+TEST_CASE("formatter: multiple module header imports stay as separate clauses", "[formatter]") {
+    FormatOptions opts;
+    opts.safe_mode = true;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+    opts.module.parameter_layout = "block";
+    opts.port_declaration.align = false;
+
+    const std::string src =
+        "module tb_top import tb_top_pkg::*; import common_pkg::*, cfg_pkg::cfg_t; "
+        "#(parameter int MAX_CYCLES = 2_000_000)(input bit core_clk);\n"
+        "endmodule\n";
+
+    const std::string expected =
+        "module tb_top\n"
+        "    import tb_top_pkg::*;\n"
+        "    import common_pkg::*, cfg_pkg::cfg_t;\n"
+        "#(\n"
+        "    parameter int MAX_CYCLES = 2_000_000\n"
+        ")(\n"
+        "    input bit core_clk\n"
+        ");\n"
+        "endmodule\n";
+
+    CHECK(format_source(src, opts) == expected);
+    CHECK(format_source(expected, opts) == expected);
+}
+
 TEST_CASE("formatter: module parameter comments with commas are not split", "[formatter]") {
     FormatOptions opts;
     opts.safe_mode = true;
@@ -359,7 +416,8 @@ TEST_CASE("formatter: ANSI module header after package import is aligned", "[for
                         "// Input handshake signals\n"
                         "input logic in_valid_i, output logic in_ready_o);\n"
                         "endmodule\n",
-                        opts) == "module m import p::*;\n"
+                        opts) == "module m\n"
+                                 "    import p::*;\n"
                                  "(\n"
                                  "    input     logic               clk_i,\n"
                                  "    input     logic               rst_ni,\n"
