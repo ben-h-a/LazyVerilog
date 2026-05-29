@@ -41,6 +41,16 @@ inline size_t last_newline_offset(std::string_view text) {
 
 inline std::string render_tokens(const TokenStream& tokens) {
     std::string out;
+    size_t token_text_bytes = 0;
+    for (const Tok& tok : tokens)
+        token_text_bytes += tok.lex->text.size();
+    // Rendering appends every immutable token text plus formatter-owned
+    // whitespace.  Large generated register files can easily contain hundreds
+    // of thousands of small tokens; without a reserve(), std::string growth
+    // repeatedly reallocates and copies the partially-rendered output.  Reserve
+    // the exact token-text payload plus a conservative whitespace allowance so
+    // rendering remains linear in the final output size.
+    out.reserve(token_text_bytes + tokens.size());
     int col = 0;
     bool at_line_start = true;
     for (size_t i = 0; i < tokens.size(); ++i) {

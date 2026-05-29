@@ -183,6 +183,8 @@ inline std::string token_stream_to_log(const TokenStream& tokens) {
 }
 
 inline void write_log(const FormatOptions& opts, const std::string& filename, const TokenStream& tokens) {
+    if (opts.log_path.empty())
+        return;
     write_log(opts, filename, token_stream_to_log(tokens));
 }
 
