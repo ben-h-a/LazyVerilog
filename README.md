@@ -223,7 +223,7 @@ enable = true
 
 </details>
 
-## 📚 Documentation
+## 📚 Documents
 
 - [`lazyverilog.toml`](lazyverilog.toml) — complete example configuration.
 - [`docs/features.md`](docs/features.md) — all features at a glance.
