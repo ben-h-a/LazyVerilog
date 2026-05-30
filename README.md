@@ -212,6 +212,7 @@ enable = true
 - [`docs/lsp/index.md`](docs/lsp/index.md) — hover, definition, references, rename, completion, signature help, inlay hints, workspace symbols.
 
 **Formatter**
+- [`docs/formatter/usage.md`](docs/formatter/usage.md) — CLI usage and build instructions.
 - [`docs/formatter/options.md`](docs/formatter/options.md) — formatter options.
 - [`docs/formatter/macros.md`](docs/formatter/macros.md) — macro formatting policy.
 
@@ -228,6 +229,9 @@ enable = true
 - [`docs/autofunc/index.md`](docs/autofunc/index.md) — generate function/task call arguments.
 - [`docs/autoff/index.md`](docs/autoff/index.md) — generate always_ff blocks for registers.
 - [`docs/rtl-tree/index.md`](docs/rtl-tree/index.md) — module instantiation hierarchy viewer.
+
+**For Developers**
+- [`docs/dev.md`](docs/dev.md) — build, tests, and RTL format sweep.
 
 &nbsp;
 
