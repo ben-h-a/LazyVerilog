@@ -316,6 +316,16 @@ upload_release_asset() {
         prerelease_args+=(--prerelease)
     fi
 
+    local notes_file="${REPO_ROOT}/docs/releases/${VERSION}.md"
+    local notes_args=()
+    if [[ -f "$notes_file" ]]; then
+        printf 'Using release notes from %s\n' "${notes_file#$REPO_ROOT/}"
+        notes_args+=(--notes-file "$notes_file")
+    else
+        printf 'No release notes file found at %s; using default description.\n' "${notes_file#$REPO_ROOT/}"
+        notes_args+=(--notes "Release ${VERSION}")
+    fi
+
     if gh release view "$VERSION" >/dev/null 2>&1; then
         printf 'GitHub release %s already exists; uploading asset with --clobber.\n' "$VERSION"
         run gh release upload "$VERSION" "$RELEASE_ASSET" --clobber
@@ -323,7 +333,7 @@ upload_release_asset() {
         printf 'Creating GitHub release %s and uploading asset.\n' "$VERSION"
         run gh release create "$VERSION" "$RELEASE_ASSET" \
             --title "$VERSION" \
-            --notes "Release ${VERSION}" \
+            "${notes_args[@]}" \
             "${prerelease_args[@]}"
     fi
 }
