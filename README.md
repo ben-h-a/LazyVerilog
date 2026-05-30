@@ -50,7 +50,7 @@
 <details>
 <summary><b>🚨 Lint diagnostics</b></summary>
 
-<!-- TODO -->
+![Lint diagnostics](demo/videos/lint_diagnostics.png)
 
 </details>
 
@@ -90,9 +90,37 @@
 </details>
 
 <details>
-<summary><b>💡 Inlay hints / completion / hover</b></summary>
+<summary><b>💡 Hover</b></summary>
 
-<!-- TODO -->
+![Hover](demo/videos/hover.gif)
+
+</details>
+
+<details>
+<summary><b>🔍 Find references</b></summary>
+
+![Find references](demo/videos/get_reference.gif)
+
+</details>
+
+<details>
+<summary><b>✏️ Rename</b></summary>
+
+![Rename](demo/videos/rename.gif)
+
+</details>
+
+<details>
+<summary><b>🔭 Workspace symbols</b></summary>
+
+![Workspace symbols](demo/videos/workspace_symbols.gif)
+
+</details>
+
+<details>
+<summary><b>📝 Signature help</b></summary>
+
+![Signature help](demo/videos/sig_help.gif)
 
 </details>
 
