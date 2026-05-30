@@ -43,7 +43,7 @@
 <details>
 <summary><b>🎨 Formatting</b></summary>
 
-<video src="demo/videos/%3AFormat.webm" width="100%" autoplay loop muted playsinline></video>
+![Formatting](demo/videos/Format.gif)
 
 </details>
 
@@ -57,35 +57,35 @@
 <details>
 <summary><b>🌳 RTL tree</b></summary>
 
-<video src="demo/videos/%3ARtlTree.webm" width="100%" autoplay loop muted playsinline></video>
+![RTL tree](demo/videos/RtlTree.gif)
 
 </details>
 
 <details>
 <summary><b>🧭 Go to definition</b></summary>
 
-<video src="demo/videos/GoToDef.webm" width="100%" autoplay loop muted playsinline></video>
+![Go to definition](demo/videos/GoToDef.gif)
 
 </details>
 
 <details>
 <summary><b>🧩 Auto-instantiation</b></summary>
 
-<video src="demo/videos/AutoInst.webm" width="100%" autoplay loop muted playsinline></video>
+![Auto-instantiation](demo/videos/AutoInst.gif)
 
 </details>
 
 <details>
 <summary><b>🔌 Auto-wire</b></summary>
 
-<video src="demo/videos/AutoWire.webm" width="100%" autoplay loop muted playsinline></video>
+![Auto-wire](demo/videos/AutoWire.gif)
 
 </details>
 
 <details>
 <summary><b>🛠️ Auto-arg</b></summary>
 
-<video src="demo/videos/AutoArg.webm" width="100%" autoplay loop muted playsinline></video>
+![Auto-arg](demo/videos/AutoArg.gif)
 
 </details>
 
