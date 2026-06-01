@@ -168,7 +168,7 @@ doesn't work for your codebase, bug reports are welcome.
 | Find references | ✅ | Across open files and configured project files |
 | Rename symbol | ✅ | Best-effort across project files |
 | Hover | ✅ | Symbol details for modules, ports, signals, parameters, typedefs, subroutines, and macros |
-| Completion | ⚠️ | SV keywords plus current-file module and port names; not fully context-aware |
+| Completion | ⚠️ | Very limited; Still working on it. |
 | Signature help | ✅ | Functions and tasks |
 | Inlay hints | ✅ | Port names on instantiation |
 | Workspace symbols | ✅ | Modules, functions, tasks |
