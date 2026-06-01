@@ -1,5 +1,20 @@
 #include "hover.hpp"
 
+void Reflect(Writer& visitor, TextDocumentHover::Result& value) {
+    if (!value.contents.first && !value.contents.second) {
+        visitor.Null();
+        return;
+    }
+    visitor.StartObject();
+    visitor.Key("contents");
+    Reflect(visitor, value.contents);
+    if (value.range) {
+        visitor.Key("range");
+        Reflect(visitor, value.range);
+    }
+    visitor.EndObject();
+}
+
 std::optional<TextDocumentHover::Result> provide_hover(
     const Analyzer& analyzer, const lsTextDocumentPositionParams& params) {
     const auto& uri = params.textDocument.uri.raw_uri_;
