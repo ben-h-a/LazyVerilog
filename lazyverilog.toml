@@ -32,7 +32,7 @@ check_package_filename = true # check that package name matches filename
 enable = true
 severity = "warning"          # "warning" | "error" | "hint"
 one_module_per_file = true   # check that at most one module is declared per file
-module_instantiation_style = "positional"  # "positional", "named", or "both"
+module_instantiation_style = "named"  # "positional", "named", or "both"
 stale_autoinst_diagnostic = true
 
 [lint.statement]
@@ -48,7 +48,7 @@ explicit_begin = true # check that Verilog begin directive follows all applicabl
 enable = true
 severity = "warning"          # "warning" | "error" | "hint"
 functions_automatic = false   # functions should be automatic type
-function_call_style = "positional"      # "positional", "named", or "both"
+function_call_style = "both"      # "positional", "named", or "both"
 explicit_function_lifetime = true  # check that functions have explicit lifetime (static/automatic)
 explicit_task_lifetime = true    # check that tasks have explicit lifetime (static/automatic)
 
