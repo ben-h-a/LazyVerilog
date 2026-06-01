@@ -147,6 +147,9 @@ align_adaptive = true                  # if true, per-line gap; if false, all po
 [inlay_hint]
 enable = true  # set false to disable all inlay hints
 
+[autoff]
+register_pattern = "^r_"  # regex — signal matching this is the register (dst); the other is the source
+
 [autofunc]
 use_named_arguments = true
 

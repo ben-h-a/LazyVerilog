@@ -420,6 +420,12 @@ Config load_config(const std::filesystem::path& root, std::string* warning,
                 cfg.autowire.sort_by_name = *v;
         }
 
+        // [autoff]
+        if (auto aff = tbl["autoff"].as_table()) {
+            if (auto v = (*aff)["register_pattern"].value<std::string>())
+                cfg.autoff.register_pattern = *v;
+        }
+
         // [autofunc]
         if (auto af = tbl["autofunc"].as_table()) {
             if (auto v = (*af)["indent_size"].value<int64_t>())

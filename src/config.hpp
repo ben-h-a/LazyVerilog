@@ -252,6 +252,10 @@ struct AutoFuncOptions {
     bool use_named_arguments{true};
 };
 
+struct AutoffOptions {
+    std::string register_pattern;
+};
+
 struct ConfigWarning {
     std::filesystem::path path;
     uint32_t line{0};   // 1-based; 0 when unavailable
@@ -270,6 +274,7 @@ struct Config {
     AutoargOptions autoarg;
     AutowireOptions autowire;
     AutoFuncOptions autofunc;
+    AutoffOptions autoff;
 };
 
 /// Load lazyverilog.toml from root directory. Returns defaults if not found.

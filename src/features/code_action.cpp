@@ -211,7 +211,7 @@ std::vector<CodeAction> provide_code_actions(const Analyzer& analyzer, const Con
 
     // ── 4. AutoFF (single) ───────────────────────────────────────────────────
     try {
-        auto preview = preview_autoff(*state, line, config.lint.naming.register_pattern);
+        auto preview = preview_autoff(*state, line, config.autoff.register_pattern);
         if (!preview.has_error && !preview.pairs.empty()) {
             CodeAction action;
             action.title = "AutoFF: insert FF assignments";

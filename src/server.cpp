@@ -1054,7 +1054,7 @@ void LazyVerilogServer::register_handlers() {
                 int ff_line = get_int(1);
                 auto state = analyzer_.get_state(uri);
                 if (state) {
-                    auto result = autoff(*state, ff_line, config_.lint.naming.register_pattern);
+                    auto result = autoff(*state, ff_line, config_.autoff.register_pattern);
                     apply_ff_edits(result, uri);
                 }
             } else if (cmd == "lazyverilog.autoffAllPreview" ||
@@ -1062,7 +1062,7 @@ void LazyVerilogServer::register_handlers() {
                 std::string uri = get_string(0);
                 auto state = analyzer_.get_state(uri);
                 if (state) {
-                    auto result = autoff_all(*state, config_.lint.naming.register_pattern);
+                    auto result = autoff_all(*state, config_.autoff.register_pattern);
                     apply_ff_edits(result, uri);
                 }
             } else if (cmd == "lazyverilog.rtlTree") {

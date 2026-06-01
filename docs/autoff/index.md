@@ -2,31 +2,37 @@
 
 **Commands:** `lazyverilog.autoffPreview`, `lazyverilog.autoffApply`, `lazyverilog.autoffAllPreview`, `lazyverilog.autoffAllApply`
 
-Generates `always_ff` blocks for signals whose names match `lint.naming.register_pattern`. For each matching signal, AutoFF creates a clocked register assignment with optional synchronous reset logic.
+Inserts missing assignments into an existing `always_ff` block. AutoFF looks for a two-signal declaration on the cursor line — one name matching `lint.naming.register_pattern` (the register destination) and one not (the combinational source) — then inserts `<= '0` in the reset branch and `<= src` in the capture branch for any signal not already assigned.
 
 ```systemverilog
-// signal matching register_pattern = "^r_.*$"
-logic [7:0] r_count;
+// Two-signal declaration: r_count matches register_pattern, w_count does not
+logic [7:0] r_count, w_count;
 
-// AutoFF generates:
+// Existing always_ff in the same file (must already be present):
 always_ff @(posedge i_clk or negedge i_rst_n) begin
     if (!i_rst_n) begin
-        r_count <= '0;
+        // AutoFF inserts: r_count <= '0;
     end else begin
-        r_count <= r_count;
+        // AutoFF inserts: r_count <= w_count;
     end
 end
 ```
 
-Preview commands show the generated blocks without applying them.
+`autoffApply` / `autoffAllApply` write the edits. `autoffPreview` / `autoffAllPreview` show what would be inserted without applying.
+
+`autoffAllApply` scans the whole file for qualifying two-signal declarations and fills all of them at once.
+
+**Requirements:**
+- An `always_ff` block with an `if/else begin` structure must already exist in the file.
+- The cursor line must contain a declaration with exactly two signals, one matching the register pattern.
 
 Controlled by the register naming pattern:
 
 ```toml
-[lint.naming]
-register_pattern = "^r_.*$"
+[autoff]
+register_pattern = "^r_"
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `register_pattern` | string | `"^r_.*$"` | Regex — signals matching this pattern get `always_ff` blocks generated |
+| `register_pattern` | string | `"^r_"` | Regex — the signal whose name matches is treated as the register (destination); the other is the source |
