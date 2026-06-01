@@ -6,8 +6,11 @@
             display("\n");                                   \
         $display("0x%x ", ARR[ii]);                          \
     end
-function packet_t foo(input packet_t i_a, input i_b);
-    return packet_t'(i_a+i_b);
+function packet_t foo(
+    input packet_t i_a,
+    input i_b
+);
+    return packet_t'(i_a + i_b);
 endfunction
 
 typedef struct {
@@ -70,9 +73,13 @@ parameter DEPTH = 8;
 module memory_top #(
     parameter int WIDTH = 4,
     parameter int DEPTH = 8
-)( /*autoarg*/
+)(
     i_clk, i_rst_n, i_data,
-    i_d
+    i_data2, i_data3, i_dd,
+    i_dd22222, dd22222, i_d33333,
+    i_d44333, i_dd44321, i_d44334,
+    VDD, VSS, test,
+    VSS
 );
 input                            i_clk                           ;
 input                            i_rst_n                         ;
@@ -96,7 +103,7 @@ logic               [`WIDTH-1:0]        data                                ;
 
 packet_ttttttttttteeettt [1:0]          dp                                  ;
 // test
-logic               [2:0]               a, b                                   ;
+logic               [2:0]               a                                   , b                                   ;
 //dd
 /* ehlo */
 // a, b, c
@@ -117,75 +124,20 @@ automatic int       [3:0]               b                                   ;
 
 wire                [1:0]               addr                                ;
 logic                                   address                             ;
-logic                                   test, r_test                              ; // test
-logic                                   test3, r_test2                             ;
+logic                                   test                                , r_test                              ; // test
+logic                                   test3                               , r_test2                             ;
 /* */
-logic                                   r_test4                             ;
-logic               [7:0]               ddtt                                ;
-logic               [7:0]               dd                                  ;
-logic               [7:0]               holyshit                            ;
-logic               [7:0]               zzzry                               ;
-logic               [7:0]               testxrp                             ;
-logic               [7:0]               threeshit                           ;
-logic               [3:0]               www333                              ;
-logic               [3:0]               zzfuk                               ;
-logic               [3:0]               o_d                                 ;
-logic                                   d                                   ;
-logic               [7:0]               intercontest                        ;
-logic               [7+:1]              intercontest                        ;
+logic               r_test4                             ;
 
-assign d          = a+2;
-assign daaa       = a+2;
-assign very_long_text = a+2;
-
-memory #(.MEM_SIZE(3) /*testtest*/) u_memory ( /*autoinst*/
-    .address  (addr      ),
-    .data_in  (intercontest),
-    .read_write (read_wsssrite),
-    .chip_en  (tt        ),
-    .www3test (a         ),
-    .data_out (threeshit )
-);
-
-memory #( /*param*/.MEM_SIZE(3) /*testtest*/) u_mem ( /*autoinst*/
-    .i_clk    (testxrp   ),
-    .address  (addressss ),
-    .data_in  (threeshit ), // input
-    .chip_en  (chip_en   ), // output
-    .www333   (www333    ), // input
-    .zzfuk    (zzfuk     )
-);
-
-memory u_mem1 (
-    .address  (          ),
-    .data_in  (zzzry     ), // test
-    .dataut   (          ),
-    .read_te  (          ),
-    .chip_en  (          ),
-    .wwtest   (          )
-);
+assign d          = a + 2;
+assign daaa       = a + 2;
+assign very_long_text = a + 2;
 
 memory u_mem2 (
     .address  (          ),
     .data_in  (          ),
     .data_out (          ),
     .read_write (          )
-);
-
-memory u_mem5 ( //test
-    // input
-    .i_clk    (i_clk     ), // input
-    .address  (addr      ), // output() .data_in  (data_in   ),
-`ifdef A
-    .data_out (kj        ), // test
-`elsif B
-    .read_write (read_write),
-`endif
-    .chip_en  (chip_en   ),
-    .www333   (www333    ),
-    .www333   (www333    ),
-    .zzfuk    (zzfuk     ),
-    .zzfuk    (zzfuk     )
 );
 
 `ifdef RTL_SIM
@@ -196,10 +148,6 @@ memory u_mem3 (
     .data_out (addr      ),
     .read_write (read_write),
     .chip_en  (tt        ),
-    .www333   (www333    ),
-    .www333   (www333    ),
-    .zzfuk    (zzfuk     ),
-    .zzfuk    (zzfuk     )
 );
 `else
 memory u_mem4();
@@ -221,7 +169,7 @@ always_comb begin
     a          <= 3;
     very_long  <= 3;
 
-    if (a==3) begin
+    if (a == 3) begin
         a          += 1;
         //test
     end
@@ -231,17 +179,17 @@ always_comb begin
         end
     endcase
 
-    for (int i = 0 ; i<32 ; i++) begin
+    for (int i = 0 ; i < 32 ; i++) begin
     end
 
-    while (i<5) begin
+    while (i < 5) begin
         $display("i = %0d", i);
         /* test*/
         i++;
     end
 
-    for (int i = 0 ; i<32 ; i++) begin
-        while (i<5) begin
+    for (int i = 0 ; i < 32 ; i++) begin
+        while (i < 5) begin
             $display("i = %0d", i);
             i++;
         end
@@ -250,7 +198,7 @@ always_comb begin
     do begin
         $display("i = %0d", i);
         i++;
-    end while (i<5);
+    end while (i < 5);
 
     foreach (arr[i]) begin
         $display(
@@ -324,7 +272,7 @@ always_comb begin
             .result(result)
         )) begin
         a          = 3;
-        b          = 7+1;
+        b          = 7 + 1;
     end
 
     if (add_number(
@@ -344,7 +292,8 @@ always_comb begin
 end
 
 initial begin
-    forever #5 clk = ~clk;
+    forever
+        #5 clk     = ~clk;
     // 10 time-unit period
 end
 
