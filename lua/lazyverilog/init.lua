@@ -314,6 +314,17 @@ function M.setup(user_config)
 	})
 
 	-- Register :Interface <inst> or :Interface <inst1> <inst2> user command.
+	--
+	-- Use `nargs = "*"` instead of `"+"` so Neovim dispatches zero-argument
+	-- calls to this callback.  That lets us show LazyVerilog's command-specific
+	-- usage text instead of Neovim stopping earlier with the generic:
+	--
+	--     E471: Argument required
+	--
+	-- Examples:
+	--   :Interface u_cpu
+	--   :Interface u_cpu u_bus
+	--   :Interface              " Shows the usage notification below.
 	vim.api.nvim_create_user_command("Interface", function(opts)
 		local args = vim.split(vim.trim(opts.args), "%s+")
 		if #args < 1 or args[1] == "" then
@@ -326,7 +337,7 @@ function M.setup(user_config)
 		else
 			M.interface(args[1], args[2])
 		end
-	end, { nargs = "+" })
+	end, { nargs = "*" })
 
 	-- Register :RtlTree / :RtlTreeReverse user commands.
 	vim.api.nvim_create_user_command("RtlTree", function()
