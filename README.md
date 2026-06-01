@@ -71,6 +71,13 @@
 </details>
 
 <details>
+<summary><b>🔗 Interface connect</b></summary>
+
+![Interface connect](demo/videos/InterfaceConnect.gif)
+
+</details>
+
+<details>
 <summary><b>🧩 Auto-instantiation</b></summary>
 
 ![Auto-instantiation](demo/videos/AutoInst.gif)
