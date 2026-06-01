@@ -167,8 +167,13 @@ std::vector<CodeAction> provide_code_actions(const Analyzer& analyzer, const Con
                 size_t line_start = lsp_offset(state->text, result->open_line, 0);
                 size_t open = lsp_offset(state->text, result->open_line, result->open_col);
                 std::string line_prefix = state->text.substr(line_start, open - line_start);
-                std::string formatted =
-                    line_prefix + format_autoarg(*result, config.autoarg, config.format);
+                // AutoArg's generator knows which ports belong in the non-ANSI module header,
+                // but the project formatter owns final whitespace/layout decisions.  Format the
+                // complete replacement header fragment instead of returning the raw generated
+                // port list so AutoArg behaves like the other auto-code actions.
+                std::string formatted = format_emit_text(
+                    line_prefix + format_autoarg(*result, config.autoarg, config.format),
+                    config.format);
                 auto we = make_range_edit(uri, result->open_line, 0,
                                           result->end_line, result->end_col, formatted);
                 CodeAction action;

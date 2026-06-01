@@ -88,6 +88,18 @@ static size_t lsp_offset(const std::string& text, int line, int col) {
     return pos;
 }
 
+// Format a generated replacement fragment and strip final newlines so it can be
+// used as an LSP TextEdit.newText value for a bounded range.  `format_source()`
+// renders complete files with a trailing newline, but range replacements such as
+// AutoArg's module-header edit should not accidentally insert an extra blank line
+// before the untouched body that follows the edited range.
+static std::string format_emit_text(const std::string& text, const FormatOptions& options) {
+    std::string formatted = format_source(text, options);
+    while (!formatted.empty() && formatted.back() == '\n')
+        formatted.pop_back();
+    return formatted;
+}
+
 static std::string json_string(std::string_view text) {
     std::string out = "\"";
     for (char c : text) {
@@ -681,8 +693,12 @@ void LazyVerilogServer::register_handlers() {
                         size_t line_start = lsp_offset(text, result.open_line, 0);
                         size_t open = lsp_offset(text, result.open_line, result.open_col);
                         std::string line_prefix = text.substr(line_start, open - line_start);
-                        std::string replacement =
-                            line_prefix + format_autoarg(result, config_.autoarg, config_.format);
+                        // Generate the AutoArg port list, then run the resulting module-header
+                        // fragment through the formatter.  This keeps AutoArg-on-save formatting
+                        // consistent even when whole-document format-on-save is disabled below.
+                        std::string replacement = format_emit_text(
+                            line_prefix + format_autoarg(result, config_.autoarg, config_.format),
+                            config_.format);
                         size_t end = lsp_offset(text, result.end_line, result.end_col);
                         text.replace(line_start, end - line_start, replacement);
                     }

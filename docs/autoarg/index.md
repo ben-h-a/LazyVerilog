@@ -21,7 +21,7 @@ After running AutoArg, the port list `(...)` is regenerated from the body declar
 As a **code action**, it applies to the module under the cursor.
 With **`autoarg_on_save`**, it runs on every module in the file on save.
 
-Port formatting (ports-per-line, indentation) follows `[format.module]` settings.
+AutoArg first regenerates the port list from body declarations, then passes the generated module-header replacement through the main formatter. The final layout therefore follows `[format]` and `[format.module]` settings, including indentation and non-ANSI ports-per-line options.
 
 ```toml
 [autoarg]
