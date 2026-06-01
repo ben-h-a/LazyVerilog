@@ -90,7 +90,7 @@ static std::vector<std::string> parse_declaration_signals(const DocumentState& s
 
 // ── Pair signals using register pattern ──────────────────────────────────────
 
-static std::pair<std::string, std::string> pair_signals(
+static std::optional<std::pair<std::string, std::string>> pair_signals(
     const std::vector<std::string>& names, const std::regex& reg_re)
 {
     std::vector<std::string> regs, srcs;
@@ -100,10 +100,13 @@ static std::pair<std::string, std::string> pair_signals(
         else
             srcs.push_back(n);
     }
+
+    // AutoFF intentionally refuses to guess direction from declaration order.
+    // A two-signal declaration is actionable only when the naming rule gives an
+    // unambiguous pair: exactly one register destination and exactly one source.
     if (regs.size() == 1 && srcs.size() == 1)
-        return {srcs[0], regs[0]};
-    // Fallback: last = registered
-    return {names[0], names[1]};
+        return std::make_pair(srcs[0], regs[0]);
+    return std::nullopt;
 }
 
 // ── Parse always_ff if/else structure ────────────────────────────────────────
@@ -118,6 +121,31 @@ struct FfBlock {
     const BlockStatementSyntax* if_block{nullptr};
     const BlockStatementSyntax* else_block{nullptr};
 };
+
+static const StatementSyntax* unwrap_procedural_body(const StatementSyntax* statement) {
+    // A normal sequential block appears in source as:
+    //
+    //     always_ff @(posedge clk or negedge rst_n) begin
+    //         ...
+    //     end
+    //
+    // In slang's concrete syntax tree, the event control is represented as a
+    // TimingControlStatementSyntax whose child statement is the actual body.
+    // AutoFF does not care about the clock/reset names or edge directions; it
+    // only needs to find the outer begin/end block that contains the reset/capture
+    // if/else.  Unwrap timing controls so both of these shapes are accepted:
+    //
+    //     always_ff begin ... end
+    //     always_ff @(...) begin ... end
+    while (statement) {
+        if (const auto* timed = statement->as_if<TimingControlStatementSyntax>()) {
+            statement = timed->statement;
+            continue;
+        }
+        break;
+    }
+    return statement;
+}
 
 static int token_line(const SourceManager& sm, const slang::parsing::Token& tok) {
     if (!tok || !tok.location().valid()) return 0;
@@ -144,7 +172,8 @@ struct FfFinder : public SyntaxVisitor<FfFinder> {
             return;
         }
 
-        const auto* outer = node.statement->as_if<BlockStatementSyntax>();
+        const auto* body = unwrap_procedural_body(node.statement);
+        const auto* outer = body ? body->as_if<BlockStatementSyntax>() : nullptr;
         if (!outer) {
             error = "AutoFF: always_ff block missing 'begin'";
             visitDefault(node);
@@ -333,7 +362,15 @@ AutoffResult autoff(const DocumentState& state, int cursor_line, const std::stri
         return result;
     }
 
-    auto [src, dst] = pair_signals(names, reg_re);
+    auto signal_pair = pair_signals(names, reg_re);
+    if (!signal_pair) {
+        result.has_error = false;
+        result.warn = true;
+        result.error =
+            "AutoFF: declaration must contain exactly one signal matching register_pattern";
+        return result;
+    }
+    auto [src, dst] = *signal_pair;
 
     FfBlock ff;
     bool found;
@@ -450,7 +487,15 @@ AutoffResult preview_autoff(const DocumentState& state, int cursor_line, const s
         return result;
     }
 
-    auto [src, dst] = pair_signals(names, reg_re);
+    auto signal_pair = pair_signals(names, reg_re);
+    if (!signal_pair) {
+        result.has_error = false;
+        result.warn = true;
+        result.error =
+            "AutoFF: declaration must contain exactly one signal matching register_pattern";
+        return result;
+    }
+    auto [src, dst] = *signal_pair;
 
     FfBlock ff;
     bool found;

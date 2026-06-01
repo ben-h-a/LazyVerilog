@@ -368,8 +368,13 @@ function M.setup(user_config)
 		vim.schedule(function() _show_rename_unresolved(result.locations) end)
 	end
 
-	-- AutoFF: intercept code-action commands client-side to show floating preview.
-	vim.lsp.commands["lazyverilog.autoff"] = function(cmd, ctx)
+	-- AutoFF: intercept code-action commands client-side to show the floating
+	-- confirmation preview.  Some server versions/code paths return the preview
+	-- command directly (`lazyverilog.autoffPreview`), while older/local wrappers may
+	-- use the shorter client-only command (`lazyverilog.autoff`).  Register both so
+	-- Neovim does not fall back to a plain workspace/executeCommand request that
+	-- returns preview JSON without displaying the confirmation window.
+	local function handle_autoff_preview_command(cmd, ctx)
 		local uri  = cmd.arguments and cmd.arguments[1]
 		local line = cmd.arguments and cmd.arguments[2]
 		if not uri then return end
@@ -380,7 +385,10 @@ function M.setup(user_config)
 		)
 	end
 
-	vim.lsp.commands["lazyverilog.autoffAll"] = function(cmd, ctx)
+	vim.lsp.commands["lazyverilog.autoff"] = handle_autoff_preview_command
+	vim.lsp.commands["lazyverilog.autoffPreview"] = handle_autoff_preview_command
+
+	local function handle_autoff_all_preview_command(cmd, ctx)
 		local uri = cmd.arguments and cmd.arguments[1]
 		if not uri then return end
 		_autoff_command_handler(
@@ -389,6 +397,9 @@ function M.setup(user_config)
 			ctx
 		)
 	end
+
+	vim.lsp.commands["lazyverilog.autoffAll"] = handle_autoff_all_preview_command
+	vim.lsp.commands["lazyverilog.autoffAllPreview"] = handle_autoff_all_preview_command
 
 	-- AutoWire: intercept code-action command client-side to show floating preview.
 	vim.lsp.commands["lazyverilog.autowire"] = function(_cmd, _ctx)

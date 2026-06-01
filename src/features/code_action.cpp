@@ -216,7 +216,8 @@ std::vector<CodeAction> provide_code_actions(const Analyzer& analyzer, const Con
             CodeAction action;
             action.title = "AutoFF: insert FF assignments";
             action.kind = optional<std::string>(std::string("refactor.rewrite"));
-            // Return as command — client calls autoffPreview
+            // Return the preview command. The Neovim plugin shows the confirmation
+            // floating window from preview data, then calls autoffApply if accepted.
             lsCommandWithAny cmd;
             cmd.title = "AutoFF: insert FF assignments";
             cmd.command = "lazyverilog.autoffPreview";

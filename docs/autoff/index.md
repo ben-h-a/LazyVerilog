@@ -2,7 +2,7 @@
 
 **Commands:** `lazyverilog.autoffPreview`, `lazyverilog.autoffApply`, `lazyverilog.autoffAllPreview`, `lazyverilog.autoffAllApply`
 
-Inserts missing assignments into an existing `always_ff` block. AutoFF looks for a two-signal declaration on the cursor line — one name matching `lint.naming.register_pattern` (the register destination) and one not (the combinational source) — then inserts `<= '0` in the reset branch and `<= src` in the capture branch for any signal not already assigned.
+Inserts missing assignments into an existing `always_ff` block. AutoFF looks for a two-signal declaration on the cursor line — one name matching `[autoff].register_pattern` (the register destination) and one not (the combinational source) — then inserts `<= '0` in the reset branch and `<= src` in the capture branch for any signal not already assigned.
 
 ```systemverilog
 // Two-signal declaration: r_count matches register_pattern, w_count does not
@@ -18,13 +18,15 @@ always_ff @(posedge i_clk or negedge i_rst_n) begin
 end
 ```
 
-`autoffApply` / `autoffAllApply` write the edits. `autoffPreview` / `autoffAllPreview` show what would be inserted without applying.
+`autoffPreview` / `autoffAllPreview` return preview pairs that the Neovim plugin displays in a confirmation floating window. If accepted, `autoffApply` / `autoffAllApply` write the edits.
 
 `autoffAllApply` scans the whole file for qualifying two-signal declarations and fills all of them at once.
 
+Clock and reset signal names are not interpreted. AutoFF only requires the existing `always_ff @(...) begin ... end` body to contain an `if (...) begin ... end else begin ... end` structure; the first branch is treated as reset and the `else` branch as capture.
+
 **Requirements:**
 - An `always_ff` block with an `if/else begin` structure must already exist in the file.
-- The cursor line must contain a declaration with exactly two signals, one matching the register pattern.
+- The cursor line must contain a declaration with exactly two signals, exactly one matching the register pattern and exactly one not matching it. Ambiguous declarations are skipped; AutoFF does not guess from declaration order.
 
 Controlled by the register naming pattern:
 

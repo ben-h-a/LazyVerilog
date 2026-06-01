@@ -933,6 +933,48 @@ void LazyVerilogServer::register_handlers() {
                 return v;
             };
 
+            auto preview_ff_result = [&](const AutoffResult& result) {
+                // The Neovim client-side AutoFF command expects a small JSON object:
+                //   { "pairs": [{ "src": "...", "dst": "...", ... }] }
+                // or, for errors/warnings:
+                //   { "error": "...", "warn": true }
+                // Keep this separate from autoffApply, which returns a WorkspaceEdit.
+                std::string json = "{";
+                bool need_comma = false;
+                auto comma = [&]() {
+                    if (need_comma)
+                        json += ",";
+                    need_comma = true;
+                };
+                if (!result.error.empty()) {
+                    comma();
+                    json += "\"error\":" + json_string(result.error);
+                }
+                if (result.warn) {
+                    comma();
+                    json += "\"warn\":true";
+                }
+                if (result.has_error) {
+                    comma();
+                    json += "\"has_error\":true";
+                }
+                comma();
+                json += "\"pairs\":[";
+                for (size_t i = 0; i < result.pairs.size(); ++i) {
+                    const auto& pair = result.pairs[i];
+                    if (i > 0)
+                        json += ",";
+                    json += "{";
+                    json += "\"src\":" + json_string(pair.src);
+                    json += ",\"dst\":" + json_string(pair.dst);
+                    json += ",\"missing_if\":" + std::string(pair.missing_if ? "true" : "false");
+                    json += ",\"missing_else\":" + std::string(pair.missing_else ? "true" : "false");
+                    json += "}";
+                }
+                json += "]}";
+                rsp.result.SetJsonString(json, lsp::Any::kObjectType);
+            };
+
             auto apply_ff_edits = [&](const AutoffResult& result, const std::string& uri) {
                 if (result.has_error || (result.edits.empty() && result.warn)) {
                     // Return null result
@@ -1049,7 +1091,15 @@ void LazyVerilogServer::register_handlers() {
                         rsp.result.SetJsonString(workspace_edit_json(uri, *edit),
                                                  lsp::Any::kObjectType);
                 }
-            } else if (cmd == "lazyverilog.autoffPreview" || cmd == "lazyverilog.autoffApply") {
+            } else if (cmd == "lazyverilog.autoffPreview") {
+                std::string uri = get_string(0);
+                int ff_line = get_int(1);
+                auto state = analyzer_.get_state(uri);
+                if (state) {
+                    auto result = preview_autoff(*state, ff_line, config_.autoff.register_pattern);
+                    preview_ff_result(result);
+                }
+            } else if (cmd == "lazyverilog.autoffApply") {
                 std::string uri = get_string(0);
                 int ff_line = get_int(1);
                 auto state = analyzer_.get_state(uri);
@@ -1057,8 +1107,14 @@ void LazyVerilogServer::register_handlers() {
                     auto result = autoff(*state, ff_line, config_.autoff.register_pattern);
                     apply_ff_edits(result, uri);
                 }
-            } else if (cmd == "lazyverilog.autoffAllPreview" ||
-                       cmd == "lazyverilog.autoffAllApply") {
+            } else if (cmd == "lazyverilog.autoffAllPreview") {
+                std::string uri = get_string(0);
+                auto state = analyzer_.get_state(uri);
+                if (state) {
+                    auto result = preview_autoff_all(*state, config_.autoff.register_pattern);
+                    preview_ff_result(result);
+                }
+            } else if (cmd == "lazyverilog.autoffAllApply") {
                 std::string uri = get_string(0);
                 auto state = analyzer_.get_state(uri);
                 if (state) {
