@@ -283,7 +283,8 @@ enable = true
 - [`docs/rtl-tree/index.md`](docs/rtl-tree/index.md) — module instantiation hierarchy viewer.
 
 **For Developers**
-- [`docs/dev.md`](docs/dev.md) — build, tests, and RTL format sweep.
+- [`docs/dev/test.md`](docs/dev/test.md) — build, tests, and RTL format sweep.
+- [`docs/dev/files.md`](docs/dev/files.md) — design filelist cache and extra-file mtime behavior.
 
 &nbsp;
 
