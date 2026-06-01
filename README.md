@@ -278,6 +278,8 @@ enable = true
 - [`docs/autowire/index.md`](docs/autowire/index.md) — generate missing signal declarations.
 - [`docs/autofunc/index.md`](docs/autofunc/index.md) — generate function/task call arguments.
 - [`docs/autoff/index.md`](docs/autoff/index.md) — insert reset/capture assignments into existing always_ff blocks.
+- [`docs/connect.md`](docs/connect.md) — interactively wire output-to-input module instance ports.
+- [`docs/interface.md`](docs/interface.md) — inspect and edit signal interfaces between instances.
 - [`docs/rtl-tree/index.md`](docs/rtl-tree/index.md) — module instantiation hierarchy viewer.
 
 **For Developers**

@@ -154,6 +154,7 @@ set(LAZYVERILOG_TEST_SOURCES
     tests/test_formatter.cpp
     tests/test_lint.cpp
     tests/test_autoff.cpp
+    tests/test_connect.cpp
     tests/test_references.cpp
     tests/test_rename.cpp
     tests/test_definition.cpp
@@ -171,6 +172,7 @@ set(LAZYVERILOG_TEST_SOURCES
     src/features/autoff.cpp
     src/features/autofunc.cpp
     src/features/autowire.cpp
+    src/features/connect.cpp
     src/features/inlay_hints.cpp
     src/features/references.cpp
     src/features/rename.cpp

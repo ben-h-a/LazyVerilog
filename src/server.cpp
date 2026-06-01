@@ -41,6 +41,7 @@
 #include "features/autoinst.hpp"
 #include "features/autowire.hpp"
 #include "features/code_action.hpp"
+#include "features/connect.hpp"
 #include "features/definition.hpp"
 #include "features/formatter.hpp"
 #include "features/hover.hpp"
@@ -388,7 +389,27 @@ void LazyVerilogServer::publish_diagnostics(const std::string& uri) {
             for (auto diag : state->parse_diagnostics)
                 add_diag(std::move(diag));
 
-            auto lint_diags = run_lint(*state, config_.lint, &state->index);
+            // Most lint rules only need the current file's SyntaxIndex.  The stale
+            // AutoInst check is different: it validates each instance's named
+            // port connections against the instantiated module's declaration,
+            // and that module is commonly defined in a design-filelist file
+            // rather than in the current buffer (for example demo/memory_top.sv
+            // instantiates memory from demo/memory.sv).
+            //
+            // Build the merged index only when that rule is enabled.  On the
+            // normal LSP path merge_extra_file_modules() uses the cached
+            // extra-file snapshots and checks only the .f filelist mtime per
+            // request, so this avoids broad per-edit overhead for users who do
+            // not enable stale_autoinst_diagnostic.
+            SyntaxIndex lint_index;
+            const SyntaxIndex* lint_index_ptr = &state->index;
+            if (config_.lint.module.stale_autoinst_diagnostic) {
+                lint_index = state->index;
+                analyzer_.merge_extra_file_modules(lint_index);
+                lint_index_ptr = &lint_index;
+            }
+
+            auto lint_diags = run_lint(*state, config_.lint, lint_index_ptr);
             for (auto diag : lint_diags)
                 add_diag(std::move(diag));
         }
@@ -1199,8 +1220,68 @@ void LazyVerilogServer::register_handlers() {
                         }
                     }
                 }
+            } else if (cmd == "lazyverilog.connectInfo") {
+                std::string uri = get_string(0);
+                rsp.result.SetJsonString(connect_info_json(analyzer_, uri), lsp::Any::kObjectType);
+            } else if (cmd == "lazyverilog.connectApplyPreview") {
+                std::string uri = get_string(0);
+                std::string source_path = get_string(1);
+                std::string source_port = get_string(2);
+                std::string dest_path = get_string(3);
+                std::string dest_port = get_string(4);
+                std::string wire_name = get_string(5);
+                rsp.result.SetJsonString(connect_apply_preview_json(analyzer_, uri, source_path,
+                                                                     source_port, dest_path,
+                                                                     dest_port, wire_name),
+                                         lsp::Any::kObjectType);
+            } else if (cmd == "lazyverilog.connectApply") {
+                std::string uri = get_string(0);
+                std::string source_path = get_string(1);
+                std::string source_port = get_string(2);
+                std::string dest_path = get_string(3);
+                std::string dest_port = get_string(4);
+                std::string wire_name = get_string(5);
+                rsp.result.SetJsonString(connect_apply_edit_json(analyzer_, uri, source_path,
+                                                                 source_port, dest_path, dest_port,
+                                                                 wire_name),
+                                         lsp::Any::kObjectType);
+            } else if (cmd == "lazyverilog.interface") {
+                std::string uri = get_string(0);
+                std::string inst1_name = get_string(1);
+                std::string inst2_name = get_string(2);
+                rsp.result.SetJsonString(interface_json(analyzer_, uri, inst1_name, inst2_name),
+                                         lsp::Any::kObjectType);
+            } else if (cmd == "lazyverilog.interfaceConnect") {
+                std::string uri = get_string(0);
+                std::string inst1_name = get_string(1);
+                std::string inst2_name = get_string(2);
+                std::string inst1_port = get_string(3);
+                std::string inst2_port = get_string(4);
+                std::string wire_name = get_string(5);
+                std::string wire_type = get_string(6);
+                rsp.result.SetJsonString(interface_connect_edit_json(analyzer_, uri, inst1_name,
+                                                                     inst2_name, inst1_port,
+                                                                     inst2_port, wire_name,
+                                                                     wire_type),
+                                         lsp::Any::kObjectType);
+            } else if (cmd == "lazyverilog.interfaceDisconnect") {
+                std::string uri = get_string(0);
+                std::string inst1_name = get_string(1);
+                std::string inst2_name = get_string(2);
+                std::string inst1_port = get_string(3);
+                std::string inst2_port = get_string(4);
+                std::string signal_name = get_string(5);
+                rsp.result.SetJsonString(interface_disconnect_edit_json(analyzer_, uri, inst1_name,
+                                                                        inst2_name, inst1_port,
+                                                                        inst2_port, signal_name),
+                                         lsp::Any::kObjectType);
+            } else if (cmd == "lazyverilog.singleInterface") {
+                std::string uri = get_string(0);
+                std::string inst_name = get_string(1);
+                rsp.result.SetJsonString(single_interface_json(analyzer_, uri, inst_name),
+                                         lsp::Any::kObjectType);
             }
-            // Other commands (connect, interface, lint) — return null for now
+            // Other commands (lint) — return null for now
             if (rsp.result.GetType() == lsp::Any::Type::kUnKnown) {
                 lsp::Any null_result;
                 null_result.SetJsonString("null", lsp::Any::kNullType);

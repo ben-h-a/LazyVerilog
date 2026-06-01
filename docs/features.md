@@ -11,5 +11,7 @@
 | [AutoWire](autowire/index.md) | Generate missing signal declarations |
 | [AutoFunc](autofunc/index.md) | Generate function/task call arguments |
 | [AutoFF](autoff/index.md) | Insert reset/capture assignments into existing always_ff blocks |
+| [Connect](connect.md) | Interactively wire module instance output ports to input ports |
+| [Interface](interface.md) | Inspect and edit signal interfaces between instances |
 | [RTL Tree](rtl-tree/index.md) | Module instantiation hierarchy viewer |
 | [Design & Filelist](design/index.md) | Design index and preprocessor defines |
