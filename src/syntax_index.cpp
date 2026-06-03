@@ -844,8 +844,23 @@ SyntaxIndex SyntaxIndex::build(const slang::syntax::SyntaxTree& tree, std::strin
             if (member)
                 process_member(*member, index, sm, source);
         }
-    } else if (const auto* module = root.as_if<ModuleDeclarationSyntax>()) {
-        process_module(*module, index, sm, source);
+    } else if (const auto* member = root.as_if<MemberSyntax>()) {
+        // slang can expose a single-file design element directly as the
+        // SyntaxTree root instead of wrapping it in CompilationUnitSyntax.
+        //
+        // Examples:
+        //
+        //     package p; ... endpackage
+        //     interface bus_if; ... endinterface
+        //     class cfg; ... endclass
+        //     typedef enum { IDLE, BUSY } state_t;
+        //
+        // The compilation-unit path above sends every top-level item through
+        // process_member(), which preserves package/interface/class/typedef
+        // identity.  A direct-root member must use the same dispatch path;
+        // otherwise live-open standalone files reached by go-to-definition can
+        // be indexed differently from their disk extra-file snapshots.
+        process_member(*member, index, sm, source);
     }
 
     collect_imports(root, index, sm);

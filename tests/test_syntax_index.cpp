@@ -69,3 +69,67 @@ TEST_CASE("syntax_index: finds memory instantiation in top", "[index]") {
     CHECK(it->instance_name == "u_mem");
     CHECK(it->parent_module == "top");
 }
+
+TEST_CASE("syntax_index: standalone package root preserves package symbols", "[index]") {
+    const std::string text =
+        "package standalone_pkg;\n"
+        "    typedef enum { PKG_IDLE, PKG_DONE } pkg_state_t;\n"
+        "    parameter int PKG_WIDTH = 8;\n"
+        "endpackage\n";
+    auto tree = slang::syntax::SyntaxTree::fromText(text);
+    REQUIRE(tree != nullptr);
+
+    auto idx = SyntaxIndex::build(*tree, text);
+
+    CHECK(idx.package_names.contains("standalone_pkg"));
+    REQUIRE(idx.package_symbols.contains("standalone_pkg"));
+    const auto& symbols = idx.package_symbols.at("standalone_pkg");
+    CHECK(std::find(symbols.begin(), symbols.end(), "pkg_state_t") != symbols.end());
+    CHECK(std::find(symbols.begin(), symbols.end(), "PKG_IDLE") != symbols.end());
+    CHECK(std::find(symbols.begin(), symbols.end(), "PKG_WIDTH") != symbols.end());
+}
+
+TEST_CASE("syntax_index: standalone interface root preserves interface identity", "[index]") {
+    const std::string text =
+        "interface standalone_if;\n"
+        "    logic req;\n"
+        "    modport master(output req);\n"
+        "endinterface\n";
+    auto tree = slang::syntax::SyntaxTree::fromText(text);
+    REQUIRE(tree != nullptr);
+
+    auto idx = SyntaxIndex::build(*tree, text);
+
+    CHECK(idx.interface_names.contains("standalone_if"));
+    REQUIRE(idx.module_by_name.contains("standalone_if"));
+    const auto& entry = idx.modules.at(idx.module_by_name.at("standalone_if"));
+    CHECK(entry.name == "standalone_if");
+    CHECK(entry.modports.size() == 1);
+    CHECK(entry.modports[0].name == "master");
+}
+
+TEST_CASE("syntax_index: standalone class and typedef roots are indexed", "[index]") {
+    {
+        const std::string text =
+            "class standalone_cfg;\n"
+            "    int timeout;\n"
+            "endclass\n";
+        auto tree = slang::syntax::SyntaxTree::fromText(text);
+        REQUIRE(tree != nullptr);
+
+        auto idx = SyntaxIndex::build(*tree, text);
+        CHECK(idx.class_by_name.contains("standalone_cfg"));
+    }
+
+    {
+        const std::string text =
+            "typedef struct packed {\n"
+            "    logic valid;\n"
+            "} standalone_packet_t;\n";
+        auto tree = slang::syntax::SyntaxTree::fromText(text);
+        REQUIRE(tree != nullptr);
+
+        auto idx = SyntaxIndex::build(*tree, text);
+        CHECK(idx.typedef_by_name.contains("standalone_packet_t"));
+    }
+}

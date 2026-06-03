@@ -806,6 +806,61 @@ TEST_CASE("completion: PackageScope filters symbols by declaring package", "[com
     CHECK_FALSE(has_label(result, "b_value"));
 }
 
+TEST_CASE("completion: package scope survives opening package definition file", "[completion]") {
+    CompletionEngine engine;
+    Analyzer analyzer;
+
+    const auto lib = std::filesystem::temp_directory_path() / "completion_pkg_nav_lib.sv";
+    const auto use = std::filesystem::temp_directory_path() / "completion_pkg_nav_use.sv";
+    const std::string lib_text =
+        "package nav_pkg;\n"
+        "    typedef logic [7:0] nav_byte_t;\n"
+        "    parameter int NAV_WIDTH = 8;\n"
+        "endpackage\n";
+    const std::string use_text =
+        "module top;\n"
+        "    initial begin\n"
+        "        int value;\n"
+        "        value = nav_pkg::\n"
+        "    end\n"
+        "endmodule\n";
+
+    {
+        std::ofstream out(lib);
+        REQUIRE(out.good());
+        out << lib_text;
+    }
+    {
+        std::ofstream out(use);
+        REQUIRE(out.good());
+        out << use_text;
+    }
+
+    analyzer.set_extra_files({use.string(), lib.string()});
+    const std::string use_uri = "file://" + use.string();
+    const std::string lib_uri = "file://" + lib.string();
+    analyzer.open(use_uri, use_text);
+
+    auto [line, col] = pos_of(use_text, "nav_pkg::");
+    auto before_nav =
+        complete_at(engine, analyzer, use_uri, line, col + (int)std::string("nav_pkg::").size());
+    CHECK(has_label(before_nav, "nav_byte_t"));
+    CHECK(has_label(before_nav, "NAV_WIDTH"));
+
+    // Simulate go-to-definition opening the package file in the editor.  The
+    // package file remains in the filelist, but its live open-buffer snapshot
+    // should now be used by extra_file_snapshots().
+    analyzer.open(lib_uri, lib_text);
+
+    auto after_nav =
+        complete_at(engine, analyzer, use_uri, line, col + (int)std::string("nav_pkg::").size());
+    CHECK(has_label(after_nav, "nav_byte_t"));
+    CHECK(has_label(after_nav, "NAV_WIDTH"));
+
+    std::filesystem::remove(lib);
+    std::filesystem::remove(use);
+}
+
 TEST_CASE("completion: identifier completion requires package import", "[completion]") {
     CompletionEngine engine;
     Analyzer analyzer;
