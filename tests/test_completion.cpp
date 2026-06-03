@@ -671,6 +671,36 @@ TEST_CASE("completion: macros from extra files do not leak into unrelated files"
     CHECK_FALSE(has_label(result, "EXTRA_UVM_STYLE_MACRO"));
 }
 
+TEST_CASE("completion: repeated visible macros are deduplicated", "[completion]") {
+    CompletionEngine engine;
+    Analyzer analyzer;
+
+    const auto extra = std::filesystem::temp_directory_path() / "completion_duplicate_macro.sv";
+    {
+        std::ofstream out(extra);
+        REQUIRE(out.good());
+        out << "`define DUPLICATE_VISIBLE_MACRO 1\n"
+               "module duplicate_macro_extra;\n"
+               "endmodule\n";
+    }
+    analyzer.set_extra_files({extra.string()});
+
+    const std::string uri = "file:///tmp/completion_duplicate_macro_current.sv";
+    const std::string text =
+        "`define DUPLICATE_VISIBLE_MACRO 2\n"
+        "module top;\n"
+        "    logic a = `\n"
+        "    \n"
+        "endmodule\n";
+    analyzer.open(uri, text);
+
+    auto macro_context = complete_at(engine, analyzer, uri, 2, 15);
+    CHECK(count_label(macro_context, "DUPLICATE_VISIBLE_MACRO") == 1);
+
+    auto identifier_context = complete_at(engine, analyzer, uri, 3, 4);
+    CHECK(count_label(identifier_context, "`DUPLICATE_VISIBLE_MACRO") == 1);
+}
+
 TEST_CASE("completion: PackageScope context returns package symbols", "[completion]") {
     CompletionEngine engine;
     Analyzer analyzer;

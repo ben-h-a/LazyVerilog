@@ -1048,9 +1048,12 @@ class IdentifierProvider : public CompletionProvider {
             }
         }
 
+        std::unordered_set<std::string> seen_macros;
         for (const auto& mac : index.macros) {
             if (tok.cancelled) throw CompletionCancelled{};
             if (!ctx.visible_macros.count(mac.name))
+                continue;
+            if (!seen_macros.insert(mac.name).second)
                 continue;
             items.push_back(make_item("`" + mac.name,
                                        mac.is_function_like ? lsCompletionItemKind::Function
@@ -1401,8 +1404,11 @@ class MacroProvider : public CompletionProvider {
                                            const SyntaxIndex& index,
                                            const CancellationToken& /*tok*/) const override {
         std::vector<lsCompletionItem> items;
+        std::unordered_set<std::string> seen_macros;
         for (const auto& mac : index.macros) {
             if (!ctx.visible_macros.count(mac.name))
+                continue;
+            if (!seen_macros.insert(mac.name).second)
                 continue;
             auto item = make_item(mac.name,
                                    mac.is_function_like ? lsCompletionItemKind::Function
