@@ -557,7 +557,8 @@ static std::string trim_completion_copy(std::string text) {
 
 // Find the byte offset of the '(' that opens the argument list enclosing
 // cursor_offset (paren depth 0 when scanning backward). Returns text.size()
-// if not found.
+// if not found.  String literals are skipped so parens inside them do not
+// confuse the depth counter (e.g. `$display(")")` before an event control).
 static size_t find_opening_paren(const std::string& text, size_t cursor_offset) {
     if (cursor_offset == 0) return text.size();
     int depth = 0;
@@ -565,6 +566,19 @@ static size_t find_opening_paren(const std::string& text, size_t cursor_offset) 
     while (pos > 0) {
         --pos;
         const char c = text[pos];
+        if (c == '"') {
+            // pos is at a closing '"'; scan backward for the matching opening '"'.
+            while (pos > 0) {
+                --pos;
+                if (text[pos] != '"') continue;
+                // Count preceding backslashes to detect escaped quotes.
+                size_t bp = pos;
+                int bs = 0;
+                while (bp > 0 && text[bp - 1] == '\\') { ++bs; --bp; }
+                if (bs % 2 == 0) break; // unescaped: this is the opening '"'
+            }
+            continue;
+        }
         if (c == ')') ++depth;
         else if (c == '(') {
             if (depth == 0) return pos;
@@ -582,6 +596,10 @@ static bool paren_is_event_control(const std::string& text, size_t open) {
 
 // Prefix / fuzzy match score. Returns 0 when there is no match.
 // Higher score = better match.
+// Score tiers: 100 = exact case-insensitive prefix (minus length penalty),
+//              50  = no prefix typed (show all),
+//              30  = fuzzy subsequence match.
+// rank_and_sort adds scope (+30), same-type (+500), and expected-type (+1000) bonuses.
 static int prefix_score(std::string_view candidate, std::string_view pre) {
     if (pre.empty()) return 50;
 
@@ -728,23 +746,21 @@ static KeywordContextKind infer_keyword_context(const DocumentState& state, size
 static std::optional<std::string> type_of_value(const SyntaxIndex& index,
                                                  const std::string& scope,
                                                  const std::string& name) {
+    // Single pass: prefer scoped match, keep first unscoped hit as fallback.
+    std::optional<std::string> fallback_value;
     for (const auto& v : index.values) {
-        if (v.name == name && !scope.empty() && v.parent_scope == scope && !v.type.empty())
-            return v.type;
+        if (v.name != name || v.type.empty()) continue;
+        if (!scope.empty() && v.parent_scope == scope) return v.type;
+        if (!fallback_value) fallback_value = v.type;
     }
-    for (const auto& v : index.values) {
-        if (v.name == name && !v.type.empty())
-            return v.type;
-    }
+    if (fallback_value) return fallback_value;
+    std::optional<std::string> fallback_inst;
     for (const auto& inst : index.instances) {
-        if (inst.instance_name == name && !scope.empty() && inst.parent_module == scope)
-            return inst.module_name;
+        if (inst.instance_name != name) continue;
+        if (!scope.empty() && inst.parent_module == scope) return inst.module_name;
+        if (!fallback_inst) fallback_inst = inst.module_name;
     }
-    for (const auto& inst : index.instances) {
-        if (inst.instance_name == name)
-            return inst.module_name;
-    }
-    return std::nullopt;
+    return fallback_inst;
 }
 
 static std::string completion_base_type_name(std::string type) {
@@ -833,7 +849,6 @@ static bool value_visible_in_context(const SyntaxIndex& index, const CompletionC
             return false;
     }
 
-    (void)index;
     return true;
 }
 
@@ -1103,7 +1118,10 @@ class MemberProvider : public CompletionProvider {
         if (const auto it = index.class_by_name.find(name);
             it != index.class_by_name.end()) {
             std::unordered_set<std::string> seen;
+            std::unordered_set<std::string> visited_classes;
             std::function<void(const ClassEntry&)> add_class_members = [&](const ClassEntry& cls) {
+                if (!visited_classes.insert(cls.name).second)
+                    return; // cycle or diamond — stop
                 if (!cls.base_class.empty()) {
                     if (const auto base_it = index.class_by_name.find(cls.base_class);
                         base_it != index.class_by_name.end())
@@ -1181,7 +1199,13 @@ class MemberProvider : public CompletionProvider {
             if (!td.resolved.empty() && td.resolved != name) {
                 CompletionContext inner = ctx;
                 inner.scope_name = td.resolved;
-                return provide(inner, index, CancellationToken{});
+                // Depth-limit prevents infinite recursion on mutually-aliased typedefs.
+                static thread_local int typedef_depth = 0;
+                if (typedef_depth >= 8) return items;
+                ++typedef_depth;
+                auto result = provide(inner, index, CancellationToken{});
+                --typedef_depth;
+                return result;
             }
         }
 
@@ -1430,10 +1454,7 @@ class MacroProvider : public CompletionProvider {
                 std::string snip = mac.name + "(";
                 for (size_t i = 0; i < mac.params.size(); ++i) {
                     if (i) snip += ", ";
-                    char buf[128];
-                    std::snprintf(buf, sizeof(buf), "${%zu:%s}", i + 1,
-                                  mac.params[i].c_str());
-                    snip += buf;
+                    snip += "${" + std::to_string(i + 1) + ":" + mac.params[i] + "}";
                 }
                 snip += ")";
                 item.insertText = optional<std::string>(std::move(snip));
@@ -1766,41 +1787,41 @@ void CompletionEngine::rank_and_sort(std::vector<lsCompletionItem>& items,
                                       const std::unordered_set<std::string>& local_names,
                                       const std::unordered_set<std::string>& expected_names,
                                       const std::unordered_set<std::string>& same_type_names) const {
-    struct Scored {
-        lsCompletionItem item;
-        int score;
-    };
-
-    std::vector<Scored> scored;
+    // Compute scores using a parallel index array — items stay in place during
+    // scoring and sorting so each item is moved only once into the output.
+    std::vector<std::pair<int, size_t>> scored; // (score, original index)
     scored.reserve(items.size());
 
-    for (auto& item : items) {
+    for (size_t i = 0; i < items.size(); ++i) {
+        const auto& item = items[i];
         const std::string_view candidate =
             item.filterText ? std::string_view(*item.filterText)
                             : std::string_view(item.label);
         const int s = prefix_score(candidate, ctx.prefix);
         if (s > 0 || ctx.prefix.empty()) {
             // Scope score: +30 if declared in the current document's index.
-            const int scope = local_names.count(item.label) ? 30 : 0;
-            const int expected = expected_names.count(item.label) ? 1000 : 0;
-            const int same_type = same_type_names.count(item.label) ? 500 : 0;
-            scored.push_back({std::move(item), s + scope + expected + same_type});
+            const int scope     = local_names.count(item.label)      ? 30   : 0;
+            const int expected  = expected_names.count(item.label)   ? 1000 : 0;
+            const int same_type = same_type_names.count(item.label)  ? 500  : 0;
+            scored.push_back({s + scope + expected + same_type, i});
         }
     }
 
-    std::stable_sort(scored.begin(), scored.end(), [](const Scored& a, const Scored& b) {
-        if (a.score != b.score) return a.score > b.score;
-        return a.item.label < b.item.label;
+    std::stable_sort(scored.begin(), scored.end(), [&](const auto& a, const auto& b) {
+        if (a.first != b.first) return a.first > b.first;
+        return items[a.second].label < items[b.second].label;
     });
 
-    items.clear();
-    items.reserve(scored.size());
+    std::vector<lsCompletionItem> sorted;
+    sorted.reserve(scored.size());
     char buf[8];
     for (size_t i = 0; i < scored.size(); ++i) {
         std::snprintf(buf, sizeof(buf), "%05zu", i);
-        scored[i].item.sortText = optional<std::string>(std::string(buf));
-        items.push_back(std::move(scored[i].item));
+        auto& item = items[scored[i].second];
+        item.sortText = optional<std::string>(std::string(buf));
+        sorted.push_back(std::move(item));
     }
+    items = std::move(sorted);
 }
 
 CompletionList CompletionEngine::complete(const lsTextDocumentPositionParams& params,
