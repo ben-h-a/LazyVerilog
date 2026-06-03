@@ -84,3 +84,13 @@ ctest --test-dir build                          # all tests
 - nlohmann/json — JSON-RPC message handling
 
 <!-- MANUAL: -->
+
+## Release Notes Style
+
+When writing `docs/releases/vX.Y.Z.md`, keep the note precise and simple:
+- Use a short one-line release theme after the title.
+- Summarize large feature areas in 2–5 sentences instead of listing every
+  internal commit.
+- Keep only user-visible fixes as concise bullets.
+- Avoid noisy implementation details unless they explain a user-visible behavior
+  change.
