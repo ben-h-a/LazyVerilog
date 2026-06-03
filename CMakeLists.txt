@@ -127,6 +127,7 @@ set(LAZYVERILOG_SOURCES
     src/features/autofunc.cpp
     src/features/connect.cpp
     src/features/code_action.cpp
+    src/features/folding_range.cpp
 )
 
 add_executable(lazyverilog-lsp ${LAZYVERILOG_SOURCES})
@@ -161,6 +162,7 @@ set(LAZYVERILOG_TEST_SOURCES
     tests/test_inlay_hints.cpp
     tests/test_lsp_features.cpp
     tests/test_completion.cpp
+    tests/test_folding_ranges.cpp
     # Feature sources needed by tests (no LSP protocol dependency)
     src/features/completion.cpp
     src/features/code_action.cpp
@@ -181,6 +183,7 @@ set(LAZYVERILOG_TEST_SOURCES
     src/features/hover.cpp
     src/features/signature_help.cpp
     src/features/workspace_symbols.cpp
+    src/features/folding_range.cpp
 )
 
 add_executable(lazyverilog-tests ${LAZYVERILOG_TEST_SOURCES})

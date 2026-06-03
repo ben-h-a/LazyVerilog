@@ -433,6 +433,24 @@ endclass
     CHECK(has_fold(folds, 7, 11));
 }
 
+TEST_CASE("foldingRange: module-scoped import run folds as imports", "[folding]") {
+    Analyzer    analyzer;
+    std::string uri = "file:///tmp/fold_module_imports.sv";
+    analyzer.open(uri, R"(module top;
+    import pkg_a::*;
+    import pkg_b::item_b;
+    logic x;
+endmodule
+)");
+    auto folds = provide_folding_range(analyzer, make_params(uri));
+
+    // Pretty expected fold map:
+    //   imports [1,2]  two consecutive module-scoped imports
+    //   region  [0,4]  module top ... endmodule
+    CHECK(has_fold_kind(folds, 1, 2, "imports"));
+    CHECK(has_fold(folds, 0, 4));
+}
+
 TEST_CASE("foldingRange: single-line constructs are excluded", "[folding]") {
     Analyzer    analyzer;
     std::string uri = "file:///tmp/fold_single_line_constructs.sv";

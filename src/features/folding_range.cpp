@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <tuple>
+#include <unordered_map>
 #include <slang/syntax/AllSyntax.h>
 #include <slang/syntax/SyntaxTree.h>
 #include <slang/syntax/SyntaxVisitor.h>
@@ -63,6 +64,10 @@ struct FoldVisitor : public SyntaxVisitor<FoldVisitor> {
     // consecutive line-comment run
     int comment_run_start{-1};
     int comment_run_last{-1};
+
+    // cache: line number → byte offset of line start; cleared on buffer change
+    mutable BufferID                        line_start_cache_buf_{};
+    mutable std::unordered_map<int, size_t> line_start_cache_;
 
     FoldVisitor(const SourceManager& sm, std::vector<FoldingRange>& out)
         : sm(sm), out(out) {}
@@ -244,27 +249,6 @@ struct FoldVisitor : public SyntaxVisitor<FoldVisitor> {
         visitDefault(node);
     }
 
-    // ── preprocessor directives ───────────────────────────────────────────
-
-    void handle(const ConditionalBranchDirectiveSyntax& node) {
-        flush_comment_run();
-        process_conditional_branch_directive(node);
-        visitDefault(node);
-    }
-
-    void handle(const UnconditionalBranchDirectiveSyntax& node) {
-        flush_comment_run();
-        process_unconditional_branch_directive(node);
-        visitDefault(node);
-    }
-
-    // `celldefine / `endcelldefine
-    void handle(const SimpleDirectiveSyntax& node) {
-        flush_comment_run();
-        process_simple_directive(node);
-        visitDefault(node);
-    }
-
     // ── token trivia (comments) ───────────────────────────────────────────
 
     void visitToken(Token token) {
@@ -277,7 +261,11 @@ struct FoldVisitor : public SyntaxVisitor<FoldVisitor> {
         size_t trivia_total = 0;
         for (const auto& t : token.trivia())
             trivia_total += t.getRawText().size();
-        size_t pos = tok_offset >= trivia_total ? tok_offset - trivia_total : 0;
+        // If tok_offset < trivia_total the layout invariant is violated (e.g.
+        // synthetic token with an impossible offset).  Skip rather than clamping
+        // to 0 and emitting folds attributed to the wrong line.
+        if (tok_offset < trivia_total) return;
+        size_t pos = tok_offset - trivia_total;
 
         for (const auto& t : token.trivia()) {
             process_trivia(t, pos, buffer);
@@ -460,12 +448,19 @@ struct FoldVisitor : public SyntaxVisitor<FoldVisitor> {
             case TokenKind::EndKeyword: {
                 int end_line = token_line(sm, token);
                 if (!block_stack.empty()) {
-                    emit(out, block_stack.back(), end_line, "region");
+                    emit(directive_folds, block_stack.back(), end_line, "region");
                     block_stack.pop_back();
                 }
                 pending_control_start = -1;
                 break;
             }
+
+            case TokenKind::Semicolon:
+                // A semicolon after a control keyword means no begin follows
+                // (e.g. `if (cond) a <= 1;`).  Clear pending so the stale
+                // start line is not attributed to a later unrelated begin.
+                pending_control_start = -1;
+                break;
 
             default:
                 break;
@@ -495,9 +490,23 @@ struct FoldVisitor : public SyntaxVisitor<FoldVisitor> {
         auto text = sm.getSourceText(buffer);
         if (offset > text.size()) return false;
 
-        size_t line_start = offset;
-        while (line_start > 0 && text[line_start - 1] != '\n')
-            --line_start;
+        // Find line start, caching by line number to avoid repeated backward
+        // scans for multiple trivia items on the same line.
+        if (buffer != line_start_cache_buf_) {
+            line_start_cache_.clear();
+            line_start_cache_buf_ = buffer;
+        }
+        int    line_num  = line_at(buffer, offset);
+        size_t line_start;
+        auto   it        = line_start_cache_.find(line_num);
+        if (it != line_start_cache_.end()) {
+            line_start = it->second;
+        } else {
+            line_start = offset;
+            while (line_start > 0 && text[line_start - 1] != '\n')
+                --line_start;
+            line_start_cache_[line_num] = line_start;
+        }
 
         for (size_t i = line_start; i < offset; ++i) {
             unsigned char ch = static_cast<unsigned char>(text[i]);
@@ -509,11 +518,26 @@ struct FoldVisitor : public SyntaxVisitor<FoldVisitor> {
 
 // ── import / include group collector ─────────────────────────────────────
 
+static void collect_import_runs(const SourceManager& sm,
+                                 const SyntaxList<MemberSyntax>& members,
+                                 std::vector<FoldingRange>& out);
+
 static void collect_import_folds(const SourceManager& sm, const SyntaxNode& root,
                                   std::vector<FoldingRange>& out) {
-    const auto* unit = root.as_if<CompilationUnitSyntax>();
-    if (!unit) return;
+    // SyntaxTree::fromText uses parseGuess(), which can return the inner
+    // declaration directly (e.g. ModuleDeclarationSyntax) instead of a
+    // CompilationUnitSyntax when the file contains a single top-level construct.
+    if (const auto* unit = root.as_if<CompilationUnitSyntax>())
+        collect_import_runs(sm, unit->members, out);
+    else if (const auto* mod = root.as_if<ModuleDeclarationSyntax>())
+        collect_import_runs(sm, mod->members, out);
+    else if (const auto* cls = root.as_if<ClassDeclarationSyntax>())
+        collect_import_runs(sm, cls->items, out);
+}
 
+static void collect_import_runs(const SourceManager& sm,
+                                 const SyntaxList<MemberSyntax>& members,
+                                 std::vector<FoldingRange>& out) {
     int run_start = -1;
     int run_last  = -1;
 
@@ -524,8 +548,8 @@ static void collect_import_folds(const SourceManager& sm, const SyntaxNode& root
         run_last  = -1;
     };
 
-    for (const auto* member : unit->members) {
-        if (!member) continue;
+    for (const auto* member : members) {
+        if (!member) { flush(); continue; }
         if (member->kind == SyntaxKind::PackageImportDeclaration) {
             int fl = first_line(sm, *member);
             int ll = last_line(sm, *member);
@@ -537,6 +561,11 @@ static void collect_import_folds(const SourceManager& sm, const SyntaxNode& root
             }
         } else {
             flush();
+            // Recurse into declaration bodies that can contain import statements.
+            if (const auto* mod = member->as_if<ModuleDeclarationSyntax>())
+                collect_import_runs(sm, mod->members, out);
+            else if (const auto* cls = member->as_if<ClassDeclarationSyntax>())
+                collect_import_runs(sm, cls->items, out);
         }
     }
     flush();
