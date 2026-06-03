@@ -19,3 +19,6 @@
 [submodule "tests/rtl/opentitan"]
 	path = tests/rtl/opentitan
 	url = https://github.com/lowRISC/opentitan.git
+[submodule "demo/uvm-core"]
+	path = demo/uvm-core
+	url = https://github.com/accellera-official/uvm-core.git

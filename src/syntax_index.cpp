@@ -234,7 +234,8 @@ static std::string with_declarator_dimensions(const slang::SourceManager& sm, st
 
 static void add_port(std::vector<PortEntry>& ports, const slang::SourceManager& sm,
                      const slang::parsing::Token& name, std::string direction, std::string type,
-                     std::string decl_type, std::string signal_decl_type) {
+                     std::string decl_type, std::string signal_decl_type,
+                     std::string default_value = {}) {
     if (!name)
         return;
 
@@ -245,6 +246,7 @@ static void add_port(std::vector<PortEntry>& ports, const slang::SourceManager& 
         .type = std::move(type),
         .decl_type = std::move(decl_type),
         .signal_decl_type = std::move(signal_decl_type),
+        .default_value = std::move(default_value),
         .line = line,
         .col = col,
     });
@@ -380,6 +382,28 @@ static void process_module(const ModuleDeclarationSyntax& module, SyntaxIndex& i
     entry.line = line;
     entry.col = col;
 
+    // Extract parameter ports from #( ... )
+    if (module.header->parameters) {
+        for (const auto* param_base : module.header->parameters->declarations) {
+            if (!param_base)
+                continue;
+            const auto* param = param_base->as_if<ParameterDeclarationSyntax>();
+            if (!param)
+                continue;
+            const std::string direction = tok_str(param->keyword); // "parameter" or "localparam"
+            const std::string type_text = render_index_syntax_text(sm, *param->type);
+            for (const auto* decl : param->declarators) {
+                if (!decl)
+                    continue;
+                std::string default_val;
+                if (decl->initializer)
+                    default_val = render_index_syntax_text(sm, *decl->initializer->expr);
+                add_port(entry.ports, sm, decl->name, direction, type_text, type_text, {},
+                         std::move(default_val));
+            }
+        }
+    }
+
     if (module.header->ports) {
         if (const auto* ansi = module.header->ports->as_if<AnsiPortListSyntax>())
             extract_ansi_ports(*ansi, entry.ports, sm);
@@ -388,9 +412,219 @@ static void process_module(const ModuleDeclarationSyntax& module, SyntaxIndex& i
     extract_instances(module.members, index.instances, sm, source, entry.name);
     for (size_t i = 0; i < entry.ports.size(); ++i)
         entry.port_by_name.try_emplace(entry.ports[i].name, i);
+
+    for (const auto& p : entry.ports) {
+        index.values.push_back(ValueEntry{
+            .name = p.name,
+            .type = p.type,
+            .kind = (p.direction == "parameter" || p.direction == "localparam")
+                        ? p.direction
+                        : std::string("port"),
+            .parent_scope = entry.name,
+            .line = p.line,
+            .col = p.col,
+        });
+    }
+
+    for (const auto* member : module.members) {
+        if (!member)
+            continue;
+        if (const auto* data = member->as_if<DataDeclarationSyntax>()) {
+            const std::string type_text = render_index_syntax_text(sm, *data->type);
+            for (const auto* decl : data->declarators) {
+                if (!decl)
+                    continue;
+                auto [vl, vc] = token_pos(sm, decl->name);
+                index.values.push_back(ValueEntry{
+                    .name = tok_str(decl->name),
+                    .type = with_declarator_dimensions(sm, type_text, *decl),
+                    .kind = "variable",
+                    .parent_scope = entry.name,
+                    .line = vl,
+                    .col = vc,
+                });
+            }
+        } else if (const auto* fn = member->as_if<FunctionDeclarationSyntax>()) {
+            const auto& proto = *fn->prototype;
+            auto [vl, vc] = token_pos(sm, proto.keyword);
+            index.values.push_back(ValueEntry{
+                .name = render_index_syntax_text(sm, *proto.name),
+                .type = render_index_syntax_text(sm, *proto.returnType),
+                .kind = "function",
+                .parent_scope = entry.name,
+                .line = vl,
+                .col = vc,
+            });
+        }
+    }
+
     index.module_by_name.try_emplace(entry.name, index.modules.size());
     index.modules.push_back(std::move(entry));
 }
+
+// ── New extraction functions ──────────────────────────────────────────────────
+
+static void process_class(const ClassDeclarationSyntax& cls, SyntaxIndex& index,
+                           const slang::SourceManager& sm) {
+    ClassEntry entry;
+    entry.name = tok_str(cls.name);
+    auto [line, col] = token_pos(sm, cls.name);
+    entry.line = line;
+    entry.col = col;
+
+    if (cls.extendsClause)
+        entry.base_class = render_index_syntax_text(sm, *cls.extendsClause->baseName);
+
+    for (const auto* item : cls.items) {
+        if (!item)
+            continue;
+        if (const auto* prop = item->as_if<ClassPropertyDeclarationSyntax>()) {
+            if (const auto* data = prop->declaration->as_if<DataDeclarationSyntax>()) {
+                const std::string type_text = render_index_syntax_text(sm, *data->type);
+                for (const auto* decl : data->declarators) {
+                    if (!decl)
+                        continue;
+                    auto [fl, fc] = token_pos(sm, decl->name);
+                    entry.fields.push_back(
+                        FieldEntry{.name = tok_str(decl->name), .type = type_text, .line = fl, .col = fc});
+                }
+            }
+        } else if (const auto* meth = item->as_if<ClassMethodDeclarationSyntax>()) {
+            const auto& proto = *meth->declaration->prototype;
+            MethodEntry m;
+            m.name = render_index_syntax_text(sm, *proto.name);
+            m.return_type = render_index_syntax_text(sm, *proto.returnType);
+            m.is_task = (meth->declaration->kind == SyntaxKind::TaskDeclaration);
+            auto [ml, mc] = token_pos(sm, proto.keyword);
+            m.line = ml;
+            m.col = mc;
+            entry.methods.push_back(std::move(m));
+        }
+    }
+
+    index.class_by_name.try_emplace(entry.name, index.classes.size());
+    index.classes.push_back(std::move(entry));
+}
+
+static void process_typedef(const TypedefDeclarationSyntax& td, SyntaxIndex& index,
+                             const slang::SourceManager& sm) {
+    // Skip if already indexed (e.g., from a package member pass)
+    if (index.typedef_by_name.count(tok_str(td.name)))
+        return;
+
+    TypedefEntry entry;
+    entry.name = tok_str(td.name);
+    entry.line = token_pos(sm, td.name).first;
+
+    if (const auto* enum_type = td.type->as_if<EnumTypeSyntax>()) {
+        entry.is_enum = true;
+        for (const auto* member : enum_type->members) {
+            if (member)
+                entry.enum_members.push_back(EnumMemberEntry{.name = tok_str(member->name)});
+        }
+    } else if (const auto* struct_type = td.type->as_if<StructUnionTypeSyntax>()) {
+        entry.is_struct = true;
+        for (const auto* member : struct_type->members) {
+            if (!member)
+                continue;
+            const std::string type_text = render_index_syntax_text(sm, *member->type);
+            for (const auto* decl : member->declarators) {
+                if (!decl)
+                    continue;
+                auto [fl, fc] = token_pos(sm, decl->name);
+                entry.fields.push_back(FieldEntry{
+                    .name = tok_str(decl->name),
+                    .type = with_declarator_dimensions(sm, type_text, *decl),
+                    .line = fl,
+                    .col = fc,
+                });
+            }
+        }
+    } else {
+        entry.resolved = render_index_syntax_text(sm, *td.type);
+    }
+
+    index.typedef_by_name.try_emplace(entry.name, index.typedefs.size());
+    index.typedefs.push_back(std::move(entry));
+}
+
+static void process_package(const ModuleDeclarationSyntax& pkg, SyntaxIndex& index,
+                             const slang::SourceManager& sm, std::string_view source) {
+    const std::string pkg_name = tok_str(pkg.header->name);
+    process_module(pkg, index, sm, source);
+    index.package_names.insert(pkg_name);
+
+    // Collect exported symbol names and index nested declarations globally.
+    std::vector<std::string> symbols;
+    for (const auto* member : pkg.members) {
+        if (!member)
+            continue;
+        if (const auto* td = member->as_if<TypedefDeclarationSyntax>()) {
+            symbols.push_back(tok_str(td->name));
+            process_typedef(*td, index, sm);
+        } else if (const auto* cls = member->as_if<ClassDeclarationSyntax>()) {
+            symbols.push_back(tok_str(cls->name));
+            process_class(*cls, index, sm);
+        } else if (const auto* fn = member->as_if<FunctionDeclarationSyntax>()) {
+            symbols.push_back(render_index_syntax_text(sm, *fn->prototype->name));
+        } else if (const auto* data = member->as_if<DataDeclarationSyntax>()) {
+            const std::string type_text = render_index_syntax_text(sm, *data->type);
+            for (const auto* decl : data->declarators) {
+                if (decl) {
+                    symbols.push_back(tok_str(decl->name));
+                    auto [vl, vc] = token_pos(sm, decl->name);
+                    index.values.push_back(ValueEntry{
+                        .name = tok_str(decl->name),
+                        .type = with_declarator_dimensions(sm, type_text, *decl),
+                        .kind = "variable",
+                        .parent_scope = pkg_name,
+                        .line = vl,
+                        .col = vc,
+                    });
+                }
+            }
+        } else if (const auto* ps = member->as_if<ParameterDeclarationStatementSyntax>()) {
+            if (const auto* param = ps->parameter->as_if<ParameterDeclarationSyntax>()) {
+                const std::string type_text = render_index_syntax_text(sm, *param->type);
+                for (const auto* decl : param->declarators) {
+                    if (decl) {
+                        symbols.push_back(tok_str(decl->name));
+                        auto [vl, vc] = token_pos(sm, decl->name);
+                        index.values.push_back(ValueEntry{
+                            .name = tok_str(decl->name),
+                            .type = type_text,
+                            .kind = tok_str(param->keyword),
+                            .parent_scope = pkg_name,
+                            .line = vl,
+                            .col = vc,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    index.package_symbols[pkg_name] = std::move(symbols);
+}
+
+static void process_member(const MemberSyntax& member, SyntaxIndex& index,
+                            const slang::SourceManager& sm, std::string_view source) {
+    if (const auto* mod = member.as_if<ModuleDeclarationSyntax>()) {
+        if (member.kind == SyntaxKind::InterfaceDeclaration) {
+            process_module(*mod, index, sm, source);
+            index.interface_names.insert(tok_str(mod->header->name));
+        } else if (member.kind == SyntaxKind::PackageDeclaration) {
+            process_package(*mod, index, sm, source);
+        } else {
+            process_module(*mod, index, sm, source);
+        }
+    } else if (const auto* cls = member.as_if<ClassDeclarationSyntax>()) {
+        process_class(*cls, index, sm);
+    } else if (const auto* td = member.as_if<TypedefDeclarationSyntax>()) {
+        process_typedef(*td, index, sm);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 SyntaxIndex SyntaxIndex::build(const slang::syntax::SyntaxTree& tree, std::string_view source) {
     SyntaxIndex index;
@@ -399,14 +633,65 @@ SyntaxIndex SyntaxIndex::build(const slang::syntax::SyntaxTree& tree, std::strin
 
     if (const auto* compilation_unit = root.as_if<CompilationUnitSyntax>()) {
         for (const auto* member : compilation_unit->members) {
-            if (!member)
-                continue;
-            if (const auto* module = member->as_if<ModuleDeclarationSyntax>())
-                process_module(*module, index, sm, source);
+            if (member)
+                process_member(*member, index, sm, source);
         }
     } else if (const auto* module = root.as_if<ModuleDeclarationSyntax>()) {
         process_module(*module, index, sm, source);
     }
 
+    // Macros defined at the end of this file (preprocessor output).
+    for (const auto* def : tree.getDefinedMacros()) {
+        if (!def)
+            continue;
+        MacroEntry mac;
+        mac.name = std::string(def->name.valueText());
+        if (mac.name.empty())
+            continue;
+        if (def->formalArguments) {
+            mac.is_function_like = true;
+            for (const auto* arg : def->formalArguments->args) {
+                if (arg)
+                    mac.params.push_back(std::string(arg->name.valueText()));
+            }
+        }
+        mac.line = token_pos(sm, def->name).first;
+        index.macros.push_back(std::move(mac));
+    }
+
     return index;
+}
+
+void SyntaxIndex::merge(const SyntaxIndex& other) {
+    // modules (includes interfaces and packages stored as modules)
+    for (const auto& m : other.modules) {
+        if (!module_by_name.count(m.name)) {
+            module_by_name[m.name] = modules.size();
+            modules.push_back(m);
+        }
+    }
+    instances.insert(instances.end(), other.instances.begin(), other.instances.end());
+    interface_names.insert(other.interface_names.begin(), other.interface_names.end());
+    package_names.insert(other.package_names.begin(), other.package_names.end());
+    for (const auto& [pkg, syms] : other.package_symbols)
+        package_symbols.try_emplace(pkg, syms);
+
+    // classes
+    for (const auto& c : other.classes) {
+        if (!class_by_name.count(c.name)) {
+            class_by_name[c.name] = classes.size();
+            classes.push_back(c);
+        }
+    }
+
+    // typedefs
+    for (const auto& t : other.typedefs) {
+        if (!typedef_by_name.count(t.name)) {
+            typedef_by_name[t.name] = typedefs.size();
+            typedefs.push_back(t);
+        }
+    }
+
+    macros.insert(macros.end(), other.macros.begin(), other.macros.end());
+    values.insert(values.end(), other.values.begin(), other.values.end());
 }

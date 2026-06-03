@@ -7,6 +7,7 @@ filelist configured in `lazyverilog.toml`:
 [design]
 vcode = "demo/vcode.f"
 define = ["RTL_SIM"]
+include_dir = ["demo/uvm-core/src"]
 ```
 
 The filelist is used by cross-file features such as go-to-definition, hover,
@@ -43,6 +44,12 @@ analyzer_.set_extra_files(
     resolve_vcode_path(root_, config_)
 );
 ```
+
+The server also resolves `[design].include_dir` relative to the config root and
+calls `Analyzer::set_include_dirs(...)`.  These directories are passed to
+slang's `SourceManager` for `` `include "..." `` lookup when parsing open
+buffers and explicit filelist sources.  They are **not** parsed as independent
+extra files.
 
 At this point LazyVerilog stores:
 
@@ -137,6 +144,22 @@ Preprocessor defines affect parsing. For example:
 When `Analyzer::set_defines(...)` is called, the extra-file cache is cleared and
 the filelist mtime is reset. The next extra-file snapshot reparses files using
 the new define set.
+
+### Include directories change
+
+Include directories affect parsing because they control which headers are
+available to `` `include `` directives:
+
+```toml
+[design]
+include_dir = ["vendor/uvm/src"]
+```
+
+When `Analyzer::set_include_dirs(...)` is called, the extra-file cache is
+cleared and the filelist mtime is reset.  The next extra-file snapshot reparses
+explicit filelist sources with the new include search path.  This is the
+intended way to support include-heavy libraries such as UVM without listing
+every `.svh` file in `.f`.
 
 ### A listed file is opened in the editor
 

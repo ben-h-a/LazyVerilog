@@ -35,6 +35,7 @@
 #include "LibLsp/lsp/windows/MessageNotify.h"
 #include "LibLsp/lsp/workspace/execute_command.h"
 #include "LibLsp/lsp/workspace/symbol.h"
+#include "features/completion.hpp"
 #include "features/autoarg.hpp"
 #include "features/autoff.hpp"
 #include "features/autofunc.hpp"
@@ -239,38 +240,81 @@ static std::string resolve_vcode_path(const std::filesystem::path& root, const C
     return std::filesystem::absolute(filelist).lexically_normal().string();
 }
 
+static std::vector<std::string> resolve_include_dirs(const std::filesystem::path& root,
+                                                     const Config& config) {
+    std::vector<std::string> dirs;
+    dirs.reserve(config.design.include_dir.size());
+    for (const auto& configured : config.design.include_dir) {
+        if (configured.empty())
+            continue;
+        auto dir = std::filesystem::path(configured);
+        if (dir.is_relative())
+            dir = root / dir;
+        dirs.push_back(std::filesystem::absolute(dir).lexically_normal().string());
+    }
+    return dirs;
+}
+
 static std::string path_to_file_uri(const std::filesystem::path& path) {
     return "file://" + std::filesystem::absolute(path).lexically_normal().string();
 }
 
-static std::vector<std::string> load_vcode_files(const std::filesystem::path& root,
-                                                 const Config& config) {
-    std::vector<std::string> paths;
+struct VcodeResult {
+    std::vector<std::string> files;
+};
+
+static VcodeResult load_vcode(const std::filesystem::path& root, const Config& config) {
+    VcodeResult result;
     if (config.design.vcode.empty())
-        return paths;
+        return result;
 
-    auto filelist = std::filesystem::path(resolve_vcode_path(root, config));
-
+    const auto filelist = std::filesystem::path(resolve_vcode_path(root, config));
     std::ifstream input(filelist);
     if (!input)
-        return paths;
+        return result;
+
+    const auto filelist_dir = filelist.parent_path();
 
     std::string line;
     while (std::getline(input, line)) {
-        auto comment = line.find("//");
-        if (comment != std::string::npos)
-            line.erase(comment);
+        // Strip // and # comments
+        if (auto pos = line.find("//"); pos != std::string::npos)
+            line.erase(pos);
+        if (auto pos = line.find('#'); pos != std::string::npos)
+            line.erase(pos);
 
         auto item = trim_copy(line);
-        if (item.empty() || item.starts_with("+") || item.starts_with("-"))
+        if (item.empty())
             continue;
 
+        // LazyVerilog's filelist support is intentionally source-file based:
+        // every library that should contribute symbols to LSP features must be
+        // listed as an explicit source file.  We do not interpret simulator
+        // options such as +incdir+ here; those lines are skipped together with
+        // all other + / - options below.  This keeps UVM and every other
+        // dependency on the same path: add its package/source files to the
+        // filelist and let the normal syntax index discover package symbols,
+        // classes, macros, typedefs, etc. from those files.
+        //
+        // Example:
+        //   +incdir+vendor/uvm/src        // ignored
+        //   vendor/uvm/src/uvm_pkg.sv    // indexed
+        //
+        // This is deliberately less simulator-like, but avoids maintaining a
+        // second "include search path" model that can diverge from the actual
+        // files LazyVerilog has parsed.
+        //
+        // Skip compiler options.
+        if (item.starts_with("+") || item.starts_with("-"))
+            continue;
+
+        // Regular file path
         auto path = std::filesystem::path(item);
         if (path.is_relative())
-            path = filelist.parent_path() / path;
-        paths.push_back(std::filesystem::absolute(path).lexically_normal().string());
+            path = filelist_dir / path;
+        result.files.push_back(std::filesystem::absolute(path).lexically_normal().string());
     }
-    return paths;
+    return result;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -299,7 +343,9 @@ LazyVerilogServer::LazyVerilogServer() : impl_(std::make_unique<Impl>()) {
     root_ = std::filesystem::current_path();
     config_ = load_config(root_);
     analyzer_.set_defines(config_.design.define);
-    analyzer_.set_extra_files(load_vcode_files(root_, config_), resolve_vcode_path(root_, config_));
+    analyzer_.set_include_dirs(resolve_include_dirs(root_, config_));
+    { auto vcode = load_vcode(root_, config_);
+      analyzer_.set_extra_files(vcode.files, resolve_vcode_path(root_, config_)); }
     background_compiler_ =
         std::make_unique<BackgroundCompiler>([this](BackgroundCompileResult result) {
             std::unordered_set<std::string> uris_to_publish(result.open_uris.begin(),
@@ -492,9 +538,10 @@ void LazyVerilogServer::register_handlers() {
             caps.workspaceSymbolProvider =
                 std::make_pair(optional<bool>(true), optional<WorkDoneProgressOptions>{});
 
-            // Completion: trigger on '.' and '$'
+            // Completion: trigger on '.', '::', '`', '(', '#', '"'
             lsCompletionOptions comp_opts;
-            comp_opts.triggerCharacters = std::vector<std::string>{".", "$"};
+            comp_opts.triggerCharacters =
+                std::vector<std::string>{".", ":", "`", "(", "#", "\"", "="};
             comp_opts.resolveProvider = false;
             caps.completionProvider = comp_opts;
 
@@ -530,8 +577,9 @@ void LazyVerilogServer::register_handlers() {
                         show_warning(warn);
                     publish_config_diagnostic(warn.empty() ? nullptr : &warning_detail);
                     analyzer_.set_defines(config_.design.define);
-                    analyzer_.set_extra_files(load_vcode_files(root_, config_),
-                                              resolve_vcode_path(root_, config_));
+                    analyzer_.set_include_dirs(resolve_include_dirs(root_, config_));
+                    { auto vcode = load_vcode(root_, config_);
+                      analyzer_.set_extra_files(vcode.files, resolve_vcode_path(root_, config_)); }
                     configure_background_compiler();
                     schedule_background_compilation();
                 }
@@ -546,8 +594,9 @@ void LazyVerilogServer::register_handlers() {
                         show_warning(warn);
                     publish_config_diagnostic(warn.empty() ? nullptr : &warning_detail);
                     analyzer_.set_defines(config_.design.define);
-                    analyzer_.set_extra_files(load_vcode_files(root_, config_),
-                                              resolve_vcode_path(root_, config_));
+                    analyzer_.set_include_dirs(resolve_include_dirs(root_, config_));
+                    { auto vcode = load_vcode(root_, config_);
+                      analyzer_.set_extra_files(vcode.files, resolve_vcode_path(root_, config_)); }
                     configure_background_compiler();
                     schedule_background_compilation();
                 }
@@ -622,8 +671,9 @@ void LazyVerilogServer::register_handlers() {
                     show_warning(warn);
                 publish_config_diagnostic(warn.empty() ? nullptr : &warning_detail);
                 analyzer_.set_defines(config_.design.define);
-                analyzer_.set_extra_files(load_vcode_files(root_, config_),
-                                          resolve_vcode_path(root_, config_));
+                analyzer_.set_include_dirs(resolve_include_dirs(root_, config_));
+                { auto vcode = load_vcode(root_, config_);
+                  analyzer_.set_extra_files(vcode.files, resolve_vcode_path(root_, config_)); }
                 configure_background_compiler();
                 schedule_background_compilation();
                 (void)note; // settings in note.params.settings parsed lazily
@@ -651,8 +701,9 @@ void LazyVerilogServer::register_handlers() {
                         show_warning(warn);
                     publish_config_diagnostic(warn.empty() ? nullptr : &warning_detail);
                     analyzer_.set_defines(config_.design.define);
-                    analyzer_.set_extra_files(load_vcode_files(root_, config_),
-                                              resolve_vcode_path(root_, config_));
+                    analyzer_.set_include_dirs(resolve_include_dirs(root_, config_));
+                    { auto vcode = load_vcode(root_, config_);
+                      analyzer_.set_extra_files(vcode.files, resolve_vcode_path(root_, config_)); }
                     configure_background_compiler();
                 }
             }
@@ -835,40 +886,17 @@ void LazyVerilogServer::register_handlers() {
         td_completion::response rsp;
         rsp.id = req.id;
         try {
+            static CompletionEngine engine;
             const auto& uri = req.params.textDocument.uri.raw_uri_;
             auto state = analyzer_.get_state(uri);
-            CompletionList cl;
-            cl.isIncomplete = false;
-            // SV keywords
-            static const std::vector<std::string> kKeywords = {
-                "module",  "endmodule", "input",       "output",      "inout",        "logic",
-                "wire",    "reg",       "always_ff",   "always_comb", "always_latch", "always",
-                "begin",   "end",       "if",          "else",        "case",         "endcase",
-                "for",     "generate",  "endgenerate", "parameter",   "localparam",   "assign",
-                "posedge", "negedge",   "integer"};
-            for (const auto& kw : kKeywords) {
-                lsCompletionItem item;
-                item.label = kw;
-                item.kind = optional<lsCompletionItemKind>(lsCompletionItemKind::Keyword);
-                cl.items.push_back(std::move(item));
+            if (!state) {
+                rsp.result = CompletionList{};
+                return rsp;
             }
-            // Module and signal names from SyntaxIndex
-            if (state && state->tree) {
-                for (const auto& m : state->index.modules) {
-                    lsCompletionItem item;
-                    item.label = m.name;
-                    item.kind = optional<lsCompletionItemKind>(lsCompletionItemKind::Module);
-                    cl.items.push_back(std::move(item));
-                    for (const auto& p : m.ports) {
-                        lsCompletionItem pi;
-                        pi.label = p.name;
-                        pi.kind = optional<lsCompletionItemKind>(lsCompletionItemKind::Variable);
-                        pi.detail = optional<std::string>(p.direction);
-                        cl.items.push_back(std::move(pi));
-                    }
-                }
-            }
-            rsp.result = std::move(cl);
+            CancellationToken tok;
+            rsp.result = engine.complete(req.params, *state, analyzer_, tok);
+        } catch (const CompletionCancelled&) {
+            rsp.result = CompletionList{};
         } catch (const std::exception& e) {
             std::cerr << "[lazyverilog] completion error: " << e.what() << "\n";
         }

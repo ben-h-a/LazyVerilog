@@ -2,30 +2,11 @@
 #include <algorithm>
 #include <array>
 
-static bool is_sv_keyword(std::string_view word) {
-    static constexpr auto keywords = std::to_array<std::string_view>({
-        "accept_on", "alias",      "always",    "always_comb", "always_ff",  "always_latch",
-        "and",       "assert",     "assign",    "automatic",   "begin",      "bind",
-        "bins",      "bit",        "break",     "byte",        "case",       "casex",
-        "casez",     "cell",       "chandle",   "class",       "clocking",   "config",
-        "const",     "constraint", "context",   "continue",    "cover",      "covergroup",
-        "coverpoint", "cross",     "deassign",  "default",     "defparam",   "design",
-        "disable",   "do",         "edge",      "else",        "end",        "endcase",
-        "endclass",  "endclocking", "endconfig", "endfunction", "endgenerate", "endmodule",
-        "endpackage", "endprogram", "endproperty", "endspecify", "endtable", "endtask",
-        "enum",      "event",      "expect",    "export",      "extends",    "extern",
-        "final",     "for",        "force",     "foreach",     "forever",    "fork",
-        "function",  "generate",   "genvar",    "if",          "iff",        "ifnone",
-        "ignore_bins", "illegal_bins", "import", "incdir",      "include",    "initial",
-        "inout",     "input",      "inside",    "int",         "integer",    "interface"});
-    return std::find(keywords.begin(), keywords.end(), word) != keywords.end();
-}
-
 std::optional<PrepareRenameResult> prepare_rename(const Analyzer& analyzer,
                                                   const lsTextDocumentPositionParams& params) {
     auto ident = analyzer.identifier_at(params.textDocument.uri.raw_uri_, params.position.line,
                                         params.position.character);
-    if (!ident || ident->name.empty() || is_sv_keyword(ident->name))
+    if (!ident || ident->name.empty())
         return std::nullopt;
 
     PrepareRenameResult result;

@@ -190,6 +190,10 @@ BackgroundCompileResult BackgroundCompiler::compile(uint64_t generation,
     result.open_uris = std::move(snapshot.open_uris);
 
     auto source_manager = std::make_unique<slang::SourceManager>();
+    for (const auto& dir : snapshot.include_dirs) {
+        if (!dir.empty())
+            (void)source_manager->addUserDirectories(dir);
+    }
 
     slang::parsing::PreprocessorOptions preprocessor_options;
     preprocessor_options.predefines = snapshot.defines;

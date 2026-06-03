@@ -38,6 +38,60 @@ void log_perf(std::string_view label, Clock::time_point start) {
 } // namespace
 
 static std::string file_name_to_uri(std::string_view file_name, const std::string& fallback_uri);
+static std::string path_to_uri(const std::filesystem::path& path);
+static std::optional<std::string> read_file_text_optional(const std::filesystem::path& path);
+static std::filesystem::path normalize_path(const std::string& path);
+
+static void add_include_dirs(slang::SourceManager& sm, const std::vector<std::string>& dirs) {
+    for (const auto& dir : dirs) {
+        if (dir.empty())
+            continue;
+        // SourceManager reports an error only for exact non-existent directory
+        // patterns.  Completion should remain best-effort when the user has a
+        // stale config path, so we ignore the return code here and let missing
+        // include diagnostics surface from slang in the normal parse path.
+        (void)sm.addUserDirectories(dir);
+    }
+}
+
+static void collect_parse_diagnostics(DocumentState& state, const std::string& fallback_uri) {
+    if (!state.tree)
+        return;
+
+    // Format diagnostics immediately while the SyntaxTree arena is alive.
+    // Do NOT copy slang::Diagnostic objects — their ConstantValue args can
+    // contain internal pointers that are not safely copyable.
+    const auto& diags = state.tree->diagnostics();
+    auto& sm = state.tree->sourceManager();
+    slang::DiagnosticEngine engine(sm);
+    for (const auto& d : diags) {
+        ParseDiagInfo info;
+        try {
+            auto loc = d.location.valid() ? sm.getFullyExpandedLoc(d.location) : d.location;
+            info.uri = file_name_to_uri(sm.getFileName(loc), fallback_uri);
+            if (loc.valid() && sm.isFileLoc(loc)) {
+                size_t ln = sm.getLineNumber(loc);
+                size_t col = sm.getColumnNumber(loc);
+                info.line = ln > 0 ? (int)ln - 1 : 0;
+                info.col = col > 0 ? (int)col - 1 : 0;
+            }
+        } catch (...) {
+        }
+        auto sev = slang::getDefaultSeverity(d.code);
+        if (sev == slang::DiagnosticSeverity::Error || sev == slang::DiagnosticSeverity::Fatal)
+            info.severity = 1;
+        else if (sev == slang::DiagnosticSeverity::Warning)
+            info.severity = 2;
+        else
+            info.severity = 3;
+        try {
+            info.message = engine.formatMessage(d);
+        } catch (...) {
+            info.message = "(diagnostic format error)";
+        }
+        state.parse_diagnostics.push_back(std::move(info));
+    }
+}
 
 std::shared_ptr<DocumentState> Analyzer::make_state(const std::string& uri,
                                                     const std::string& text) const {
@@ -52,6 +106,7 @@ std::shared_ptr<DocumentState> Analyzer::make_state(const std::string& uri,
     // errors when the same file is re-parsed on didChange, and prevents the
     // static singleton from accumulating stale buffers across edits.
     auto sm = std::make_unique<slang::SourceManager>();
+    add_include_dirs(*sm, include_dirs_);
     slang::parsing::PreprocessorOptions ppo;
     ppo.predefines = defines_;
     slang::Bag bag;
@@ -63,42 +118,35 @@ std::shared_ptr<DocumentState> Analyzer::make_state(const std::string& uri,
     state->tree = std::move(tree);
     if (state->tree)
         state->index = SyntaxIndex::build(*state->tree, state->text);
-    // Format diagnostics immediately while the SyntaxTree arena is alive.
-    // Do NOT copy slang::Diagnostic objects — their ConstantValue args can
-    // contain internal pointers that are not safely copyable.
-    if (state->tree) {
-        const auto& diags = state->tree->diagnostics();
-        auto& sm = state->tree->sourceManager();
-        slang::DiagnosticEngine engine(sm);
-        for (const auto& d : diags) {
-            ParseDiagInfo info;
-            try {
-                auto loc = d.location.valid() ? sm.getFullyExpandedLoc(d.location) : d.location;
-                info.uri = file_name_to_uri(sm.getFileName(loc), uri);
-                if (loc.valid() && sm.isFileLoc(loc)) {
-                    size_t ln = sm.getLineNumber(loc);
-                    size_t col = sm.getColumnNumber(loc);
-                    info.line = ln > 0 ? (int)ln - 1 : 0;
-                    info.col = col > 0 ? (int)col - 1 : 0;
-                }
-            } catch (...) {
-            }
-            auto sev = slang::getDefaultSeverity(d.code);
-            if (sev == slang::DiagnosticSeverity::Error || sev == slang::DiagnosticSeverity::Fatal)
-                info.severity = 1;
-            else if (sev == slang::DiagnosticSeverity::Warning)
-                info.severity = 2;
-            else
-                info.severity = 3;
-            try {
-                info.message = engine.formatMessage(d);
-            } catch (...) {
-                info.message = "(diagnostic format error)";
-            }
-            state->parse_diagnostics.push_back(std::move(info));
-        }
-    }
+    collect_parse_diagnostics(*state, uri);
     log_perf("make_state " + uri, start);
+    return state;
+}
+
+std::shared_ptr<DocumentState> Analyzer::make_file_state(const std::filesystem::path& path) const {
+    const auto start = Clock::now();
+    const auto norm = normalize_path(path);
+    const std::string uri = path_to_uri(norm);
+
+    auto sm = std::make_unique<slang::SourceManager>();
+    add_include_dirs(*sm, include_dirs_);
+    slang::parsing::PreprocessorOptions ppo;
+    ppo.predefines = defines_;
+    slang::Bag bag;
+    bag.set(ppo);
+
+    auto tree_or_error = slang::syntax::SyntaxTree::fromFile(norm.string(), *sm, bag);
+    if (!tree_or_error)
+        return nullptr;
+
+    auto text = read_file_text_optional(norm);
+    auto state = std::make_shared<DocumentState>(uri, text.value_or(std::string{}), nullptr);
+    state->source_manager = std::move(sm);
+    state->tree = std::move(*tree_or_error);
+    if (state->tree)
+        state->index = SyntaxIndex::build(*state->tree, state->text);
+    collect_parse_diagnostics(*state, uri);
+    log_perf("make_file_state " + uri, start);
     return state;
 }
 
@@ -1594,6 +1642,20 @@ void Analyzer::set_defines(const std::vector<std::string>& defines) {
     filelist_mtime_.reset();
 }
 
+void Analyzer::set_include_dirs(const std::vector<std::string>& include_dirs) {
+    std::lock_guard<std::mutex> lock(map_mutex_);
+    include_dirs_.clear();
+    include_dirs_.reserve(include_dirs.size());
+    for (const auto& dir : include_dirs)
+        include_dirs_.push_back(normalize_path(dir).string());
+
+    // Include paths affect parsing every explicit filelist source.  Clear the
+    // cache even if the filelist itself did not change, otherwise a newly added
+    // UVM include directory would not be visible until the next source edit.
+    extra_cache_.clear();
+    filelist_mtime_.reset();
+}
+
 void Analyzer::set_extra_files(const std::vector<std::string>& paths,
                                const std::string& filelist_path) {
     std::lock_guard<std::mutex> lock(map_mutex_);
@@ -1654,13 +1716,8 @@ std::vector<ExtraFileInfo> Analyzer::extra_file_snapshots() const {
 }
 
 void Analyzer::merge_extra_file_modules(SyntaxIndex& index) const {
-    for (const auto& extra : extra_file_snapshots()) {
-        const size_t base = index.modules.size();
-        index.modules.insert(index.modules.end(), extra.index.modules.begin(),
-                             extra.index.modules.end());
-        for (size_t i = base; i < index.modules.size(); ++i)
-            index.module_by_name.try_emplace(index.modules[i].name, i);
-    }
+    for (const auto& extra : extra_file_snapshots())
+        index.merge(extra.index);
 }
 
 CompilationSnapshot Analyzer::compilation_snapshot() const {
@@ -1668,6 +1725,7 @@ CompilationSnapshot Analyzer::compilation_snapshot() const {
 
     CompilationSnapshot snapshot;
     snapshot.defines = defines_;
+    snapshot.include_dirs = include_dirs_;
 
     std::unordered_set<std::string> seen_uris;
     std::unordered_set<std::string> seen_paths;
@@ -1909,12 +1967,8 @@ void Analyzer::refresh_extra_cache_locked() const {
             continue;
         }
 
-        auto text = read_file_text_optional(path);
-        if (!text)
-            continue;
-
         const auto uri = path_to_uri(path);
-        auto state = make_state(uri, *text);
+        auto state = make_file_state(path);
         if (!state || !state->tree)
             continue;
 

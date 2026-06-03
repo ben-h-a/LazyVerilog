@@ -191,6 +191,64 @@ end
 -- LSP start
 -- ---------------------------------------------------------------------------
 
+local function _configure_completion_options(bufnr)
+	-- Option A for snippet completions:
+	--
+	-- Keep LazyVerilog free to return LSP Snippet completion items, but avoid
+	-- Neovim's completion preview paths that can Tree-sitter-highlight transient
+	-- snippet/documentation popup buffers while the user moves through the popup
+	-- menu with arrow keys.
+	--
+	-- Why buffer-local?
+	--   'completeopt' is global-local.  Applying this only to buffers where the
+	--   LazyVerilog LSP attaches avoids changing unrelated languages.
+	--
+	-- Why remove both "popup" and "preview"?
+	--   - "popup" asks Neovim's built-in LSP completion to show extra info in a
+	--     floating popup and, for snippet items, synthesize snippet preview info.
+	--   - "preview" uses the preview window for completion info.
+	--   Both can redraw/highlight auxiliary completion text while candidates are
+	--   selected, which is the path that exposed the nvim-treesitter
+	--   `conceal_line` / `node:range()` crash.
+	--
+	-- Why add "noinsert,noselect"?
+	--   They keep completion selection passive: opening or moving in the menu
+	--   does not pre-insert candidate text into the source buffer.  Snippet
+	--   expansion still happens when the user accepts a completion.
+	vim.api.nvim_buf_call(bufnr, function()
+		local drop = {
+			popup   = true,
+			preview = true,
+		}
+		local required_order = { "menu", "menuone", "noinsert", "noselect" }
+		local required = {}
+		for _, opt in ipairs(required_order) do
+			required[opt] = true
+		end
+
+		local next_opts = {}
+		local seen = {}
+
+		-- Preserve unrelated user choices such as "fuzzy" or "nosort", but
+		-- remove preview-producing options and avoid duplicating required ones.
+		for _, opt in ipairs(vim.opt_local.completeopt:get()) do
+			if opt ~= "" and not drop[opt] and not required[opt] and not seen[opt] then
+				table.insert(next_opts, opt)
+				seen[opt] = true
+			end
+		end
+
+		for _, opt in ipairs(required_order) do
+			if not seen[opt] then
+				table.insert(next_opts, opt)
+				seen[opt] = true
+			end
+		end
+
+		vim.opt_local.completeopt = next_opts
+	end)
+end
+
 local function _default_on_attach(client, bufnr)
 	local opts = { buffer = bufnr, silent = true }
 
@@ -198,6 +256,8 @@ local function _default_on_attach(client, bufnr)
 	if vim.lsp.inlay_hint then
 		vim.lsp.inlay_hint.enable(true, { bufnr = bufnr })
 	end
+
+	_configure_completion_options(bufnr)
 end
 
 local function start_lsp(cfg, cmd, bufnr)

@@ -49,6 +49,7 @@ struct CompilationSourceFile {
 struct CompilationSnapshot {
     std::vector<CompilationSourceFile> files;
     std::vector<std::string> defines;
+    std::vector<std::string> include_dirs;
     std::vector<std::string> open_uris;
 };
 
@@ -103,7 +104,13 @@ class Analyzer {
             f(uri, state);
     }
 
-    /// Set extra files from .f filelist.
+    /// Set extra source files from the configured .f filelist.
+    ///
+    /// LazyVerilog indexes only explicit source-file entries. Simulator-style
+    /// options such as +incdir+ are intentionally ignored by server.cpp before
+    /// this method is called, so libraries (including UVM) must appear as real
+    /// source paths in the filelist to contribute completion/index symbols.
+    ///
     /// @param filelist_path  Resolved absolute path to the .f file itself (may be empty).
     ///                       Used to detect filelist changes with a single stat() per request
     ///                       instead of stat()-ing every individual extra file.
@@ -113,6 +120,15 @@ class Analyzer {
     /// Set preprocessor defines (from config.design.define).
     /// Applied on every subsequent make_state call.
     void set_defines(const std::vector<std::string>& defines);
+
+    /// Set include directories (from config.design.include_dir).
+    ///
+    /// These are explicit LazyVerilog config paths, not simulator filelist
+    /// `+incdir+` entries.  They are given to slang's SourceManager so
+    /// `include "..." directives inside opened files and explicit filelist
+    /// sources can resolve library headers without parsing every header as a
+    /// separate top-level extra file.
+    void set_include_dirs(const std::vector<std::string>& include_dirs);
 
     /// Return extra files from .f filelist.
     std::vector<std::string> extra_files() const;
@@ -153,6 +169,7 @@ class Analyzer {
   private:
     std::shared_ptr<DocumentState> make_state(const std::string& uri,
                                               const std::string& text) const;
+    std::shared_ptr<DocumentState> make_file_state(const std::filesystem::path& path) const;
     std::optional<Location>
     definition_of_state(const DocumentState& state, const std::string& uri, int line, int col,
                         const std::vector<ExtraFileInfo>& extra_files) const;
@@ -178,6 +195,7 @@ class Analyzer {
     mutable std::mutex map_mutex_;
     std::unordered_map<std::string, std::shared_ptr<const DocumentState>> docs_;
     std::vector<std::string> defines_;
+    std::vector<std::string> include_dirs_;
     mutable std::vector<std::string> extra_files_;
     mutable std::vector<ExtraFileCacheEntry> extra_cache_;
     std::unordered_map<std::string, std::vector<ParseDiagInfo>> semantic_diagnostics_;

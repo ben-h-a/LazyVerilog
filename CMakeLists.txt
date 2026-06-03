@@ -160,7 +160,9 @@ set(LAZYVERILOG_TEST_SOURCES
     tests/test_definition.cpp
     tests/test_inlay_hints.cpp
     tests/test_lsp_features.cpp
+    tests/test_completion.cpp
     # Feature sources needed by tests (no LSP protocol dependency)
+    src/features/completion.cpp
     src/features/code_action.cpp
     src/features/autoinst.cpp
     src/features/autoarg.cpp
