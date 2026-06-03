@@ -123,6 +123,16 @@ struct ValueEntry {
     int col{0};
 };
 
+struct ImportEntry {
+    std::string package_name;
+    std::string symbol_name; // empty when wildcard == true
+    bool wildcard{false};
+    std::string parent_scope; // empty means compilation-unit import
+    // 1-based visibility range. end_line == 0 means visible to end of file.
+    int start_line{0};
+    int end_line{0};
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct SyntaxIndex {
@@ -154,6 +164,12 @@ struct SyntaxIndex {
     // not a full semantic symbol table, but it gives completion enough local
     // scope/type facts for common RTL editing.
     std::vector<ValueEntry> values;
+
+    // Package imports visible to identifier completion.  These are syntactic
+    // facts from PackageImportDeclarationSyntax, not preprocessor-expanded
+    // semantic imports.  Completion uses them to avoid flattening package
+    // libraries such as UVM into files that did not import them.
+    std::vector<ImportEntry> imports;
 
     /// Build index from a parsed SyntaxTree.
     /// @param source  the source text that produced @p tree (used for line-number lookup).

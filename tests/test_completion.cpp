@@ -719,6 +719,70 @@ TEST_CASE("completion: PackageScope filters symbols by declaring package", "[com
     CHECK_FALSE(has_label(result, "b_value"));
 }
 
+TEST_CASE("completion: identifier completion requires package import", "[completion]") {
+    CompletionEngine engine;
+    Analyzer analyzer;
+    const std::string uri = "file:///tmp/completion_import_filter.sv";
+    const std::string text =
+        "package pkg_no_import;\n"
+        "    class hidden_class;\n"
+        "    endclass\n"
+        "    typedef enum { H_IDLE, H_DONE } hidden_state_t;\n"
+        "endpackage\n"
+        "module top_no_import;\n"
+        "    \n"
+        "endmodule\n"
+        "import pkg_no_import::hidden_class;\n"
+        "module top_explicit_import;\n"
+        "    \n"
+        "endmodule\n"
+        "import pkg_no_import::*;\n"
+        "module top_wildcard_import;\n"
+        "    \n"
+        "endmodule\n";
+    analyzer.open(uri, text);
+
+    auto no_import = complete_at(engine, analyzer, uri, 6, 4);
+    CHECK(has_label(no_import, "pkg_no_import"));
+    CHECK_FALSE(has_label(no_import, "hidden_class"));
+    CHECK_FALSE(has_label(no_import, "hidden_state_t"));
+    CHECK_FALSE(has_label(no_import, "H_IDLE"));
+
+    auto explicit_import = complete_at(engine, analyzer, uri, 10, 4);
+    CHECK(has_label(explicit_import, "hidden_class"));
+    CHECK_FALSE(has_label(explicit_import, "hidden_state_t"));
+    CHECK_FALSE(has_label(explicit_import, "H_IDLE"));
+
+    auto wildcard_import = complete_at(engine, analyzer, uri, 14, 4);
+    CHECK(has_label(wildcard_import, "hidden_class"));
+    CHECK(has_label(wildcard_import, "hidden_state_t"));
+    CHECK(has_label(wildcard_import, "H_IDLE"));
+}
+
+TEST_CASE("completion: module names are hidden in procedural context", "[completion]") {
+    CompletionEngine engine;
+    Analyzer analyzer;
+    const std::string uri = "file:///tmp/completion_module_context.sv";
+    const std::string text =
+        "module child_for_inst;\n"
+        "endmodule\n"
+        "module top;\n"
+        "    logic data;\n"
+        "    \n"
+        "    always_comb begin\n"
+        "        data = \n"
+        "    end\n"
+        "endmodule\n";
+    analyzer.open(uri, text);
+
+    auto module_item = complete_at(engine, analyzer, uri, 4, 4);
+    CHECK(has_label(module_item, "child_for_inst"));
+
+    auto procedural = complete_at(engine, analyzer, uri, 6, 15);
+    CHECK(has_label(procedural, "data"));
+    CHECK_FALSE(has_label(procedural, "child_for_inst"));
+}
+
 TEST_CASE("completion: package scope works inside procedural block", "[completion]") {
     CompletionEngine engine;
     Analyzer analyzer;

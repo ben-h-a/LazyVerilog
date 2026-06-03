@@ -612,11 +612,27 @@ static bool value_visible_in_context(const SyntaxIndex& index, const CompletionC
                                      const ValueEntry& value) {
     if (!ctx.current_scope_name.empty() && !value.parent_scope.empty() &&
         value.parent_scope != ctx.current_scope_name) {
-        // Package values are visible in package-scope completion, but ordinary
-        // identifier completion should not flatten every package into every
-        // module/class scope. Import-aware visibility is handled separately as
-        // package-scope support is improved.
-        return false;
+        if (!index.package_names.count(value.parent_scope))
+            return false;
+
+        const int one_based_line = ctx.line + 1;
+        bool imported = false;
+        for (const auto& imp : index.imports) {
+            if (imp.package_name != value.parent_scope)
+                continue;
+            if (!imp.parent_scope.empty() && imp.parent_scope != ctx.current_scope_name)
+                continue;
+            if (imp.start_line > 0 && one_based_line < imp.start_line)
+                continue;
+            if (imp.end_line > 0 && one_based_line > imp.end_line)
+                continue;
+            if (imp.wildcard || imp.symbol_name == value.name) {
+                imported = true;
+                break;
+            }
+        }
+        if (!imported)
+            return false;
     }
 
     if (value.scope_start_line > 0 && value.scope_end_line > 0) {
@@ -627,6 +643,48 @@ static bool value_visible_in_context(const SyntaxIndex& index, const CompletionC
 
     (void)index;
     return true;
+}
+
+static bool package_symbol_visible_in_identifier_context(const SyntaxIndex& index,
+                                                         const CompletionContext& ctx,
+                                                         std::string_view package_name,
+                                                         std::string_view symbol_name) {
+    if (package_name.empty() || !index.package_names.count(std::string(package_name)))
+        return true;
+
+    if (ctx.current_scope_name == package_name)
+        return true;
+
+    const int one_based_line = ctx.line + 1;
+    for (const auto& imp : index.imports) {
+        if (imp.package_name != package_name)
+            continue;
+        if (!imp.parent_scope.empty() && imp.parent_scope != ctx.current_scope_name)
+            continue;
+        if (imp.start_line > 0 && one_based_line < imp.start_line)
+            continue;
+        if (imp.end_line > 0 && one_based_line > imp.end_line)
+            continue;
+        if (imp.wildcard || imp.symbol_name == symbol_name)
+            return true;
+    }
+    return false;
+}
+
+static bool module_name_visible_in_identifier_context(const SyntaxIndex& index,
+                                                      const CompletionContext& ctx,
+                                                      const ModuleEntry& module) {
+    // Package names are global namespace qualifiers.  Keeping them visible lets
+    // users type `uvm_pkg::` even when package members themselves are hidden
+    // until imported or explicitly scoped.
+    if (index.package_names.count(module.name))
+        return true;
+
+    // Module/interface names are useful where an instantiation or declaration
+    // can start.  They are noise in procedural expression contexts such as
+    // `state = |`, so hide them there instead of globally removing
+    // instantiation completion.
+    return ctx.keyword_context != KeywordContextKind::Procedural;
 }
 
 // ── Item construction helper ──────────────────────────────────────────────────
@@ -748,10 +806,13 @@ class IdentifierProvider : public CompletionProvider {
 
         for (const auto& m : index.modules) {
             if (tok.cancelled) throw CompletionCancelled{};
+            if (!module_name_visible_in_identifier_context(index, ctx, m))
+                continue;
             const bool is_iface = index.interface_names.count(m.name) > 0;
             const bool is_pkg   = index.package_names.count(m.name)   > 0;
-            const lsCompletionItemKind k = is_iface ? lsCompletionItemKind::Interface
-                                                     : lsCompletionItemKind::Module;
+            const lsCompletionItemKind k = is_pkg   ? lsCompletionItemKind::Module
+                                           : is_iface ? lsCompletionItemKind::Interface
+                                                      : lsCompletionItemKind::Module;
             auto it = make_item(m.name, k);
             it.detail = optional<std::string>(is_iface ? std::string("interface")
                                               : is_pkg  ? std::string("package")
@@ -770,17 +831,24 @@ class IdentifierProvider : public CompletionProvider {
 
         for (const auto& c : index.classes) {
             if (tok.cancelled) throw CompletionCancelled{};
+            if (!package_symbol_visible_in_identifier_context(index, ctx, c.parent_scope, c.name))
+                continue;
             items.push_back(make_item(c.name, lsCompletionItemKind::Class));
         }
 
         for (const auto& t : index.typedefs) {
             if (tok.cancelled) throw CompletionCancelled{};
+            if (!package_symbol_visible_in_identifier_context(index, ctx, t.parent_scope, t.name))
+                continue;
             if (t.is_enum) {
                 auto it = make_item(t.name, lsCompletionItemKind::Enum);
                 it.detail = optional<std::string>("enum");
                 items.push_back(std::move(it));
-                for (const auto& em : t.enum_members)
-                    items.push_back(make_item(em.name, lsCompletionItemKind::EnumMember));
+                for (const auto& em : t.enum_members) {
+                    if (package_symbol_visible_in_identifier_context(index, ctx, t.parent_scope,
+                                                                     em.name))
+                        items.push_back(make_item(em.name, lsCompletionItemKind::EnumMember));
+                }
             } else {
                 auto it = make_item(t.name, lsCompletionItemKind::TypeParameter);
                 if (!t.resolved.empty()) it.detail = optional<std::string>(t.resolved);

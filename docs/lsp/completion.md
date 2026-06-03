@@ -30,6 +30,25 @@ endmodule
 
 The context decision is SyntaxTree-based; raw source text scanning is not used to classify SystemVerilog keyword context.
 
+### Identifiers
+
+Triggered in ordinary identifier positions.
+
+Suggests symbols visible from the current syntax context. Module/interface names
+are available where an instantiation can start, but they are hidden in procedural
+expression contexts such as `state = |`.
+
+Package-owned classes, typedefs, enum literals, values, functions, and tasks are
+not flattened into ordinary identifier completion merely because their package
+source is listed in `vcode.f`. They become ordinary identifier candidates only
+when visible through package syntax:
+
+```systemverilog
+import uvm_pkg::*;          // wildcard import: package members are visible
+import uvm_pkg::uvm_object; // explicit import: only uvm_object is visible
+uvm_pkg::                   // explicit package-scope completion
+```
+
 ### Named port connections
 
 Triggered by `.` inside a module instantiation argument list.
@@ -123,7 +142,7 @@ Suggests macro names defined in the current file and all files in the design fil
 
 Triggered on any identifier position.
 
-Suggests visible identifiers from the current SyntaxTree scope plus global design symbols such as module, interface, class, typedef, and package names. Module ports and declarations from unrelated modules are not flattened into the current scope. Block-local declarations are visible only inside their enclosing block range. Structural snippets (`module`, `class`, `always_ff`, `function`, etc.) are also included.
+Suggests visible identifiers from the current SyntaxTree scope plus appropriate global design symbols such as package names and module/interface names in instantiation-capable contexts. Package members from filelist libraries are filtered by visible `import` declarations, module ports and declarations from unrelated modules are not flattened into the current scope, and block-local declarations are visible only inside their enclosing block range. Structural snippets (`module`, `class`, `always_ff`, `function`, etc.) are also included.
 
 ---
 

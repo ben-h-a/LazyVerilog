@@ -734,6 +734,76 @@ static void process_member(const MemberSyntax& member, SyntaxIndex& index,
     }
 }
 
+static void collect_imports(const SyntaxNode& root, SyntaxIndex& index,
+                            const slang::SourceManager& sm) {
+    struct ScopeFrame {
+        std::string name;
+        int end_line{0};
+    };
+
+    struct ImportVisitor : public SyntaxVisitor<ImportVisitor> {
+        SyntaxIndex& index;
+        const slang::SourceManager& sm;
+        std::vector<ScopeFrame> scope_stack;
+
+        ImportVisitor(SyntaxIndex& index, const slang::SourceManager& sm) :
+            index(index), sm(sm) {}
+
+        std::string current_scope() const {
+            return scope_stack.empty() ? std::string{} : scope_stack.back().name;
+        }
+
+        int current_end_line() const {
+            return scope_stack.empty() ? 0 : scope_stack.back().end_line;
+        }
+
+        void push_scope(std::string name, slang::SourceRange range) {
+            auto [start, end] = source_range_lines(sm, range);
+            (void)start;
+            scope_stack.push_back(ScopeFrame{.name = std::move(name), .end_line = end});
+        }
+
+        void handle(const ModuleDeclarationSyntax& node) {
+            push_scope(tok_str(node.header->name), node.sourceRange());
+            visitDefault(node);
+            scope_stack.pop_back();
+        }
+
+        void handle(const ClassDeclarationSyntax& node) {
+            push_scope(tok_str(node.name), node.sourceRange());
+            visitDefault(node);
+            scope_stack.pop_back();
+        }
+
+        void handle(const PackageImportDeclarationSyntax& node) {
+            const auto [decl_line, decl_col] = token_pos(sm, node.keyword);
+            (void)decl_col;
+
+            for (const auto* item : node.items) {
+                if (!item)
+                    continue;
+
+                ImportEntry entry;
+                entry.package_name = tok_str(item->package);
+                entry.wildcard = item->item.kind == slang::parsing::TokenKind::Star;
+                if (!entry.wildcard)
+                    entry.symbol_name = tok_str(item->item);
+                entry.parent_scope = current_scope();
+                entry.start_line = decl_line;
+                entry.end_line = current_end_line();
+
+                if (!entry.package_name.empty())
+                    index.imports.push_back(std::move(entry));
+            }
+
+            visitDefault(node);
+        }
+    };
+
+    ImportVisitor visitor(index, sm);
+    root.visit(visitor);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 SyntaxIndex SyntaxIndex::build(const slang::syntax::SyntaxTree& tree, std::string_view source) {
@@ -749,6 +819,8 @@ SyntaxIndex SyntaxIndex::build(const slang::syntax::SyntaxTree& tree, std::strin
     } else if (const auto* module = root.as_if<ModuleDeclarationSyntax>()) {
         process_module(*module, index, sm, source);
     }
+
+    collect_imports(root, index, sm);
 
     // Macros defined at the end of this file (preprocessor output).
     for (const auto* def : tree.getDefinedMacros()) {
@@ -804,4 +876,5 @@ void SyntaxIndex::merge(const SyntaxIndex& other) {
 
     macros.insert(macros.end(), other.macros.begin(), other.macros.end());
     values.insert(values.end(), other.values.begin(), other.values.end());
+    imports.insert(imports.end(), other.imports.begin(), other.imports.end());
 }
