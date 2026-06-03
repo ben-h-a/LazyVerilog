@@ -28,11 +28,18 @@ struct PortEntry {
     int col{0};  // 0-based
 };
 
+struct ModportEntry {
+    std::string name;
+    int line{0};
+    int col{0};
+};
+
 struct ModuleEntry {
     std::string name;
     int line{0}; // 1-based, 0 if unknown
     int col{0};  // 0-based
     std::vector<PortEntry> ports;
+    std::vector<ModportEntry> modports;
     std::unordered_map<std::string, size_t> port_by_name;
 };
 

@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdio>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <slang/parsing/TokenKind.h>
 #include <slang/syntax/AllSyntax.h>
@@ -204,6 +205,83 @@ syntax_scope_base_before_double_colon(const slang::syntax::SyntaxTree& tree,
     NameVisitor names(separator.best_start);
     tree.root().visit(names);
     return names.result;
+}
+
+struct DotCompletionSyntaxContext {
+    size_t dot_offset{0};
+    std::string base_name;
+};
+
+static std::optional<DotCompletionSyntaxContext>
+syntax_dot_context_before_cursor(const slang::syntax::SyntaxTree& tree, size_t cursor_offset) {
+    using namespace slang;
+    using namespace slang::syntax;
+
+    struct DotVisitor : public SyntaxVisitor<DotVisitor> {
+        size_t cursor_offset;
+        size_t best_start{0};
+        size_t best_end{0};
+
+        explicit DotVisitor(size_t cursor_offset) : cursor_offset(cursor_offset) {}
+
+        void visitToken(slang::parsing::Token token) {
+            if (token && !token.isMissing() && token.kind == parsing::TokenKind::Dot &&
+                token.location().valid()) {
+                const size_t start = token.location().offset();
+                const size_t end = start + token.rawText().size();
+                if (end == cursor_offset && end >= best_end) {
+                    best_start = start;
+                    best_end = end;
+                }
+            }
+        }
+    };
+
+    DotVisitor dots(cursor_offset);
+    tree.root().visit(dots);
+    if (dots.best_end == 0)
+        return std::nullopt;
+
+    struct NameVisitor : public SyntaxVisitor<NameVisitor> {
+        size_t dot_start;
+        size_t best_end{0};
+        std::string result;
+
+        explicit NameVisitor(size_t dot_start) : dot_start(dot_start) {}
+
+        void consider(const slang::syntax::NameSyntax& node) {
+            const auto range = node.sourceRange();
+            if (!range.start().valid() || !range.end().valid())
+                return;
+            const size_t end = range.end().offset();
+            if (end == dot_start && end >= best_end) {
+                auto base = syntax_scope_base_name(node);
+                if (!base.empty()) {
+                    best_end = end;
+                    result = std::move(base);
+                }
+            }
+        }
+
+        void handle(const IdentifierNameSyntax& node) {
+            consider(node);
+            visitDefault(node);
+        }
+
+        void handle(const IdentifierSelectNameSyntax& node) {
+            consider(node);
+            visitDefault(node);
+        }
+
+        void handle(const ScopedNameSyntax& node) {
+            consider(node);
+            visitDefault(node);
+        }
+    };
+
+    NameVisitor names(dots.best_start);
+    tree.root().visit(names);
+    return DotCompletionSyntaxContext{.dot_offset = dots.best_start, .base_name = names.result};
 }
 
 static std::string trim_completion_copy(std::string text) {
@@ -433,6 +511,14 @@ static std::optional<std::string> type_of_value(const SyntaxIndex& index,
     for (const auto& v : index.values) {
         if (v.name == name && !v.type.empty())
             return v.type;
+    }
+    for (const auto& inst : index.instances) {
+        if (inst.instance_name == name && !scope.empty() && inst.parent_module == scope)
+            return inst.module_name;
+    }
+    for (const auto& inst : index.instances) {
+        if (inst.instance_name == name)
+            return inst.module_name;
     }
     return std::nullopt;
 }
@@ -738,18 +824,31 @@ class MemberProvider : public CompletionProvider {
         // Class → fields + methods
         if (const auto it = index.class_by_name.find(name);
             it != index.class_by_name.end()) {
-            const auto& cls = index.classes[it->second];
-            for (const auto& f : cls.fields) {
-                auto item = make_item(f.name, lsCompletionItemKind::Field);
-                if (!f.type.empty()) item.detail = optional<std::string>(f.type);
-                items.push_back(std::move(item));
-            }
-            for (const auto& m : cls.methods) {
-                auto item = make_item(m.name, lsCompletionItemKind::Method);
-                if (!m.return_type.empty())
-                    item.detail = optional<std::string>(m.return_type);
-                items.push_back(std::move(item));
-            }
+            std::unordered_set<std::string> seen;
+            std::function<void(const ClassEntry&)> add_class_members = [&](const ClassEntry& cls) {
+                if (!cls.base_class.empty()) {
+                    if (const auto base_it = index.class_by_name.find(cls.base_class);
+                        base_it != index.class_by_name.end())
+                        add_class_members(index.classes[base_it->second]);
+                }
+                for (const auto& f : cls.fields) {
+                    if (!seen.insert(f.name).second)
+                        continue;
+                    auto item = make_item(f.name, lsCompletionItemKind::Field);
+                    if (!f.type.empty())
+                        item.detail = optional<std::string>(f.type);
+                    items.push_back(std::move(item));
+                }
+                for (const auto& m : cls.methods) {
+                    if (!seen.insert(m.name).second)
+                        continue;
+                    auto item = make_item(m.name, lsCompletionItemKind::Method);
+                    if (!m.return_type.empty())
+                        item.detail = optional<std::string>(m.return_type);
+                    items.push_back(std::move(item));
+                }
+            };
+            add_class_members(index.classes[it->second]);
             return items;
         }
 
@@ -757,10 +856,30 @@ class MemberProvider : public CompletionProvider {
         if (const auto it = index.module_by_name.find(name);
             it != index.module_by_name.end()) {
             const auto& mod = index.modules[it->second];
+            std::unordered_set<std::string> seen;
             for (const auto& p : mod.ports) {
+                if (!seen.insert(p.name).second)
+                    continue;
                 auto item = make_item(p.name, lsCompletionItemKind::Field);
                 if (!p.direction.empty() || !p.type.empty())
                     item.detail = optional<std::string>(p.direction + " " + p.type);
+                items.push_back(std::move(item));
+            }
+            for (const auto& v : index.values) {
+                if (v.parent_scope != mod.name)
+                    continue;
+                if (!seen.insert(v.name).second)
+                    continue;
+                auto item = make_item(v.name, lsCompletionItemKind::Field);
+                if (!v.type.empty())
+                    item.detail = optional<std::string>(v.type);
+                items.push_back(std::move(item));
+            }
+            for (const auto& mp : mod.modports) {
+                if (!seen.insert(mp.name).second)
+                    continue;
+                auto item = make_item(mp.name, lsCompletionItemKind::Interface);
+                item.detail = optional<std::string>("modport");
                 items.push_back(std::move(item));
             }
             return items;
@@ -1207,21 +1326,20 @@ CompletionContext CompletionEngine::detect_context(const DocumentState& state, i
         return ctx;
     }
 
-    // Step 2: examine the character(s) just before the prefix
-    const char c1 = text[pos - 1];
+    // Step 2: examine the syntax immediately before the prefix.
 
     // --- foo.bar | or foo.| -----------------------------------------------
-    if (c1 == '.') {
-        const size_t dot_offset = pos - 1; // byte index of '.'
-        --pos;                             // consume '.'
-        backward_skip_ws(text, pos);
-        std::string scope = backward_read_word(text, pos);
+    if (state.tree) {
+        auto dot_ctx = syntax_dot_context_before_cursor(*state.tree, pos);
+        if (dot_ctx) {
+            const size_t dot_offset = dot_ctx->dot_offset;
+            if (!dot_ctx->base_name.empty()) {
+                // identifier.prefix → MemberAccess
+                ctx.kind = CompletionContextKind::MemberAccess;
+                ctx.scope_name = std::move(dot_ctx->base_name);
+                return ctx;
+            }
 
-        if (!scope.empty()) {
-            // identifier.prefix → MemberAccess
-            ctx.kind = CompletionContextKind::MemberAccess;
-            ctx.scope_name = std::move(scope);
-        } else {
             // bare '.' (no preceding identifier) → NamedPort or Parameter
             const size_t open = find_opening_paren(text, dot_offset);
             if (open < text.size() && open > 0 && text[open - 1] == '#') {
@@ -1259,6 +1377,47 @@ CompletionContext CompletionEngine::detect_context(const DocumentState& state, i
                     } else {
                         ++scan;
                     }
+                }
+            }
+            return ctx;
+        }
+    }
+
+    // Step 3: examine the character(s) just before the prefix for contexts
+    // that do not yet have a robust SyntaxTree recovery path.
+    const char c1 = text[pos - 1];
+
+    if (c1 == '.') {
+        const size_t dot_offset = pos - 1;
+        const size_t open = find_opening_paren(text, dot_offset);
+        if (open < text.size() && open > 0 && text[open - 1] == '#') {
+            ctx.kind = CompletionContextKind::Parameter;
+            size_t hp = open - 1;
+            backward_skip_ws(text, hp);
+            ctx.scope_name = backward_read_word(text, hp);
+        } else {
+            ctx.kind = CompletionContextKind::NamedPort;
+            ctx.scope_name = find_enclosing_instance(text, dot_offset).value_or(std::string{});
+        }
+
+        if (open < dot_offset) {
+            size_t scan = open + 1;
+            while (scan < dot_offset) {
+                if (text[scan] == '.') {
+                    ++scan;
+                    const size_t name_start = scan;
+                    while (scan < dot_offset && is_ident_char(text[scan]))
+                        ++scan;
+                    if (scan > name_start) {
+                        std::string port_name = text.substr(name_start, scan - name_start);
+                        size_t tmp = scan;
+                        while (tmp < dot_offset && std::isspace((unsigned char)text[tmp]))
+                            ++tmp;
+                        if (tmp < dot_offset && text[tmp] == '(')
+                            ctx.connected_ports.insert(std::move(port_name));
+                    }
+                } else {
+                    ++scan;
                 }
             }
         }

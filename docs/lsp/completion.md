@@ -50,14 +50,15 @@ Requires the module definition to be reachable from the current file or the desi
 
 Triggered by `.` after an identifier (outside a port list).
 
-Suggests fields and methods of a class, or port names of a module or interface.
+Suggests fields and methods of a class, inherited class members, fields of named `typedef struct` types, and ports/signals/modports of modules or interfaces.
 
 ```systemverilog
-my_obj.   // lists fields and methods of my_obj's class
-my_module_inst.   // lists ports
+my_obj.          // lists fields and methods of my_obj's class
+pkt_struct.      // lists fields from a named typedef struct
+bus_if_inst.     // lists interface signals and modports
 ```
 
-Resolution is one step deep. Typedef chains longer than one step and parameterized types may not resolve.
+The member-access trigger itself is detected from the SyntaxTree dot token and its immediately-adjacent left-hand name. Type resolution is still syntactic and best-effort; complex expressions and long typedef chains may not resolve.
 
 ### Package scope
 

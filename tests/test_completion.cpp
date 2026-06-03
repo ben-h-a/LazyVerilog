@@ -874,6 +874,53 @@ TEST_CASE("completion: MemberAccess resolves typedef struct variable type", "[co
     CHECK(has_label(result, "valid"));
 }
 
+TEST_CASE("completion: MemberAccess includes inherited class members", "[completion]") {
+    CompletionEngine engine;
+    Analyzer analyzer;
+    const std::string uri = "file:///tmp/completion_member_inherited.sv";
+    const std::string text =
+        "class base_cfg;\n"
+        "    int base_depth;\n"
+        "    function void base_apply();\n"
+        "    endfunction\n"
+        "endclass\n"
+        "class child_cfg extends base_cfg;\n"
+        "    int child_depth;\n"
+        "endclass\n"
+        "module top;\n"
+        "    child_cfg cfg;\n"
+        "    initial cfg.\n"
+        "endmodule\n";
+    analyzer.open(uri, text);
+
+    auto result = complete_at(engine, analyzer, uri, 10, 16);
+    CHECK(has_label(result, "base_depth"));
+    CHECK(has_label(result, "base_apply"));
+    CHECK(has_label(result, "child_depth"));
+}
+
+TEST_CASE("completion: MemberAccess includes interface signals and modports", "[completion]") {
+    CompletionEngine engine;
+    Analyzer analyzer;
+    const std::string uri = "file:///tmp/completion_member_interface.sv";
+    const std::string text =
+        "interface bus_if;\n"
+        "    logic valid;\n"
+        "    logic ready;\n"
+        "    modport master(output valid, input ready);\n"
+        "endinterface\n"
+        "module top;\n"
+        "    bus_if bus();\n"
+        "    initial bus.\n"
+        "endmodule\n";
+    analyzer.open(uri, text);
+
+    auto result = complete_at(engine, analyzer, uri, 7, 16);
+    CHECK(has_label(result, "valid"));
+    CHECK(has_label(result, "ready"));
+    CHECK(has_label(result, "master"));
+}
+
 TEST_CASE("completion: EventControl suggests local signals", "[completion]") {
     CompletionEngine engine;
     Analyzer analyzer;

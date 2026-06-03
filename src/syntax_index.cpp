@@ -420,6 +420,22 @@ static void process_module(const ModuleDeclarationSyntax& module, SyntaxIndex& i
     }
     extract_port_declarations(module.members, entry.ports, sm);
     extract_instances(module.members, index.instances, sm, source, entry.name);
+    for (const auto* member : module.members) {
+        if (!member)
+            continue;
+        if (const auto* modport = member->as_if<ModportDeclarationSyntax>()) {
+            for (const auto* item : modport->items) {
+                if (!item)
+                    continue;
+                auto [ml, mc] = token_pos(sm, item->name);
+                entry.modports.push_back(ModportEntry{
+                    .name = tok_str(item->name),
+                    .line = ml,
+                    .col = mc,
+                });
+            }
+        }
+    }
     for (size_t i = 0; i < entry.ports.size(); ++i)
         entry.port_by_name.try_emplace(entry.ports[i].name, i);
 
