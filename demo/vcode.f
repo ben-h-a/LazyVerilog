@@ -1,4 +1,5 @@
 ./memory.sv
+./folding_demo.sv
 ./demo.sv
 ./cell.sv
 ./params.svh
