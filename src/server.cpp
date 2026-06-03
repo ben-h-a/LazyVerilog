@@ -30,6 +30,7 @@
 #include "LibLsp/lsp/textDocument/publishDiagnostics.h"
 #include "LibLsp/lsp/textDocument/range_formatting.h"
 #include "LibLsp/lsp/textDocument/references.h"
+#include "LibLsp/lsp/textDocument/foldingRange.h"
 #include "LibLsp/lsp/textDocument/rename.h"
 #include "LibLsp/lsp/textDocument/signature_help.h"
 #include "LibLsp/lsp/windows/MessageNotify.h"
@@ -44,6 +45,7 @@
 #include "features/code_action.hpp"
 #include "features/connect.hpp"
 #include "features/definition.hpp"
+#include "features/folding_range.hpp"
 #include "features/formatter.hpp"
 #include "features/hover.hpp"
 #include "features/inlay_hints.hpp"
@@ -557,6 +559,10 @@ void LazyVerilogServer::register_handlers() {
             caps.codeActionProvider =
                 std::make_pair(optional<bool>(true), optional<CodeActionOptions>{});
 
+            // Folding range
+            caps.foldingRangeProvider =
+                std::make_pair(optional<bool>(true), optional<FoldingRangeOptions>{});
+
             // Extract workspace root from initialize params
             auto uri_to_path = [](const std::string& uri) -> std::filesystem::path {
                 if (uri.starts_with("file://"))
@@ -874,6 +880,18 @@ void LazyVerilogServer::register_handlers() {
             rsp.result = provide_rename(analyzer_, req.params);
         } catch (const std::exception& e) {
             std::cerr << "[lazyverilog] rename error: " << e.what() << "\n";
+        }
+        return rsp;
+    });
+
+    // ── textDocument/foldingRange ─────────────────────────────────────────────
+    ep.registerHandler([&](const td_foldingRange::request& req) {
+        td_foldingRange::response rsp;
+        rsp.id = req.id;
+        try {
+            rsp.result = provide_folding_range(analyzer_, req.params);
+        } catch (const std::exception& e) {
+            std::cerr << "[lazyverilog] foldingRange error: " << e.what() << "\n";
         }
         return rsp;
     });

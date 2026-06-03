@@ -257,6 +257,16 @@ local function _default_on_attach(client, bufnr)
 		vim.lsp.inlay_hint.enable(true, { bufnr = bufnr })
 	end
 
+	-- LSP-driven folding (Neovim >= 0.10)
+	-- Sets foldmethod=expr so zM/za/zo work against LSP folding ranges.
+	if vim.lsp.foldexpr then
+		vim.api.nvim_buf_call(bufnr, function()
+			vim.wo.foldmethod = "expr"
+			vim.wo.foldexpr   = "v:lua.vim.lsp.foldexpr()"
+			vim.wo.foldlevel  = 99 -- start fully open; use zM to close all
+		end)
+	end
+
 	_configure_completion_options(bufnr)
 end
 
