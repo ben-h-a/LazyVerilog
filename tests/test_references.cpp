@@ -77,6 +77,52 @@ endmodule
     CHECK(refs[0].range.start.line == 4);
 }
 
+TEST_CASE("references: macro invocation resolves through macro SymbolID", "[references]") {
+    Analyzer analyzer;
+    const std::string uri = "file:///tmp/references_macro_fixture.sv";
+    const std::string text = R"(`define WIDTH 8
+
+module top;
+    logic [`WIDTH-1:0] a;
+    logic [`WIDTH-1:0] b;
+endmodule
+)";
+    analyzer.open(uri, text);
+
+    auto [line, col] = find_position_after(text, "WIDTH", "logic [");
+    const auto refs = analyzer.find_references(uri, line, col, true);
+
+    REQUIRE(refs.size() == 3);
+    CHECK(refs[0].line == 0);
+    CHECK(refs[0].col == 8);
+    CHECK(refs[1].line == 3);
+    CHECK(refs[1].col == 12);
+    CHECK(refs[2].line == 4);
+    CHECK(refs[2].col == 12);
+}
+
+TEST_CASE("references: macro definition finds macro invocations", "[references]") {
+    Analyzer analyzer;
+    const std::string uri = "file:///tmp/references_macro_definition_fixture.sv";
+    const std::string text = R"(`define FOO 1
+
+module top;
+    localparam int A = `FOO;
+    localparam int B = `FOO;
+endmodule
+)";
+    analyzer.open(uri, text);
+
+    auto [line, col] = find_position(text, "FOO");
+    const auto refs = analyzer.find_references(uri, line, col, false);
+
+    REQUIRE(refs.size() == 2);
+    CHECK(refs[0].line == 3);
+    CHECK(refs[0].col == 24);
+    CHECK(refs[1].line == 4);
+    CHECK(refs[1].col == 24);
+}
+
 TEST_CASE("references: module declaration finds open cross-file instantiations by symbol id",
           "[references]") {
     const std::string memory = R"(module memory(input logic clk);

@@ -85,6 +85,29 @@ SourceFileID token_file_id_for_dynamic_index(SyntaxIndex& index, const slang::So
     return index.intern_source_file(std::move(uri));
 }
 
+std::string location_uri_for_dynamic_index(const slang::SourceManager& sm,
+                                           slang::SourceLocation location) {
+    if (!location.valid())
+        return {};
+
+    const auto file_name = sm.getFileName(location);
+    if (file_name.empty())
+        return {};
+
+    std::string file(file_name);
+    if (file.starts_with("file://"))
+        return file;
+    return path_to_uri_for_dynamic_index(file);
+}
+
+SourceFileID location_file_id_for_dynamic_index(SyntaxIndex& index, const slang::SourceManager& sm,
+                                                slang::SourceLocation location) {
+    auto uri = location_uri_for_dynamic_index(sm, location);
+    if (uri.empty())
+        return kInvalidSourceFileID;
+    return index.intern_source_file(std::move(uri));
+}
+
 std::string symbol_canonical(std::string kind, std::string scope, std::string name) {
     if (scope.empty())
         return kind + "::" + name;
@@ -648,6 +671,92 @@ void collect_macros(const slang::syntax::SyntaxTree& tree, SyntaxIndex& index) {
     }
 }
 
+std::optional<std::string> source_text_for_dynamic_range(const slang::SourceManager& sm,
+                                                         slang::SourceRange range) {
+    if (!range.start().valid() || !range.end().valid())
+        return std::nullopt;
+    if (range.start().buffer() != range.end().buffer())
+        return std::nullopt;
+
+    const auto source = sm.getSourceText(range.start().buffer());
+    const size_t begin = range.start().offset();
+    const size_t end = range.end().offset();
+    if (begin > end || end > source.size())
+        return std::nullopt;
+    return std::string(source.substr(begin, end - begin));
+}
+
+void collect_macro_reference_occurrences(const slang::syntax::SyntaxTree& tree, SyntaxIndex& index) {
+    const auto& sm = tree.sourceManager();
+
+    auto add_macro_ref = [&](std::string name, SourceFileID file_id, int line, int col) {
+        if (name.empty())
+            return;
+        index.references.push_back(ReferenceEntry{
+            .name = name,
+            .file_id = file_id,
+            .symbol_id = SymbolID::from_canonical("macro::" + name),
+            .symbol_debug = "macro::" + name,
+            .line = line,
+            .col = col,
+            .end_col = col + (int)name.size(),
+        });
+    };
+
+    // `define names are preprocessor facts, not normal syntax-tree Identifier
+    // tokens, so add declaration occurrences explicitly.
+    for (const auto* def : tree.getDefinedMacros()) {
+        if (!def || !def->name || !def->name.location().valid() || !sm.isFileLoc(def->name.location()))
+            continue;
+        const auto [line, col] = token_pos(sm, def->name);
+        add_macro_ref(tok_text(def->name), token_file_id_for_dynamic_index(index, sm, def->name),
+                      line, col);
+    }
+
+    struct Visitor : public SyntaxVisitor<Visitor> {
+        SyntaxIndex& index;
+        const slang::SourceManager& sm;
+        decltype(add_macro_ref)& add_ref;
+        std::unordered_set<std::string> seen_expansions;
+
+        Visitor(SyntaxIndex& index, const slang::SourceManager& sm,
+                decltype(add_macro_ref)& add_macro_ref)
+            : index(index), sm(sm), add_ref(add_macro_ref) {}
+
+        void visitToken(slang::parsing::Token token) {
+            if (!token || !token.location().valid() || !sm.isMacroLoc(token.location()))
+                return;
+
+            const auto macro_name = sm.getMacroName(token.location());
+            if (macro_name.empty())
+                return;
+
+            const auto range = sm.getExpansionRange(token.location());
+            if (!range.start().valid())
+                return;
+
+            const auto uri = location_uri_for_dynamic_index(sm, range.start());
+            const std::string key = uri + ":" + std::to_string(range.start().offset()) + ":" +
+                                    std::to_string(range.end().offset());
+            if (!seen_expansions.insert(key).second)
+                return;
+
+            const int line = (int)sm.getLineNumber(range.start());
+            int col = (int)sm.getColumnNumber(range.start()) - 1;
+            if (col < 0)
+                col = 0;
+            if (auto text = source_text_for_dynamic_range(sm, range); text && text->starts_with('`'))
+                ++col;
+
+            add_ref(std::string(macro_name),
+                          location_file_id_for_dynamic_index(index, sm, range.start()), line, col);
+        }
+    };
+
+    Visitor visitor(index, sm, add_macro_ref);
+    tree.root().visit(visitor);
+}
+
 void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
                                    const slang::SourceManager& sm) {
     std::unordered_set<std::string> module_values;
@@ -1138,15 +1247,26 @@ SyntaxIndex build_current_ast_structural_index(const DocumentState& state) {
     }
 
     collect_reference_occurrences(root, index, sm);
+    collect_macro_reference_occurrences(*state.tree, index);
     return index;
 }
 
+const SyntaxIndex& get_structural_index(const DocumentState& state) {
+    std::call_once(state.structural_index_once_, [&state] {
+        state.structural_index_cache_ = build_current_ast_structural_index(state);
+    });
+    return state.structural_index_cache_;
+}
+
 SyntaxIndex build_dynamic_file_index(const DocumentState& state) {
-    auto index = build_current_ast_structural_index(state);
+    SyntaxIndex index = get_structural_index(state);
     if (!state.tree)
         return index;
 
     collect_imports(state.tree->root(), index, state.tree->sourceManager());
     collect_macros(*state.tree, index);
+    // The structural cache already contains macro reference occurrences for
+    // the open file.  `collect_macros()` above only adds completion metadata
+    // (MacroEntry), so do not add references a second time here.
     return index;
 }

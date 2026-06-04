@@ -205,13 +205,10 @@ void Analyzer::close(const std::string& uri) {
     // with a disk-backed parse in the background.  Keeping this asynchronous is
     // important for large buffers: closing a split should not synchronously
     // parse an include-heavy RTL file on the UI path.
-    for (auto& entry : extra_cache_) {
-        if (entry.uri != uri)
-            continue;
-        background_pending_files_.push_back(entry.path);
+    if (const auto it = extra_cache_.find(uri); it != extra_cache_.end()) {
+        background_pending_files_.push_back(it->second.path);
         start_background_indexer_locked();
         background_cv_.notify_all();
-        break;
     }
 }
 
@@ -296,6 +293,31 @@ static bool is_backtick_identifier(std::string_view src, int line, int ident_sta
         line_end = src.size();
     const size_t backtick = line_start + (size_t)ident_start_col - 1;
     return backtick < line_end && src[backtick] == '`';
+}
+
+static bool is_define_identifier(std::string_view src, int line, int ident_start_col) {
+    int cur = 0;
+    size_t pos = 0;
+    while (pos < src.size() && cur < line) {
+        if (src[pos] == '\n')
+            ++cur;
+        ++pos;
+    }
+    if (cur < line || ident_start_col <= 0)
+        return false;
+
+    const size_t line_start = pos;
+    const size_t ident_start = line_start + (size_t)ident_start_col;
+    if (ident_start > src.size())
+        return false;
+
+    std::string_view prefix = src.substr(line_start, ident_start - line_start);
+    auto first = prefix.find_first_not_of(" \t");
+    if (first == std::string_view::npos)
+        return false;
+    prefix.remove_prefix(first);
+    return prefix.starts_with("`define") &&
+           (prefix.size() == 7 || std::isspace((unsigned char)prefix[7]));
 }
 
 static int to_lsp_line(int one_based_line) { return one_based_line > 0 ? one_based_line - 1 : 0; }
@@ -1620,7 +1642,8 @@ Analyzer::definition_of_state(const DocumentState& state, const std::string& uri
 
     if (target.kind == DefinitionTargetKind::None || target.name.empty()) {
         auto ident = extract_ident_span(state.text, line, col);
-        if (!ident || !is_backtick_identifier(state.text, line, ident->start_col))
+        if (!ident || (!is_backtick_identifier(state.text, line, ident->start_col) &&
+                       !is_define_identifier(state.text, line, ident->start_col)))
             return std::nullopt;
 
         if (auto loc = find_macro_definition(*state.tree, uri, ident->text))
@@ -1718,7 +1741,25 @@ std::vector<Location> Analyzer::find_references(const std::string& uri, int line
     // future reference-occurrence index before they can participate scalably.
     std::vector<ExtraFileInfo> extra_files;
     auto state = get_state(uri);
-    if (!target || !state)
+    if (!state)
+        return {};
+    if (!target) {
+        // Macro invocations are often represented in slang's parsed tree as
+        // expansion tokens rather than as an ordinary Identifier token at the
+        // user's source location.  `definition_of_state()` already has a raw
+        // source fallback for backtick identifiers; references need the same
+        // seed identifier so "find references" works when the cursor is on
+        // `FOO in source text.
+        if (auto ident = extract_ident_span(state->text, line, col);
+            ident && (is_backtick_identifier(state->text, line, ident->start_col) ||
+                      is_define_identifier(state->text, line, ident->start_col))) {
+            target = IdentifierAtPosition{.name = ident->text,
+                                          .line = line,
+                                          .col = ident->start_col,
+                                          .end_col = ident->end_col};
+        }
+    }
+    if (!target)
         return {};
     const auto target_info = state->tree ? definition_target_at(*state->tree, uri, line, col)
                                          : DefinitionTarget{};
@@ -1760,6 +1801,13 @@ std::vector<Location> Analyzer::find_references(const std::string& uri, int line
             "module_param::" + target_info.module_name + "::" + target_info.name;
     } else if (target_info.kind == DefinitionTargetKind::Macro) {
         target_symbol_debug = "macro::" + target_info.name;
+    } else if (is_backtick_identifier(state->text, line, target->col) ||
+               is_define_identifier(state->text, line, target->col)) {
+        // Raw backtick fallback: if the cursor did not map to an expansion
+        // token (or the cursor is on a `define name), still use the same macro
+        // SymbolID that the syntax index emits for declarations and invocation
+        // sites.
+        target_symbol_debug = "macro::" + target->name;
     }
     if (target_symbol_debug.empty()) {
         // Prefer the symbol identity at the token the user actually clicked.
@@ -1778,7 +1826,7 @@ std::vector<Location> Analyzer::find_references(const std::string& uri, int line
         //
         // Recovering that ID first prevents same-name typedef fields from being
         // merged by references/rename.
-        auto current_structural_index = build_current_ast_structural_index(*state);
+        auto current_structural_index = get_structural_index(*state);
         Location clicked_loc{uri, target->line, target->col, target->line, target->end_col};
         if (auto id = symbol_id_for_index_location(current_structural_index, clicked_loc))
             target_symbol_debug = *id;
@@ -1927,7 +1975,7 @@ std::vector<Location> Analyzer::find_references(const std::string& uri, int line
             // Resolving `memory` in memory_top.sv through definition_of_state()
             // would require closed/project-file ASTs in the resolver.  The
             // SymbolID path avoids that by matching `module:memory` directly.
-            const auto open_index = build_current_ast_structural_index(*state);
+            const auto open_index = get_structural_index(*state);
             for (const auto& ref : open_index.references) {
                 if (ref.symbol_id == target_symbol_id)
                     add_indexed_reference(state_uri, open_index, ref);
@@ -2050,7 +2098,7 @@ std::vector<ExtraFileInfo> Analyzer::extra_file_snapshots() const {
 
     std::vector<ExtraFileInfo> result;
     result.reserve(extra_cache_.size());
-    for (const auto& entry : extra_cache_) {
+    for (const auto& [key, entry] : extra_cache_) {
         // Closed project files intentionally have no DocumentState here.  They
         // are represented only by the compact SyntaxIndex shard.  If the file
         // is open, attach the live state so AST-only features can inspect the
@@ -2081,7 +2129,7 @@ std::vector<ExtraIndexInfo> Analyzer::extra_index_snapshots() const {
 
     std::vector<ExtraIndexInfo> result;
     result.reserve(extra_cache_.size());
-    for (const auto& entry : extra_cache_) {
+    for (const auto& [key, entry] : extra_cache_) {
         result.push_back(ExtraIndexInfo{
             .path = entry.path,
             .uri = entry.uri,
@@ -2232,7 +2280,7 @@ std::optional<RtlTreeNode> Analyzer::rtl_tree(const std::string& uri) const {
     auto state = get_state(uri);
     if (!state || !state->tree)
         return std::nullopt;
-    const auto state_index = build_current_ast_structural_index(*state);
+    const auto state_index = get_structural_index(*state);
     if (state_index.modules.empty())
         return std::nullopt;
 
@@ -2240,7 +2288,7 @@ std::optional<RtlTreeNode> Analyzer::rtl_tree(const std::string& uri) const {
     std::unordered_set<std::string> seen_uris;
     for_each_state([&](const std::string& state_uri, const auto& state_snapshot) {
         if (state_snapshot && state_snapshot->tree)
-            add_rtl_index_file(view, seen_uris, state_uri, build_current_ast_structural_index(*state_snapshot));
+            add_rtl_index_file(view, seen_uris, state_uri, get_structural_index(*state_snapshot));
     });
     for (const auto& extra : extra_file_snapshots())
         add_rtl_index_file(view, seen_uris, extra.uri, extra.index);
@@ -2286,7 +2334,7 @@ std::optional<RtlTreeNode> Analyzer::rtl_tree_reverse(const std::string& uri) co
     auto state = get_state(uri);
     if (!state || !state->tree)
         return std::nullopt;
-    const auto state_index = build_current_ast_structural_index(*state);
+    const auto state_index = get_structural_index(*state);
     if (state_index.modules.empty())
         return std::nullopt;
 
@@ -2294,7 +2342,7 @@ std::optional<RtlTreeNode> Analyzer::rtl_tree_reverse(const std::string& uri) co
     std::unordered_set<std::string> seen_uris;
     for_each_state([&](const std::string& state_uri, const auto& state_snapshot) {
         if (state_snapshot && state_snapshot->tree)
-            add_rtl_index_file(view, seen_uris, state_uri, build_current_ast_structural_index(*state_snapshot));
+            add_rtl_index_file(view, seen_uris, state_uri, get_structural_index(*state_snapshot));
     });
     for (const auto& extra : extra_file_snapshots())
         add_rtl_index_file(view, seen_uris, extra.uri, extra.index);
@@ -2356,7 +2404,7 @@ std::optional<RtlTreeNode> Analyzer::rtl_tree_reverse(const std::string& uri) co
 
 void Analyzer::refresh_extra_cache_locked() const {
     const auto start = Clock::now();
-    std::vector<ExtraFileCacheEntry> refreshed;
+    std::unordered_map<std::string, ExtraFileCacheEntry> refreshed;
     refreshed.reserve(extra_files_.size());
 
     for (const auto& configured_path : extra_files_) {
@@ -2369,20 +2417,16 @@ void Analyzer::refresh_extra_cache_locked() const {
         // edits in b.sv when completing from top.sv, without reparsing every
         // filelist source.
         if (const auto doc = docs_.find(uri); doc != docs_.end() && doc->second) {
-            refreshed.push_back(ExtraFileCacheEntry{
+            refreshed[uri] = ExtraFileCacheEntry{
                 .path = path_string,
                 .uri = uri,
                 .index = build_dynamic_file_index(*doc->second),
-            });
+            };
             continue;
         }
 
-        auto existing = std::find_if(
-            extra_cache_.begin(), extra_cache_.end(), [&](const ExtraFileCacheEntry& entry) {
-                return entry.path == path_string;
-            });
-        if (existing != extra_cache_.end()) {
-            refreshed.push_back(*existing);
+        if (const auto existing = extra_cache_.find(uri); existing != extra_cache_.end()) {
+            refreshed[uri] = existing->second;
             continue;
         }
 
@@ -2390,11 +2434,11 @@ void Analyzer::refresh_extra_cache_locked() const {
         if (!state || !state->tree)
             continue;
 
-        refreshed.push_back(ExtraFileCacheEntry{
+        refreshed[uri] = ExtraFileCacheEntry{
             .path = path_string,
             .uri = uri,
             .index = state->index,
-        });
+        };
     }
 
     extra_cache_ = std::move(refreshed);
@@ -2466,22 +2510,11 @@ void Analyzer::background_index_loop(std::stop_token stop) const {
             // didChange.  Commit that live shard immediately and avoid wasting
             // background CPU reparsing stale disk contents.
             if (const auto doc = docs_.find(uri); doc != docs_.end() && doc->second) {
-                auto live_index = build_dynamic_file_index(*doc->second);
-                auto existing = std::find_if(
-                    extra_cache_.begin(), extra_cache_.end(), [&](const ExtraFileCacheEntry& e) {
-                        return e.path == path_string || e.uri == uri;
-                    });
-                if (existing != extra_cache_.end()) {
-                    existing->path = path_string;
-                    existing->uri = uri;
-                    existing->index = std::move(live_index);
-                } else {
-                    extra_cache_.push_back(ExtraFileCacheEntry{
-                        .path = path_string,
-                        .uri = uri,
-                        .index = std::move(live_index),
-                    });
-                }
+                extra_cache_[uri] = ExtraFileCacheEntry{
+                    .path = path_string,
+                    .uri = uri,
+                    .index = build_dynamic_file_index(*doc->second),
+                };
                 background_publish_requested_ = true;
                 continue;
             }
@@ -2503,21 +2536,11 @@ void Analyzer::background_index_loop(std::stop_token stop) const {
                 committed_index = build_dynamic_file_index(*doc->second);
             }
 
-            auto existing = std::find_if(
-                extra_cache_.begin(), extra_cache_.end(), [&](const ExtraFileCacheEntry& e) {
-                    return e.path == path_string || e.uri == uri;
-                });
-            if (existing != extra_cache_.end()) {
-                existing->path = path_string;
-                existing->uri = uri;
-                existing->index = std::move(committed_index);
-            } else {
-                extra_cache_.push_back(ExtraFileCacheEntry{
-                    .path = path_string,
-                    .uri = uri,
-                    .index = std::move(committed_index),
-                });
-            }
+            extra_cache_[uri] = ExtraFileCacheEntry{
+                .path = path_string,
+                .uri = uri,
+                .index = std::move(committed_index),
+            };
 
             // ProjectIndex is an immutable merged view derived from shards.
             // Publish from the background worker so request handlers never pay
@@ -2529,7 +2552,7 @@ void Analyzer::background_index_loop(std::stop_token stop) const {
 
 void Analyzer::publish_extra_project_index_locked() const {
     auto merged = std::make_shared<SyntaxIndex>();
-    for (const auto& entry : extra_cache_) {
+    for (const auto& [key, entry] : extra_cache_) {
         merged->merge(entry.index);
     }
     extra_project_index_cache_ = std::move(merged);
@@ -2558,22 +2581,11 @@ void Analyzer::update_extra_cache_for_live_state_locked(
     if (listed == extra_files_.end())
         return;
 
-    auto existing = std::find_if(extra_cache_.begin(), extra_cache_.end(),
-                                 [&](const ExtraFileCacheEntry& entry) {
-                                     return entry.path == path_string || entry.uri == uri;
-                                 });
-    auto live_index = build_dynamic_file_index(*state);
-    if (existing != extra_cache_.end()) {
-        existing->path = path_string;
-        existing->uri = uri;
-        existing->index = std::move(live_index);
-    } else {
-        extra_cache_.push_back(ExtraFileCacheEntry{
-            .path = path_string,
-            .uri = uri,
-            .index = std::move(live_index),
-        });
-    }
+    extra_cache_[uri] = ExtraFileCacheEntry{
+        .path = path_string,
+        .uri = uri,
+        .index = build_dynamic_file_index(*state),
+    };
 
     // This is the Option-B shard replacement point: b.sv's shard is replaced
     // when b.sv receives didOpen/didChange.  The merged project view is

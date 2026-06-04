@@ -171,6 +171,29 @@ static SourceFileID token_file_id_for_index(SyntaxIndex& index, const slang::Sou
     return index.intern_source_file(std::move(uri));
 }
 
+static std::string location_uri_for_index(const slang::SourceManager& sm,
+                                          slang::SourceLocation location) {
+    if (!location.valid())
+        return {};
+
+    const auto file_name = sm.getFileName(location);
+    if (file_name.empty())
+        return {};
+
+    std::string file(file_name);
+    if (file.starts_with("file://"))
+        return file;
+    return path_to_uri_for_index(file);
+}
+
+static SourceFileID location_file_id_for_index(SyntaxIndex& index, const slang::SourceManager& sm,
+                                               slang::SourceLocation location) {
+    auto uri = location_uri_for_index(sm, location);
+    if (uri.empty())
+        return kInvalidSourceFileID;
+    return index.intern_source_file(std::move(uri));
+}
+
 static std::string symbol_canonical(std::string kind, std::string scope, std::string name) {
     if (scope.empty())
         return kind + "::" + name;
@@ -229,6 +252,81 @@ static bool index_macro_has_user_source_location(const slang::SourceManager& sm,
     // LazyVerilog should not surface such parser implementation details as
     // project macros.
     return name && name.location().valid() && sm.isFileLoc(name.location());
+}
+
+static void collect_macro_reference_occurrences(const slang::syntax::SyntaxTree& tree,
+                                                SyntaxIndex& index) {
+    const auto& sm = tree.sourceManager();
+
+    auto add_macro_ref = [&](std::string name, SourceFileID file_id, int line, int col) {
+        if (name.empty())
+            return;
+        index.references.push_back(ReferenceEntry{
+            .name = name,
+            .file_id = file_id,
+            .symbol_id = SymbolID::from_canonical("macro::" + name),
+            .symbol_debug = "macro::" + name,
+            .line = line,
+            .col = col,
+            .end_col = col + (int)name.size(),
+        });
+    };
+
+    // Declaration occurrences live outside the normal parsed syntax tree, so
+    // collect them from slang's preprocessor macro table explicitly.
+    for (const auto* def : tree.getDefinedMacros()) {
+        if (!def || !index_macro_has_user_source_location(sm, def->name))
+            continue;
+        const auto [line, col] = token_pos(sm, def->name);
+        add_macro_ref(std::string(def->name.valueText()), token_file_id_for_index(index, sm, def->name),
+                      line, col);
+    }
+
+    struct Visitor : public SyntaxVisitor<Visitor> {
+        SyntaxIndex& index;
+        const slang::SourceManager& sm;
+        decltype(add_macro_ref)& add_ref;
+        std::unordered_set<std::string> seen_expansions;
+
+        Visitor(SyntaxIndex& index, const slang::SourceManager& sm,
+                decltype(add_macro_ref)& add_macro_ref)
+            : index(index), sm(sm), add_ref(add_macro_ref) {}
+
+        void visitToken(slang::parsing::Token token) {
+            if (!token || !token.location().valid() || !sm.isMacroLoc(token.location()))
+                return;
+
+            const auto macro_name = sm.getMacroName(token.location());
+            if (macro_name.empty())
+                return;
+
+            const auto range = sm.getExpansionRange(token.location());
+            if (!range.start().valid())
+                return;
+
+            // One invocation can expand to many parser tokens.  Use the
+            // spelling range as the de-duplication key so each `FOO occurrence
+            // is reported once.
+            const auto uri = location_uri_for_index(sm, range.start());
+            const std::string key = uri + ":" + std::to_string(range.start().offset()) + ":" +
+                                    std::to_string(range.end().offset());
+            if (!seen_expansions.insert(key).second)
+                return;
+
+            const int line = (int)sm.getLineNumber(range.start());
+            int col = (int)sm.getColumnNumber(range.start()) - 1;
+            if (col < 0)
+                col = 0;
+            if (auto text = source_text_for_index_range(sm, range); text && text->starts_with('`'))
+                ++col;
+
+            add_ref(std::string(macro_name), location_file_id_for_index(index, sm, range.start()),
+                          line, col);
+        }
+    };
+
+    Visitor visitor(index, sm, add_macro_ref);
+    tree.root().visit(visitor);
 }
 
 static MacroEntry macro_entry_from_define(SyntaxIndex& index, const slang::SourceManager& sm,
@@ -1436,6 +1534,7 @@ SyntaxIndex SyntaxIndex::build(const slang::syntax::SyntaxTree& tree, std::strin
         collect_imports(root, index, sm);
 
     collect_reference_occurrences(root, index, sm);
+    collect_macro_reference_occurrences(tree, index);
 
     // Macros are queried from the live current-file layer.  Extra-file macro
     // entries are intentionally skipped by Declarations depth to avoid both
