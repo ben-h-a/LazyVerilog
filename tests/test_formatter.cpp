@@ -1635,6 +1635,27 @@ TEST_CASE("formatter: var declarations inside typedef struct are aligned", "[for
     CHECK(formatted.find("logic                                   valid") != std::string::npos);
 }
 
+TEST_CASE("formatter: typedef struct packed body breaks after opening brace", "[formatter]") {
+    FormatOptions opts;
+    opts.var_declaration.align = true;
+    opts.var_declaration.section1_min_width = 20;
+    opts.var_declaration.section2_min_width = 20;
+    opts.var_declaration.section3_min_width = 20;
+    opts.var_declaration.section4_min_width = 16;
+
+    const std::string formatted =
+        format_source("typedef struct packed {logic valid;\n"
+                      "    logic [3:0] id;\n"
+                      "    logic [31:0] data;\n"
+                      "} fifo_entry_t;\n",
+                      opts);
+
+    INFO("formatted output:\n" << formatted);
+    CHECK(formatted.find("packed {logic") == std::string::npos);
+    CHECK(formatted.find("typedef struct packed {\n") != std::string::npos);
+    CHECK(formatted.find("logic                                   valid") != std::string::npos);
+}
+
 TEST_CASE("formatter: outmost indent option applies to module interface and package",
           "[formatter]") {
     FormatOptions opts;
