@@ -1,4 +1,4 @@
-<!-- Generated: 2026-05-28 | Updated: 2026-05-28 -->
+<!-- Generated: 2026-05-28 | Updated: 2026-06-05 -->
 
 # lazyverilog
 
@@ -50,6 +50,28 @@ ctest --test-dir build                          # all tests
 - Token-based, idempotent formatting via sequential passes
 - Config loaded from `lazyverilog.toml`, walked up from the opened file's directory
 - JSON-RPC over stdin/stdout
+
+### AST / Index Architecture Philosophy
+- Current/open buffers are represented by live slang `SyntaxTree` AST snapshots.
+  This keeps cursor-sensitive features precise for unsaved edits, diagnostics,
+  local syntax context, and operations that need exact source structure.
+- Other files should generally be represented by compact `SyntaxIndex` shards,
+  not by retained full ASTs.  Project/filelist files may number in the hundreds
+  or thousands, so keeping full ASTs for every file would increase memory use,
+  allocator/source-manager lifetime complexity, and request-path contention.
+- In short:
+  - current file: AST is authoritative;
+  - other/project/closed files: index is authoritative;
+  - avoid designing features that require closed project files to keep ASTs.
+- If a current/open file needs index-shaped facts such as modules, instances,
+  symbol IDs, or reference occurrences, derive those facts from the current
+  file AST.  Prefer caching such AST-derived indexes per immutable
+  `DocumentState` snapshot when they are reused across requests; invalidate by
+  replacing the `DocumentState` on `didChange`.
+- Do not move expensive whole-project merges or closed-file AST walks onto hot
+  request paths.  Background indexing should publish reusable index snapshots,
+  and request handlers should consume those snapshots without reparsing or
+  rebuilding project-wide state.
 
 ### Formatter Pass Ownership and Idempotency
 - Formatter flow is: lexer lexes source into Tokenflow, then `SyntaxPass`,
