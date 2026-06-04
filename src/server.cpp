@@ -1,5 +1,6 @@
 #include "server.hpp"
 #include "analyzer.hpp"
+#include "string_utils.hpp"
 #include "background_compiler.hpp"
 #include "config.hpp"
 #include "dynamic_file_index.hpp"
@@ -77,6 +78,40 @@ struct StdInStream : lsp::base_istream<std::istream> {
 
 // ── Incremental-sync helpers ──────────────────────────────────────────────────
 
+// Advance past col UTF-16 code units from pos, staying on the current line.
+// 4-byte UTF-8 sequences (U+10000+) count as 2 UTF-16 units (surrogate pair).
+static size_t advance_utf16_cols(const std::string& text, size_t pos, int col) {
+    int units = 0;
+    while (pos < text.size() && text[pos] != '\n' && units < col) {
+        unsigned char c = static_cast<unsigned char>(text[pos]);
+        int bytes, extra;
+        if      (c < 0x80)           { bytes = 1; extra = 0; }
+        else if ((c & 0xE0) == 0xC0) { bytes = 2; extra = 0; }
+        else if ((c & 0xF0) == 0xE0) { bytes = 3; extra = 0; }
+        else if ((c & 0xF8) == 0xF0) { bytes = 4; extra = 1; } // surrogate pair
+        else                         { bytes = 1; extra = 0; } // continuation/invalid
+
+        // LSP text is specified as UTF-8, but be defensive: never skip past the
+        // buffer or across malformed continuation bytes.  Treat malformed
+        // sequences as one byte / one UTF-16 unit so incremental sync remains
+        // monotonic and cannot jump over unrelated text.
+        bool valid_sequence = pos + static_cast<size_t>(bytes) <= text.size();
+        for (int i = 1; valid_sequence && i < bytes; ++i) {
+            unsigned char cc = static_cast<unsigned char>(text[pos + static_cast<size_t>(i)]);
+            valid_sequence = (cc & 0xC0) == 0x80;
+        }
+        if (!valid_sequence) {
+            bytes = 1;
+            extra = 0;
+        }
+
+        if (units + 1 + extra > col) break;
+        units += 1 + extra;
+        pos   += bytes;
+    }
+    return pos;
+}
+
 // Convert (line, col) LSP position to byte offset in text.
 static size_t lsp_offset(const std::string& text, int line, int col) {
     int cur = 0;
@@ -86,11 +121,7 @@ static size_t lsp_offset(const std::string& text, int line, int col) {
             ++cur;
         ++pos;
     }
-    size_t line_start = pos;
-    // Advance col UTF-16 code units (treat ASCII; multi-byte clamps gracefully)
-    while (pos < text.size() && text[pos] != '\n' && (int)(pos - line_start) < col)
-        ++pos;
-    return pos;
+    return advance_utf16_cols(text, pos, col);
 }
 
 // Compute two byte offsets in a single scan. Positions must be in document order
@@ -126,16 +157,10 @@ static std::pair<size_t, size_t> lsp_offset_pair(const std::string& text,
     //
     // because Neovim sends the typed macro text as a same-line incremental
     // edit before the existing ']'.
-    size_t off1 = line1_start;
-    while (off1 < text.size() && text[off1] != '\n' &&
-           (int)(off1 - line1_start) < col1)
-        ++off1;
+    size_t off1 = advance_utf16_cols(text, line1_start, col1);
 
     if (line1 == line2) {
-        size_t off2 = line1_start;
-        while (off2 < text.size() && text[off2] != '\n' &&
-               (int)(off2 - line1_start) < col2)
-            ++off2;
+        size_t off2 = advance_utf16_cols(text, line1_start, col2);
 
         if (swapped) std::swap(off1, off2);
         return {off1, off2};
@@ -149,10 +174,7 @@ static std::pair<size_t, size_t> lsp_offset_pair(const std::string& text,
         ++pos;
     }
     const size_t line2_start = pos;
-    size_t off2 = line2_start;
-    while (off2 < text.size() && text[off2] != '\n' &&
-           (int)(off2 - line2_start) < col2)
-        ++off2;
+    size_t off2 = advance_utf16_cols(text, line2_start, col2);
 
     if (swapped) std::swap(off1, off2);
     return {off1, off2};
@@ -287,14 +309,6 @@ static std::string apply_incremental_change(std::string text,
     return text;
 }
 
-static std::string trim_copy(std::string_view text) {
-    const auto first = text.find_first_not_of(" \t\r\n");
-    if (first == std::string_view::npos)
-        return {};
-    const auto last = text.find_last_not_of(" \t\r\n");
-    return std::string(text.substr(first, last - first + 1));
-}
-
 static std::string resolve_vcode_path(const std::filesystem::path& root, const Config& config) {
     if (config.design.vcode.empty())
         return {};
@@ -389,6 +403,10 @@ struct StderrLog : public lsp::Log {
 
 struct LazyVerilogServer::Impl {
     StderrLog log;
+    // Completion providers are immutable after construction.  Keep the engine
+    // owned by this server instance instead of using a function-local static
+    // (global shared lifetime) or rebuilding providers on every keystroke.
+    CompletionEngine completion_engine;
     std::shared_ptr<lsp::ProtocolJsonHandler> json_handler =
         std::make_shared<lsp::ProtocolJsonHandler>();
     std::shared_ptr<GenericEndpoint> endpoint = std::make_shared<GenericEndpoint>(log);
@@ -985,7 +1003,6 @@ void LazyVerilogServer::register_handlers() {
         td_completion::response rsp;
         rsp.id = req.id;
         try {
-            static CompletionEngine engine;
             const auto& uri = req.params.textDocument.uri.raw_uri_;
             auto state = analyzer_.get_state(uri);
             if (!state) {
@@ -993,7 +1010,7 @@ void LazyVerilogServer::register_handlers() {
                 return rsp;
             }
             CancellationToken tok;
-            rsp.result = engine.complete(req.params, *state, analyzer_, tok);
+            rsp.result = impl_->completion_engine.complete(req.params, *state, analyzer_, tok);
         } catch (const CompletionCancelled&) {
             rsp.result = CompletionList{};
         } catch (const std::exception& e) {
@@ -1197,27 +1214,10 @@ void LazyVerilogServer::register_handlers() {
                 (*we.changes)[uri] = {text_edit};
 
                 // Serialize WorkspaceEdit manually to JSON
-                std::string json = "{\"changes\":{\"" + uri +
-                                   "\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":"
+                std::string json = "{\"changes\":{" + json_string(uri) +
+                                   ":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":"
                                    "{\"line\":999999,\"character\":0}},\"newText\":";
-                // JSON-encode the newText
-                std::string escaped_text = "\"";
-                for (char c : new_text) {
-                    if (c == '"')
-                        escaped_text += "\\\"";
-                    else if (c == '\\')
-                        escaped_text += "\\\\";
-                    else if (c == '\n')
-                        escaped_text += "\\n";
-                    else if (c == '\r')
-                        escaped_text += "\\r";
-                    else if (c == '\t')
-                        escaped_text += "\\t";
-                    else
-                        escaped_text += c;
-                }
-                escaped_text += "\"";
-                json += escaped_text + "}]}}";
+                json += json_string(new_text) + "}]}}";
                 rsp.result.SetJsonString(json, lsp::Any::kObjectType);
             };
 
@@ -1329,26 +1329,10 @@ void LazyVerilogServer::register_handlers() {
                             (*we.changes)[uri] = {text_edit};
                             // Serialize WorkspaceEdit manually to JSON
                             std::string json =
-                                "{\"changes\":{\"" + uri +
-                                "\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{"
+                                "{\"changes\":{" + json_string(uri) +
+                                ":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{"
                                 "\"line\":999999,\"character\":0}},\"newText\":";
-                            std::string esc = "\"";
-                            for (char c : new_source) {
-                                if (c == '"')
-                                    esc += "\\\"";
-                                else if (c == '\\')
-                                    esc += "\\\\";
-                                else if (c == '\n')
-                                    esc += "\\n";
-                                else if (c == '\r')
-                                    esc += "\\r";
-                                else if (c == '\t')
-                                    esc += "\\t";
-                                else
-                                    esc += c;
-                            }
-                            esc += "\"";
-                            json += esc + "}]}}";
+                            json += json_string(new_source) + "}]}}";
                             rsp.result.SetJsonString(json, lsp::Any::kObjectType);
                         }
                     }

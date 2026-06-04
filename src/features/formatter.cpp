@@ -8,7 +8,7 @@ namespace svfmt {
 inline void verify_safe_mode_unchanged(const std::string& source, const std::string& formatted,
                                        const FormatOptions& opts) {
     if (!opts.safe_mode) return;
-    if (strip_ws(source) != strip_ws(formatted))
+    if (!ws_equal(source, formatted))
         throw SafeModeError("Formatter safe-mode: non-whitespace content changed — formatting aborted");
 }
 

@@ -1370,7 +1370,6 @@ public:
                 continue;
 
             if (kind_is(tokens[open], TK::OpenBrace)) {
-                size_t prev = prev_code(tokens, open);
                 bool enum_body = false;
                 for (size_t j = open; j > 0; --j) {
                     size_t k = j - 1;
@@ -1378,7 +1377,6 @@ public:
                     if (kind_is(tokens[k], TK::EnumKeyword)) { enum_body = true; break; }
                     if (kind_is(tokens[k], TK::Semicolon)) break;
                 }
-                (void)prev;
                 if (enum_body) {
                     apply_list(open, WrapListKind::EnumBody, true, true, true);
                 } else if (is_multiline_brace_construct(tokens, open)) {

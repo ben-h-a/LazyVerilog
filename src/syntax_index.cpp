@@ -1,4 +1,5 @@
 #include "syntax_index.hpp"
+#include "string_utils.hpp"
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
@@ -16,17 +17,6 @@ using namespace slang::syntax;
 
 static std::string tok_str(const slang::parsing::Token& token) {
     return std::string(token.valueText());
-}
-
-static std::string trim_copy(std::string text) {
-    auto first =
-        std::find_if_not(text.begin(), text.end(), [](unsigned char c) { return std::isspace(c); });
-    auto last = std::find_if_not(text.rbegin(), text.rend(), [](unsigned char c) {
-                    return std::isspace(c);
-                }).base();
-    if (first >= last)
-        return {};
-    return std::string(first, last);
 }
 
 static bool index_fragment_edge_is_wordlike(char c) {

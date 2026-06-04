@@ -131,4 +131,17 @@ inline std::string strip_ws(const std::string& s) {
     return out;
 }
 
+// Non-allocating whitespace-ignoring equality check.
+inline bool ws_equal(const std::string& a, const std::string& b) {
+    auto ia = a.begin(), ib = b.begin();
+    for (;;) {
+        while (ia != a.end() && std::isspace(static_cast<unsigned char>(*ia))) ++ia;
+        while (ib != b.end() && std::isspace(static_cast<unsigned char>(*ib))) ++ib;
+        if (ia == a.end() && ib == b.end()) return true;
+        if (ia == a.end() || ib == b.end()) return false;
+        if (*ia != *ib) return false;
+        ++ia; ++ib;
+    }
+}
+
 } // namespace svfmt

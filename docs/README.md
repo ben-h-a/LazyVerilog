@@ -6,6 +6,7 @@ implementation of LazyVerilog.
 ## Files
 
 - [Features](features.md): index of user-visible features.
+- [Release notes](releases/v1.1.0.md): latest user-visible changes.
 - [Connect](connect.md): interactive instance-to-instance wiring.
 - [Interface](interface.md): two-instance and single-instance interface views.
 - [Disconnect](disconnect.md): clearing Interface connections.

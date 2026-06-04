@@ -17,3 +17,17 @@ In practice:
 - whole-design features may build a structural view from the current AST, but
   should use index data for project files.
 
+## Current-file structural index cache
+
+Some features need index-shaped facts even for the currently open file: RTL
+hierarchy, references by `SymbolID`, inlay hints, stale-autoinst lint, and some
+automatic code-generation commands.  Those features should call
+`get_structural_index(state)` instead of rebuilding the same AST-derived index
+manually.
+
+The cache is stored on the immutable `DocumentState` snapshot.  A `didChange`
+creates a new `DocumentState`, so cache invalidation is automatic: old requests
+can safely finish against the old snapshot while new requests see a fresh cache.
+Do not retain full ASTs for closed project files to get similar behavior; closed
+files should continue to participate through compact `SyntaxIndex` shards only.
+

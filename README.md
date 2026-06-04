@@ -172,7 +172,7 @@ doesn't work for your codebase, bug reports are welcome.
 | Formatting | ✅ | Configurable via `lazyverilog.toml` |
 | Lint diagnostics | ✅ | Parse diagnostics, optional semantic diagnostics, and configurable lint/style rules |
 | Go to definition | ✅ | Modules, instances, ports, named arguments, symbols, and macros |
-| Find references | ✅ | Across open files and configured project files |
+| Find references | ✅ | Symbols and macros across open files and configured project files |
 | Rename symbol | ✅ | Best-effort across project files |
 | Hover | ✅ | Symbol details for modules, ports, signals, parameters, typedefs, subroutines, and macros |
 | Completion | ⚠️ | Fixed keywords plus current-file module/port names; not context-aware |
@@ -261,6 +261,7 @@ enable = true
 
 - [`lazyverilog.toml`](lazyverilog.toml) — complete example configuration.
 - [`docs/features.md`](docs/features.md) — all features at a glance.
+- [`docs/releases/v1.1.0.md`](docs/releases/v1.1.0.md) — latest release notes.
 
 **Project**
 - [`docs/design/index.md`](docs/design/index.md) — design filelist and preprocessor defines.

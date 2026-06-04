@@ -32,18 +32,7 @@ inline std::optional<std::regex> compile_format_marker_regex(const std::string& 
     }
 }
 
-inline bool is_format_marker(std::string_view comment, const std::string& configured_pattern) {
-    if (configured_pattern.empty()) return false;
-    try {
-        std::regex re(configured_pattern, std::regex::ECMAScript | std::regex::icase);
-        return std::regex_search(std::string(comment), re);
-    } catch (const std::regex_error&) {
-        // Malformed pattern — fall back to literal substring search
-        return std::string(comment).find(configured_pattern) != std::string::npos;
-    }
-}
-
-// Fast path: use pre-compiled regex (compiled once at TokenCollector construction).
+// Use pre-compiled regex (compiled once at TokenCollector construction).
 inline bool is_format_marker(std::string_view comment,
                               const std::optional<std::regex>& compiled_re,
                               const std::string& pattern_fallback) {

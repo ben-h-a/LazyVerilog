@@ -30,6 +30,15 @@ No configuration.
 
 Finds all usages of the symbol under the cursor. Includes the declaration if `includeDeclaration` is set by the client.
 
+Macro references are supported for both preprocessor declarations and invocation sites:
+
+```systemverilog
+`define WIDTH 32
+logic [`WIDTH-1:0] data;
+```
+
+Running Find References on either `WIDTH` occurrence reports the macro declaration and matching macro uses that are visible in open or indexed project files.
+
 No configuration.
 
 ---

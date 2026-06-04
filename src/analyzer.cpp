@@ -1,5 +1,6 @@
 #include "analyzer.hpp"
 #include "dynamic_file_index.hpp"
+#include "string_utils.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -22,8 +23,11 @@
 namespace {
 
 bool perf_trace_enabled() {
-    const char* value = std::getenv("LAZYVERILOG_TRACE_PERF");
-    return value && *value && std::string_view(value) != "0";
+    static const bool enabled = [] {
+        const char* value = std::getenv("LAZYVERILOG_TRACE_PERF");
+        return value && *value && std::string_view(value) != "0";
+    }();
+    return enabled;
 }
 
 using Clock = std::chrono::steady_clock;
@@ -551,17 +555,6 @@ static std::filesystem::path normalize_path(const std::string& path) {
     return absolute.lexically_normal();
 }
 
-static std::string trim_copy(std::string text) {
-    auto first =
-        std::find_if_not(text.begin(), text.end(), [](unsigned char c) { return std::isspace(c); });
-    auto last = std::find_if_not(text.rbegin(), text.rend(), [](unsigned char c) {
-                    return std::isspace(c);
-                }).base();
-    if (first >= last)
-        return {};
-    return std::string(first, last);
-}
-
 static bool hover_fragment_edge_is_wordlike(char c) {
     return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$' || c == '`';
 }
@@ -1023,8 +1016,6 @@ symbol_info_from_definition(const slang::syntax::SyntaxTree& tree, const std::st
                                 .doc = std::move(doc),
                                 .line = definition.line,
                                 .col = definition.col};
-            if (!result)
-                visitDefault(node);
         }
 
         void handle(const slang::syntax::ClassDeclarationSyntax& node) {
@@ -1039,8 +1030,6 @@ symbol_info_from_definition(const slang::syntax::SyntaxTree& tree, const std::st
                                 .detail = "class",
                                 .line = definition.line,
                                 .col = definition.col};
-            if (!result)
-                visitDefault(node);
         }
 
         void handle(const slang::syntax::ImplicitAnsiPortSyntax& node) {

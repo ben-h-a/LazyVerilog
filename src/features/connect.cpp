@@ -255,7 +255,7 @@ static std::optional<TextEdit> replace_or_add_connection(const FileView& file,
     auto lines = split_lines(file.text);
     const int start = std::max(inst.start_line, 0);
     const int end = std::min(inst.end_line, static_cast<int>(lines.size()) - 1);
-    const std::regex conn_re(R"(\.\s*(\w+)\s*\(([^)]*)\))");
+    static const std::regex conn_re(R"(\.\s*(\w+)\s*\(([^)]*)\))");
 
     for (int i = start; i <= end; ++i) {
         const std::string old_line = lines[i];
@@ -295,10 +295,11 @@ static std::optional<TextEdit> replace_or_add_connection(const FileView& file,
             break;
         }
     }
+    static const std::regex indent_re(R"(^(\s*)\.)");
     std::string indent = "    ";
     for (int i = end; i >= start; --i) {
         std::smatch m;
-        if (std::regex_search(lines[i], m, std::regex(R"(^(\s*)\.)"))) {
+        if (std::regex_search(lines[i], m, indent_re)) {
             indent = m[1].str();
             break;
         }
@@ -314,9 +315,10 @@ static bool declared_signal(const std::string& text, const std::string& name) {
 
 static int wire_insert_line(const std::string& text) {
     auto lines = split_lines(text);
+    static const std::regex port_decl_re(R"(^\s*(?:input|output|inout|wire|logic|reg)\b)");
     int last_decl = -1;
     for (int i = 0; i < static_cast<int>(lines.size()); ++i) {
-        if (std::regex_search(lines[i], std::regex(R"(^\s*(?:input|output|inout|wire|logic|reg)\b)")))
+        if (std::regex_search(lines[i], port_decl_re))
             last_decl = i;
     }
     if (last_decl >= 0)
@@ -830,8 +832,9 @@ std::string interface_disconnect_edit_json(const Analyzer& analyzer, const std::
     if (!inst2_port.empty()) if (auto e = replace_or_add_connection(*b->first, *b->second, inst2_port, "", signal_name, false)) edits.push_back(*e);
 
     auto lines = split_lines(a->first->text);
+    const std::regex sig_decl_re("^\\s*(?:wire|logic|reg)\\b[^;]*\\b" + signal_name + "\\b[^;]*;\\s*$");
     for (int i = 0; i < static_cast<int>(lines.size()); ++i) {
-        if (std::regex_search(lines[i], std::regex("^\\s*(?:wire|logic|reg)\\b[^;]*\\b" + signal_name + "\\b[^;]*;\\s*$"))) {
+        if (std::regex_search(lines[i], sig_decl_re)) {
             edits.push_back(TextEdit{a->first->uri, i, 0, i + 1, 0, ""});
             break;
         }
