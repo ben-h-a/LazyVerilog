@@ -824,6 +824,32 @@ inline bool is_multiline_brace_construct(const TokenStream& tokens, size_t brace
     return false;
 }
 
+inline bool is_struct_or_union_body_brace(const TokenStream& tokens, size_t brace) {
+    if (brace >= tokens.size() || !kind_is(tokens[brace], TK::OpenBrace))
+        return false;
+
+    // `struct packed {` and `union tagged packed {` have qualifiers between
+    // the keyword and the body brace.  Looking only at prev_code(openBrace)
+    // misses those cases and leaves the first field on the same line:
+    //
+    //     typedef struct packed {logic valid;
+    //
+    // Scan backward within the declaration header until a statement / prior
+    // brace boundary.  This keeps expression braces and aggregate literals out
+    // while treating all struct/union body forms consistently.
+    for (size_t n = brace; n > 0; --n) {
+        size_t i = n - 1;
+        if (!is_code_token(tokens[i]))
+            continue;
+        if (kind_is(tokens[i], TK::Semicolon) || kind_is(tokens[i], TK::OpenBrace) ||
+            kind_is(tokens[i], TK::CloseBrace))
+            break;
+        if (kind_is(tokens[i], TK::StructKeyword) || kind_is(tokens[i], TK::UnionKeyword))
+            return true;
+    }
+    return false;
+}
+
 // MacroClassifier + MacroRole — used by MacroPass to categorise macro tokens.
 enum class MacroRole { ObjectLikeExpr, FunctionLikeExpr, StatementLike, DeclarationLike, ControlFlowLike, BlockBeginLike, BlockEndLike };
 
@@ -1144,9 +1170,7 @@ public:
                 }
             }
             if (kind_is(t, TK::OpenBrace)) {
-                size_t p = prev_code(tokens, i);
-                if (p != npos && (kind_is(tokens[p], TK::StructKeyword) ||
-                                  kind_is(tokens[p], TK::UnionKeyword)))
+                if (is_struct_or_union_body_brace(tokens, i))
                     t.mutable_.wrap.must_break_after = true;
             }
             if (opts_.statement.wrap_end_else_clauses && kind_is(t, TK::ElseKeyword) && i > 0 && (kind_is(tokens[i - 1], TK::EndKeyword) || kind_is(tokens[i - 1], TK::CloseBrace))) t.mutable_.wrap.must_break_before = true;
