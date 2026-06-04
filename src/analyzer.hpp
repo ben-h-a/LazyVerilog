@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <filesystem>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -168,6 +169,11 @@ class Analyzer {
     /// published snapshot (or an empty one before the first publish).
     std::shared_ptr<const SyntaxIndex> extra_project_index() const;
 
+    /// Register a callback fired whenever the merged project index snapshot is
+    /// republished.  The callback may run on the background indexer thread, so
+    /// it must be non-blocking and must not call back into Analyzer.
+    void set_project_index_publish_callback(std::function<void()> callback);
+
     /// Return a merged dynamic/file index for other open buffers.
     ///
     /// This is the clangd "dynamic" layer: files that have been opened/parsed
@@ -240,6 +246,7 @@ class Analyzer {
     mutable std::vector<std::string> extra_files_;
     mutable std::unordered_map<std::string, ExtraFileCacheEntry> extra_cache_;
     mutable std::shared_ptr<const SyntaxIndex> extra_project_index_cache_;
+    mutable std::function<void()> project_index_publish_callback_;
 
     // clangd-style background index state.
     //

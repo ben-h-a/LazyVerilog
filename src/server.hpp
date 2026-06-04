@@ -22,6 +22,7 @@ class LazyVerilogServer {
     void register_handlers();
     void publish_diagnostics(const std::string& uri);
     void publish_config_diagnostic(const ConfigWarning* warning);
+    void request_inlay_hint_refresh();
     void configure_background_compiler();
     void schedule_background_compilation();
 

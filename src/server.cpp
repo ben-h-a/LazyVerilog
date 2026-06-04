@@ -67,6 +67,9 @@
 #include <unordered_map>
 #include <unordered_set>
 
+DEFINE_REQUEST_RESPONSE_TYPE(wp_inlayHintRefresh, JsonNull, JsonNull,
+                             "workspace/inlayHint/refresh");
+
 struct StdOutStream : lsp::base_ostream<std::ostream> {
     explicit StdOutStream() : base_ostream<std::ostream>(std::cout) {}
     std::string what() override { return {}; }
@@ -421,6 +424,7 @@ struct LazyVerilogServer::Impl {
 LazyVerilogServer::LazyVerilogServer() : impl_(std::make_unique<Impl>()) {
     root_ = std::filesystem::current_path();
     config_ = load_config(root_);
+    analyzer_.set_project_index_publish_callback([this] { request_inlay_hint_refresh(); });
     analyzer_.set_defines(config_.design.define);
     { auto vcode = load_vcode(root_, config_);
       analyzer_.set_include_dirs(vcode.include_dirs);
@@ -444,11 +448,25 @@ LazyVerilogServer::LazyVerilogServer() : impl_(std::make_unique<Impl>()) {
 }
 
 LazyVerilogServer::~LazyVerilogServer() {
+    analyzer_.set_project_index_publish_callback({});
     if (background_compiler_)
         background_compiler_->stop();
 }
 
 void LazyVerilogServer::run() { impl_->exit_event.wait(); }
+
+void LazyVerilogServer::request_inlay_hint_refresh() {
+    if (!config_.inlay_hint.enable || !impl_)
+        return;
+
+    try {
+        auto req = impl_->remote_endpoint.createRequest<wp_inlayHintRefresh::request>();
+        req.params = JsonNull{};
+        (void)impl_->remote_endpoint.send(req);
+    } catch (const std::exception& e) {
+        std::cerr << "[lazyverilog] inlayHint refresh error: " << e.what() << "\n";
+    }
+}
 
 void LazyVerilogServer::configure_background_compiler() {
     if (!background_compiler_)

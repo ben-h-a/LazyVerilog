@@ -2147,6 +2147,11 @@ std::shared_ptr<const SyntaxIndex> Analyzer::extra_project_index() const {
     return extra_project_index_cache_;
 }
 
+void Analyzer::set_project_index_publish_callback(std::function<void()> callback) {
+    std::lock_guard<std::mutex> lock(map_mutex_);
+    project_index_publish_callback_ = std::move(callback);
+}
+
 std::shared_ptr<const SyntaxIndex>
 Analyzer::opened_files_index(const std::string& current_uri) const {
     std::lock_guard<std::mutex> lock(map_mutex_);
@@ -2545,6 +2550,8 @@ void Analyzer::publish_extra_project_index_locked() const {
         merged->merge(entry.index);
     }
     extra_project_index_cache_ = std::move(merged);
+    if (project_index_publish_callback_)
+        project_index_publish_callback_();
 }
 
 void Analyzer::clear_extra_project_index_locked() const {
