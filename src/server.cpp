@@ -480,12 +480,25 @@ LazyVerilogServer::LazyVerilogServer() : impl_(std::make_unique<Impl>()) {
       analyzer_.set_extra_files(vcode.files, resolve_vcode_path(root_, config_)); }
     background_compiler_ =
         std::make_unique<BackgroundCompiler>([this](BackgroundCompileResult result) {
-            std::unordered_set<std::string> uris_to_publish(result.open_uris.begin(),
-                                                            result.open_uris.end());
+            std::unordered_set<std::string> uris_to_publish;
+            auto publish_if_open = [&](const std::string& uri) {
+                if (analyzer_.get_state(uri))
+                    uris_to_publish.insert(uri);
+            };
+
+            // Semantic compilation can produce diagnostics for every file in
+            // the design filelist, but publishing all of those diagnostics can
+            // flood clients and burn shared filesystem / UI resources on large
+            // HPC projects. Keep the cache complete, but only publish URIs that
+            // are currently open in the editor. Open URIs from the just-finished
+            // snapshot are included so previous diagnostics can be cleared when
+            // a new compile produces no diagnostics for that buffer.
+            for (const auto& uri : result.open_uris)
+                publish_if_open(uri);
             for (const auto& uri : analyzer_.semantic_diagnostic_uris())
-                uris_to_publish.insert(uri);
+                publish_if_open(uri);
             for (const auto& [uri, _] : result.diagnostics_by_uri)
-                uris_to_publish.insert(uri);
+                publish_if_open(uri);
             analyzer_.set_semantic_diagnostics(std::move(result.diagnostics_by_uri));
             for (const auto& uri : uris_to_publish)
                 publish_diagnostics(uri);
@@ -589,11 +602,10 @@ void LazyVerilogServer::publish_diagnostics(const std::string& uri) {
             // rather than in the current buffer (for example demo/memory_top.sv
             // instantiates memory from demo/memory.sv).
             //
-            // Build the merged index only when that rule is enabled.  On the
-            // normal LSP path merge_extra_file_modules() uses the cached
-            // extra-file snapshots and checks only the .f filelist mtime per
-            // request, so this avoids broad per-edit overhead for users who do
-            // not enable stale_autoinst_diagnostic.
+            // Build the merged index only when that rule is enabled. The
+            // project portion comes from the latest background-published index
+            // snapshot, so diagnostics do not synchronously parse or merge the
+            // full design filelist on every edit.
             SyntaxIndex lint_index;
             const SyntaxIndex* lint_index_ptr = nullptr;
             if (config_.lint.module.stale_autoinst_diagnostic) {

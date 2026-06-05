@@ -466,28 +466,42 @@ class A exten         // mid-keyword
 
 Pattern matching against token kinds still works because the lexer tokenizes independently of the parser.
 
-### Stale Tree Heuristic
+### Snapshot model
 
-If `make_state()` has not yet returned for the current document version (background re-parse in progress), use the previous document's `SyntaxIndex` for provider dispatch. Mark the response `isIncomplete: true` so the client re-requests on the next keystroke.
+`didOpen` / `didChange` builds a fresh immutable `DocumentState` before the new
+text is published to request handlers. Completion runs against the latest
+available `DocumentState` snapshot for the URI. The current implementation does
+not keep a separate previous-version completion index or mark responses
+`isIncomplete` while a current-file parse is in progress.
 
 ---
 
-## Async Model and Cancellation
+## Request Model and Cancellation
 
 ### Thread Model
 
 ```
 Server thread (JSON-RPC recv)
     │
-    └─► completion_worker thread pool (1–2 threads)
+    └─► completion handler
             │
-            ├─► detect context (fast, ~µs)
-            ├─► dispatch providers (fast–medium, ~ms)
-            ├─► rank (fast, ~µs)
+            ├─► detect context (fast, current snapshot)
+            ├─► merge dynamic/opened-file index
+            ├─► merge background project index only for explicit cross-file contexts
+            ├─► dispatch providers
+            ├─► rank
             └─► respond
 ```
 
-Each completion request receives a cancellation token. When `$/cancelRequest` arrives for a pending request ID, the token is signalled. Providers check the token at natural yield points (between providers, not inside a tight loop).
+The server endpoint is configured with one worker to avoid concurrency issues in
+the LSP runtime and allocator stack. Completion therefore should remain careful
+about request-path work: generic identifier completion avoids the project index,
+while named-port, parameter, member, package-scope, and class-construction
+contexts may merge the latest background-published project snapshot.
+
+The code still has a lightweight cancellation abstraction, but the current
+server path constructs a fresh token for each completion request and does not
+wire `$/cancelRequest` into it.
 
 ```cpp
 struct CancellationToken {
@@ -504,7 +518,9 @@ for (auto& provider : providers_) {
 
 ### Request Coalescing
 
-If two completion requests arrive for the same document URI within a short window (< 50 ms), cancel the first and process only the second. Avoids redundant work during fast typing.
+Request coalescing is not currently implemented. If it is added later, it should
+cancel or skip older same-document completion requests before provider dispatch,
+not by making providers share mutable state.
 
 ---
 
@@ -515,9 +531,8 @@ If two completion requests arrive for the same document URI within a short windo
 ```cpp
 // server.cpp — td_initialize handler
 capabilities.completionProvider = {
-    .triggerCharacters    = {".", "::", "`", "(", "#", "\""},
-    .resolveProvider      = true,   // enable completionItem/resolve
-    .completionItemKinds  = { /* all used kinds */ },
+    .triggerCharacters = {".", ":", "`"},
+    .resolveProvider   = false,
 };
 ```
 
@@ -525,26 +540,24 @@ capabilities.completionProvider = {
 
 ```cpp
 ep.registerHandler([&](const td_completion::request& req) {
-    auto token = make_cancellation_token(req.id);
-    return completion_worker_.submit([=, &analyzer_] {
-        auto state = analyzer_.get_state(req.params.textDocument.uri);
-        if (!state) return make_empty_list();
-        return completion_engine_.complete(req.params, *state, analyzer_, token);
-    });
+    td_completion::response rsp;
+    rsp.id = req.id;
+    auto state = analyzer_.get_state(req.params.textDocument.uri.raw_uri_);
+    if (!state) {
+        rsp.result = CompletionList{};
+        return rsp;
+    }
+    CancellationToken tok;
+    rsp.result = completion_engine_.complete(req.params, *state, analyzer_, tok);
+    return rsp;
 });
 ```
 
 ### completionItem/resolve Handler
 
-Lazy-load documentation and expensive detail for a single item. The item's `data` field carries a stable identifier (e.g., `{ "kind": "member", "type": "my_class", "name": "field_name" }`).
-
-```cpp
-ep.registerHandler([&](const completionItem_resolve::request& req) {
-    auto item = req.params;
-    // fill item.documentation from SyntaxIndex or source comment extraction
-    return item;
-});
-```
+`completionItem/resolve` is not advertised today. Completion items should carry
+the useful label/detail/insert text in the initial response and avoid expensive
+per-item lazy work.
 
 ### Completion Item Kind Mapping
 

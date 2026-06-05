@@ -10,12 +10,10 @@ define = ["RTL_SIM"]
 ```
 
 The filelist is used by cross-file features such as go-to-definition, hover,
-RTL tree, inlay hints, Connect/Interface helpers, and stale AutoInst lint
-checks.
+RTL tree, inlay hints, Connect/Interface helpers, completion in explicit
+cross-file contexts, and stale AutoInst lint checks.
 
-## Terms
-
-### `.f` file
+## `.f` file handling
 
 A `.f` file is a design filelist. Each non-empty source line points to a
 SystemVerilog/Verilog source file, usually relative to the `.f` file location:
@@ -26,162 +24,92 @@ SystemVerilog/Verilog source file, usually relative to the `.f` file location:
 ./params.svh
 ```
 
-### `mtime`
-
-`mtime` means **modification time**. It is the filesystem timestamp that changes
-when a file's contents or metadata are modified. LazyVerilog uses mtimes as a
-cheap way to decide whether cached parsed/indexed files may be stale.
-
-## Startup and first cache build
-
-On startup or config load, the server reads `lazyverilog.toml`, resolves the
-configured `.f` path, reads the filelist entries, and calls:
-
-```cpp
-analyzer_.set_extra_files(
-    load_vcode_files(root_, config_),
-    resolve_vcode_path(root_, config_)
-);
-```
-
-The server also parses `+incdir+` entries from the configured `.f` file and
-calls `Analyzer::set_include_dirs(...)`. These directories are passed to
-slang's `SourceManager` for `` `include "..." `` lookup when parsing open
-buffers and explicit filelist sources. They are **not** parsed as independent
-extra files.
-
-At this point LazyVerilog stores:
-
-- the list of extra source-file paths
-- the resolved `.f` file path
-
-It does **not** immediately stat and parse every listed source file. The initial
-per-file mtimes are saved lazily, the first time a feature asks for extra-file
-snapshots:
-
-```cpp
-extra_file_snapshots()
-```
-
-That first snapshot sees that the cached `.f` mtime is empty, refreshes the
-extra-file cache, stats each listed file, parses readable files, and stores each
-cache entry's source-file mtime, document state, and syntax index.
-
-## Normal request path
-
-After the cache is warm, `extra_file_snapshots()` normally checks only the `.f`
-file's mtime:
-
-```cpp
-const auto current_mtime = file_mtime(filelist_path_);
-if (current_mtime != filelist_mtime_) {
-    refresh_extra_cache_locked();
-    filelist_mtime_ = current_mtime;
-}
-```
-
-If the `.f` mtime did not change, LazyVerilog reuses the cached extra-file
-snapshots. This avoids doing one `stat()` per listed RTL file on every editor
-request, which is important for large filelists and NFS/HPC filesystems.
-
-## If the `.f` file changes
-
-When the `.f` file's mtime changes, the next `extra_file_snapshots()` call
-refreshes the cache:
-
-1. stat each file listed by the current in-memory filelist path list
-2. reuse cached parse/index entries whose source-file mtime is unchanged
-3. read and reparse new or changed files
-4. drop removed or unreadable files from the refreshed cache
-5. save the new `.f` mtime
-
-After that refresh, future requests return to the cheap path: check only the
-`.f` mtime and reuse the cache if unchanged.
-
-## If a listed source file changes but `.f` does not
-
-If a source file listed in `.f` changes on disk while the `.f` file itself is
-unchanged, the normal optimized path does **not** notice immediately. It checks
-only the `.f` mtime, sees no filelist change, and reuses the cached parse/index
-for that listed source file.
-
-This is an intentional performance tradeoff:
-
-- fast per-request behavior: one mtime check for the `.f` file
-- downside: disk-only edits to listed files can remain stale until the cache is
-  invalidated or the file is opened in the editor
-
-The cache is refreshed or bypassed in the cases below.
-
-## Cache refresh and bypass cases
-
-### `.f` file changes
-
-Changing the filelist contents changes the `.f` mtime. The next feature request
-that needs extra files detects that mismatch and refreshes the extra-file cache.
-This catches added, removed, and reordered filelist entries.
-
-### Config reload calls `set_extra_files(...)`
-
-When configuration is reloaded, the server rereads `lazyverilog.toml`, resolves
-`[design].vcode`, reloads the filelist paths, and calls `set_extra_files(...)`.
-That resets the cached filelist mtime, so the next `extra_file_snapshots()` call
-refreshes from the newly configured filelist.
-
-### Defines change
-
-Preprocessor defines affect parsing. For example:
-
-```systemverilog
-`ifdef RTL_SIM
-    memory u_mem3 (...);
-`else
-    memory u_mem4 ();
-`endif
-```
-
-When `Analyzer::set_defines(...)` is called, the extra-file cache is cleared and
-the filelist mtime is reset. The next extra-file snapshot reparses files using
-the new define set.
-
-### Include directories change
-
-Include directories affect parsing because they control which headers are
-available to `` `include `` directives:
+The server also recognizes simulator-style include directory entries:
 
 ```text
-+incdir+vendor/uvm/src
++incdir+rtl/include
++incdir+/abs/include
++incdir+dir_a+dir_b
 ```
 
-When `Analyzer::set_include_dirs(...)` is called after the filelist is reloaded,
-the extra-file cache is cleared and the filelist mtime is reset. The next
-extra-file snapshot reparses explicit filelist sources with the new include
-search path. This is the intended way to support include-heavy libraries such as
-UVM without listing every `.svh` file in `.f`.
+Include directories are passed to slang's `SourceManager` for `` `include "..." ``
+lookup when parsing open buffers and explicit filelist sources. They are **not**
+parsed as independent extra files.
 
-### A listed file is opened in the editor
+## Startup and config reload
 
-Open editor buffers override the cached disk snapshot. If a file listed in `.f`
-is open, `extra_file_snapshots()` returns the live `DocumentState` and live
-`SyntaxIndex` from the open buffer instead of the cached disk entry.
+On startup, initialization with a workspace root, or `workspace/didChangeConfiguration`,
+the server:
 
-This means unsaved edits in an open listed file are visible to cross-file
-features. For example, if `demo/memory.sv` is listed in `demo/vcode.f` and is
-open in Neovim, stale AutoInst diagnostics in `demo/memory_top.sv` can use the
-live in-memory port list from `demo/memory.sv`.
+1. reads `lazyverilog.toml`
+2. resolves `[design].vcode` relative to the config root
+3. reads the filelist source paths and `+incdir+` entries
+4. calls `Analyzer::set_include_dirs(...)`
+5. calls `Analyzer::set_extra_files(...)`
 
-### Server restarts
+`Analyzer::set_extra_files(...)` stores the normalized file path list, clears the
+old extra-file cache, clears the old merged project-index snapshot, and schedules
+background indexing. It does **not** synchronously parse the full filelist on the
+LSP request/configuration path.
 
-A server restart drops all in-memory cache state: open documents, extra-file
-cache entries, and saved mtimes. The next session reads config and rebuilds the
-extra-file cache on demand from current disk contents.
+## Background project indexing
+
+Configured project files are parsed by a single analyzer-owned background indexer
+thread. The worker copies the next path and parse options while holding the
+analyzer mutex, releases the mutex while slang parses/builds the per-file shard,
+and reacquires the mutex only to commit the resulting `SyntaxIndex` shard.
+
+Open editor buffers are authoritative. If a listed file is open, its in-memory
+text and AST-derived dynamic shard replace the disk-backed filelist shard. The
+current/open buffer keeps a `DocumentState` / `SyntaxTree`; closed filelist files
+keep only compact `SyntaxIndex` shards.
+
+The merged project index returned by `Analyzer::extra_project_index()` is a
+published immutable snapshot. Request handlers read that snapshot and never merge
+all filelist shards synchronously. While the background index is still warming,
+features see the latest published snapshot, which can be empty or incomplete.
+
+## Request path behavior
+
+`extra_file_snapshots()` and `extra_index_snapshots()` are request-path snapshot
+accessors. They return currently cached shards and do not stat the `.f` file,
+stat every listed source, or synchronously parse missing files. This is deliberate
+for NFS/HPC filesystems: even metadata I/O per editor request can become noisy on
+large shared projects.
+
+Consequences:
+
+- Startup/config reload is cheap; indexing catches up asynchronously.
+- Cross-file features may be temporarily incomplete until the background indexer
+  publishes enough shards.
+- Disk-only edits to closed listed files are not noticed automatically during a
+  session. Reload configuration or restart the server to rebuild from disk, or
+  open the changed file so its live buffer shard replaces the cached shard.
+
+## Invalidation and freshness
+
+The extra-file cache is cleared and rebuilt asynchronously when:
+
+- configuration reload calls `set_extra_files(...)`
+- preprocessor defines change via `Analyzer::set_defines(...)`
+- include directories change via `Analyzer::set_include_dirs(...)`
+- the server restarts
+
+For listed files that are open in the editor, `didOpen` / `didChange` update the
+cached shard from unsaved in-memory text. The expensive AST-derived shard build is
+done outside the analyzer mutex, then committed under the mutex.
+
+When a listed file is closed, the analyzer schedules an asynchronous disk-backed
+reindex for that file so the project shard eventually returns to saved contents
+without blocking the close notification.
 
 ## Stale AutoInst diagnostics
 
 `stale_autoinst_diagnostic` validates an instance's named port connections
 against the instantiated module's port list. For example, `demo/memory_top.sv`
-instantiates `memory`, but `memory` is declared in `demo/memory.sv`, so this
-rule needs the merged current-file plus extra-file module index.
+instantiates `memory`, but `memory` is declared in `demo/memory.sv`, so this rule
+needs the current-file structural index plus the background-published project
+index.
 
 When this rule is enabled:
 
@@ -190,11 +118,8 @@ When this rule is enabled:
 stale_autoinst_diagnostic = true
 ```
 
-the diagnostic publishing path builds a merged lint index before running lint.
-That merge calls `extra_file_snapshots()`.
-
-Therefore, yes: when a file containing module instances is opened and diagnostics
-are published, `stale_autoinst_diagnostic = true` causes the server to request
-extra-file snapshots immediately during that diagnostic pass. With the normal
-filelist path, a warm cache checks only the `.f` mtime; on the first pass or
-after invalidation, it refreshes the extra-file cache as described above.
+the diagnostic publishing path builds a current-file lint index and merges the
+latest `Analyzer::extra_project_index()` snapshot. It does not synchronously parse
+or merge every filelist file on the diagnostic path. If the background project
+index is not warm yet, stale-AutoInst diagnostics can be incomplete until the
+project snapshot is published.

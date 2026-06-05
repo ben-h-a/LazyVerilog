@@ -238,7 +238,8 @@ class Analyzer {
     void background_index_loop(std::stop_token stop) const;
     void publish_extra_project_index_locked() const;
     void clear_extra_project_index_locked() const;
-    void update_extra_cache_for_live_state_locked(std::shared_ptr<const DocumentState> state);
+    void update_extra_cache_for_live_state_locked(std::shared_ptr<const DocumentState> state,
+                                                  SyntaxIndex index);
 
     // Resolved .f filelist path.  We intentionally do not poll this file's
     // mtime on LSP requests: HPC projects usually do not edit filelists while

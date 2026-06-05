@@ -26,7 +26,8 @@ Background compilation is intentionally conservative for shared/HPC systems:
 - jobs are coalesced so rapid typing compiles only the newest snapshot
 - stale results are discarded with a generation counter
 - LSP request handlers do not wait for semantic compilation
-- diagnostics are published only for open documents to avoid flooding clients
+- diagnostics are cached for all compiled files but published only for open
+  documents to avoid flooding clients
 
 Recommended HPC settings:
 
@@ -41,5 +42,7 @@ Increasing `background_compilation_threads` can allow a newer snapshot to start
 while an older compile is still running, but that can consume more CPU. Keep it
 at `1` unless the machine has enough spare resources.
 
-`nice_value` is currently reserved; changing process priority safely requires a
-future subprocess or platform-specific per-thread implementation.
+`nice_value` is applied by the background worker with `setpriority()` when the
+worker thread starts. Increasing it lowers the worker's scheduling priority on
+platforms that honor POSIX nice values. Lowering the value below the current
+process priority can require extra OS privileges and may be ignored or fail.

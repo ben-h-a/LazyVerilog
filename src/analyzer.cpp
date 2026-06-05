@@ -192,16 +192,55 @@ std::shared_ptr<DocumentState> Analyzer::make_file_state(const std::filesystem::
 
 void Analyzer::open(const std::string& uri, const std::string& text) {
     auto state = make_state(uri, text);
-    std::lock_guard<std::mutex> lock(map_mutex_);
-    docs_[uri] = state;
-    update_extra_cache_for_live_state_locked(state);
+
+    std::string path_text = uri;
+    if (path_text.starts_with("file://"))
+        path_text = path_text.substr(7);
+    const auto path_string = normalize_path(path_text).string();
+
+    bool listed_extra_file = false;
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        docs_[uri] = state;
+        listed_extra_file =
+            std::find(extra_files_.begin(), extra_files_.end(), path_string) != extra_files_.end();
+    }
+
+    // Building a dynamic/open-buffer SyntaxIndex may walk the full AST. Do that
+    // outside map_mutex_ so a large listed file opened in the editor does not
+    // block unrelated request handlers behind global analyzer state.
+    if (listed_extra_file) {
+        auto index = build_dynamic_file_index(*state);
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        if (const auto it = docs_.find(uri); it != docs_.end() && it->second == state)
+            update_extra_cache_for_live_state_locked(state, std::move(index));
+    }
 }
 
 void Analyzer::change(const std::string& uri, const std::string& text) {
     auto state = make_state(uri, text);
-    std::lock_guard<std::mutex> lock(map_mutex_);
-    docs_[uri] = state;
-    update_extra_cache_for_live_state_locked(state);
+
+    std::string path_text = uri;
+    if (path_text.starts_with("file://"))
+        path_text = path_text.substr(7);
+    const auto path_string = normalize_path(path_text).string();
+
+    bool listed_extra_file = false;
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        docs_[uri] = state;
+        listed_extra_file =
+            std::find(extra_files_.begin(), extra_files_.end(), path_string) != extra_files_.end();
+    }
+
+    // See Analyzer::open(): current-buffer shard building is intentionally
+    // outside map_mutex_ to keep the edit path responsive on large RTL files.
+    if (listed_extra_file) {
+        auto index = build_dynamic_file_index(*state);
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        if (const auto it = docs_.find(uri); it != docs_.end() && it->second == state)
+            update_extra_cache_for_live_state_locked(state, std::move(index));
+    }
 }
 
 void Analyzer::close(const std::string& uri) {
@@ -340,20 +379,6 @@ static std::string file_name_to_uri(std::string_view file_name, const std::strin
     if (file.starts_with("file://"))
         return file;
     return path_to_uri(file);
-}
-
-struct IndexedFile {
-    std::string uri;
-    SyntaxIndex index;
-};
-
-static std::optional<IndexedFile> build_index_for_file(const std::filesystem::path& path) {
-    slang::SourceManager sm;
-    auto tree_or_error = slang::syntax::SyntaxTree::fromFile(path.string(), sm);
-    if (!tree_or_error)
-        return std::nullopt;
-
-    return IndexedFile{path_to_uri(path), SyntaxIndex::build(**tree_or_error)};
 }
 
 static std::optional<Location>
@@ -2513,6 +2538,7 @@ void Analyzer::background_index_loop(std::stop_token stop) const {
         std::string uri;
         std::vector<std::string> defines;
         std::vector<std::string> include_dirs;
+        std::shared_ptr<const DocumentState> live_doc;
         uint64_t generation = 0;
 
         {
@@ -2524,7 +2550,7 @@ void Analyzer::background_index_loop(std::stop_token stop) const {
             if (stop.stop_requested())
                 break;
 
-            if (background_pending_files_.empty() && background_publish_requested_) {
+            if (background_publish_requested_) {
                 background_publish_requested_ = false;
                 publish_extra_project_index_locked();
                 background_cv_.notify_all();
@@ -2542,19 +2568,31 @@ void Analyzer::background_index_loop(std::stop_token stop) const {
             include_dirs = include_dirs_;
 
             // Open buffers are already parsed from unsaved text by didOpen /
-            // didChange.  Commit that live shard immediately and avoid wasting
-            // background CPU reparsing stale disk contents.
+            // didChange.  Avoid reparsing stale disk contents, but also avoid
+            // building the dynamic shard while map_mutex_ is held: that AST walk
+            // can be noticeable for large RTL files and would otherwise block
+            // unrelated request handlers.
             if (const auto doc = docs_.find(uri); doc != docs_.end() && doc->second) {
-                extra_cache_[uri] = ExtraFileCacheEntry{
-                    .path = path_string,
-                    .uri = uri,
-                    .index = build_dynamic_file_index(*doc->second),
-                };
-                background_publish_requested_ = true;
-                background_index_active_ = false;
-                background_cv_.notify_all();
-                continue;
+                live_doc = doc->second;
             }
+        }
+
+        if (live_doc) {
+            auto live_index = build_dynamic_file_index(*live_doc);
+            std::lock_guard<std::mutex> lock(map_mutex_);
+            if (generation == background_generation_) {
+                if (const auto doc = docs_.find(uri); doc != docs_.end() && doc->second == live_doc) {
+                    extra_cache_[uri] = ExtraFileCacheEntry{
+                        .path = path_string,
+                        .uri = uri,
+                        .index = std::move(live_index),
+                    };
+                    background_publish_requested_ = true;
+                }
+            }
+            background_index_active_ = false;
+            background_cv_.notify_all();
+            continue;
         }
 
         auto state = make_file_state_with_options(path_string, defines, include_dirs);
@@ -2574,11 +2612,16 @@ void Analyzer::background_index_loop(std::stop_token stop) const {
             }
 
             // If the user opened/edited this file while the disk parse was in
-            // flight, the live buffer is newer and must win.
-            SyntaxIndex committed_index = state->index;
+            // flight, the live buffer is newer and must win. The didOpen /
+            // didChange path builds and commits that live shard outside this
+            // mutex, so do not build it here while holding map_mutex_.
             if (const auto doc = docs_.find(uri); doc != docs_.end() && doc->second) {
-                committed_index = build_dynamic_file_index(*doc->second);
+                background_index_active_ = false;
+                background_cv_.notify_all();
+                continue;
             }
+
+            SyntaxIndex committed_index = state->index;
 
             extra_cache_[uri] = ExtraFileCacheEntry{
                 .path = path_string,
@@ -2587,9 +2630,14 @@ void Analyzer::background_index_loop(std::stop_token stop) const {
             };
 
             // ProjectIndex is an immutable merged view derived from shards.
-            // Publish from the background worker so request handlers never pay
-            // the project-wide shard merge cost.
-            publish_extra_project_index_locked();
+            // Do not rebuild that merged view after every single file while the
+            // initial .f cache is warming: doing so repeatedly merges all shards
+            // seen so far (1 + 2 + ... + N work for N files). Mark a publish as
+            // pending once the queue drains. Open-buffer shard replacement uses
+            // schedule_background_project_publish_locked(), which remains able
+            // to request an earlier publish without making every disk-backed
+            // filelist shard rebuild the merged index.
+            background_publish_requested_ = background_pending_files_.empty();
             background_index_active_ = false;
             background_cv_.notify_all();
         }
@@ -2611,7 +2659,7 @@ void Analyzer::clear_extra_project_index_locked() const {
 }
 
 void Analyzer::update_extra_cache_for_live_state_locked(
-    std::shared_ptr<const DocumentState> state) {
+    std::shared_ptr<const DocumentState> state, SyntaxIndex index) {
     if (!state)
         return;
 
@@ -2632,7 +2680,7 @@ void Analyzer::update_extra_cache_for_live_state_locked(
     extra_cache_[uri] = ExtraFileCacheEntry{
         .path = path_string,
         .uri = uri,
-        .index = build_dynamic_file_index(*state),
+        .index = std::move(index),
     };
 
     // This is the Option-B shard replacement point: b.sv's shard is replaced
