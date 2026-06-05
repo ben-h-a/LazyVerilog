@@ -274,6 +274,7 @@ TEST_CASE("hover: resolves instance module names through extra files", "[hover]"
     Analyzer analyzer;
     const std::string uri = "file:///tmp/hover_top.sv";
     analyzer.set_extra_files({path.string()});
+    analyzer.wait_for_background_index_idle();
     analyzer.open(uri, R"(
 module top;
     child u_child();
@@ -332,6 +333,7 @@ TEST_CASE("rtltree: builds reverse hierarchy through extra files", "[rtltree]") 
 
     Analyzer analyzer;
     analyzer.set_extra_files({top_path.string()});
+    analyzer.wait_for_background_index_idle();
     const std::string leaf_uri = "file:///tmp/lazyverilog_rtltree_leaf.sv";
     analyzer.open(leaf_uri, "module leaf;\nendmodule\n");
 
@@ -574,6 +576,7 @@ endclass
 
     Analyzer analyzer;
     analyzer.set_extra_files({path.string()});
+    analyzer.wait_for_background_index_idle();
 
     WorkspaceSymbolParams params;
     params.query = "p";

@@ -86,6 +86,7 @@ endmodule
 
     Analyzer analyzer;
     analyzer.set_extra_files({extra_path.string()});
+    analyzer.wait_for_background_index_idle();
     const std::string uri = "file:///tmp/inlay_extra_top.sv";
     analyzer.open(uri, top);
 
@@ -129,6 +130,7 @@ endmodule
 
     Analyzer analyzer;
     analyzer.set_extra_files({extra_path.string()});
+    analyzer.wait_for_background_index_idle();
     const std::string uri = "file:///tmp/inlay_memory_top.sv";
     analyzer.open(uri, top);
 
@@ -164,6 +166,7 @@ endmodule
 
     Analyzer analyzer;
     analyzer.set_extra_files({extra_path.string()});
+    analyzer.wait_for_background_index_idle();
     const std::string uri = "file:///tmp/inlay_wide_top.sv";
     analyzer.open(uri, top);
 

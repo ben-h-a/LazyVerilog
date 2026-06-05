@@ -279,6 +279,7 @@ endmodule
 
     Analyzer analyzer;
     analyzer.set_extra_files({inv_path, mem_path});
+    analyzer.wait_for_background_index_idle();
     const std::string uri = "file:///tmp/lv_connect_closed_top.sv";
     analyzer.open(uri, R"(module memory_top;
     memory u_mem2 (

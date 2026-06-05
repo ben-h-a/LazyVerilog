@@ -17,6 +17,23 @@ In practice:
 - whole-design features may build a structural view from the current AST, but
   should use index data for project files.
 
+## Locking and snapshot principle
+
+Analyzer maps and caches are protected by `map_mutex_`, but expensive index work
+must not run while that mutex is held.  Hold the mutex only long enough to copy
+cheap immutable snapshots, such as `shared_ptr<const DocumentState>` values or
+already-published `SyntaxIndex` shards, then release it before walking ASTs,
+building dynamic indexes, or merging many shards.
+
+This works because open documents are immutable snapshots: `didChange` replaces
+the whole `DocumentState`, and older requests can safely finish against the
+state they already copied.  Request paths such as completion, hover,
+definition, code actions, RTL tree, and auto-wire should avoid turning
+project/open-file indexing into a global serialization point.  If a live
+filelist entry already has an index in `extra_cache_`, prefer that cached shard
+and attach the live `DocumentState` separately for callers that truly need AST
+access.
+
 ## Current-file structural index cache
 
 Some features need index-shaped facts even for the currently open file: RTL
@@ -39,4 +56,3 @@ the project snapshot is republished, the server requests `workspace/inlayHint/re
 so clients can re-query inlay hints without waiting for a user edit.  Keep this
 refresh path lightweight: project indexing still happens in the background, and
 request handlers should not synchronously merge or parse project files.
-

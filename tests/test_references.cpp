@@ -151,6 +151,7 @@ endmodule
 
     Analyzer analyzer;
     analyzer.set_extra_files({memory_path.string(), top_path.string()});
+    analyzer.wait_for_background_index_idle();
 
     const std::string memory_uri = "file://" + memory_path.string();
     const std::string top_uri = "file://" + top_path.string();
@@ -201,6 +202,7 @@ endpackage
 
     Analyzer analyzer;
     analyzer.set_extra_files({unrelated_path.string()});
+    analyzer.wait_for_background_index_idle();
     const std::string top_uri = "file:///tmp/lazyverilog_refs_local_state_top.sv";
     analyzer.open(top_uri, top);
 
@@ -266,6 +268,7 @@ endmodule
 
     Analyzer analyzer;
     analyzer.set_extra_files({closed_path.string()});
+    analyzer.wait_for_background_index_idle();
     const std::string uri = "file:///tmp/lazyverilog_refs_current_module_state.sv";
     analyzer.open(uri, current);
 
@@ -427,6 +430,7 @@ endmodule
     Analyzer analyzer;
     analyzer.set_include_dirs({dir.string()});
     analyzer.set_extra_files({top_path.string()});
+    analyzer.wait_for_background_index_idle();
 
     const std::string header_uri = "file://" + header_path.string();
     analyzer.open(header_uri, header);
@@ -497,6 +501,7 @@ endmodule
     Analyzer analyzer;
     analyzer.set_include_dirs({dir.string()});
     analyzer.set_extra_files({closed_path.string()});
+    analyzer.wait_for_background_index_idle();
 
     const auto snapshots = analyzer.extra_index_snapshots();
     REQUIRE(snapshots.size() == 1);
@@ -562,6 +567,7 @@ endmodule
     Analyzer analyzer;
     analyzer.set_include_dirs({dir.string()});
     analyzer.set_extra_files({includer_path.string()});
+    analyzer.wait_for_background_index_idle();
 
     const std::string header_uri = "file://" + header_path.string();
     const std::string includer_uri = "file://" + includer_path.string();

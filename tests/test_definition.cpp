@@ -102,6 +102,7 @@ TEST_CASE("definition: module lookup uses vcode extra files", "[definition]") {
         write_temp_sv("lazyverilog_definition_extra.sv", kExtraDefinitionFixture);
     const std::string top_uri = "file:///tmp/lazyverilog_definition_top.sv";
     analyzer.set_extra_files({extra_path.string()});
+    analyzer.wait_for_background_index_idle();
     analyzer.open(top_uri, kTopUsingExtraFixture);
 
     auto loc = analyzer.definition_of(top_uri, 2, 11);
@@ -119,6 +120,7 @@ TEST_CASE("definition: named port lookup uses vcode extra files", "[definition]"
         write_temp_sv("lazyverilog_definition_extra_port.sv", kExtraDefinitionFixture);
     const std::string top_uri = "file:///tmp/lazyverilog_definition_top_port.sv";
     analyzer.set_extra_files({extra_path.string()});
+    analyzer.wait_for_background_index_idle();
     analyzer.open(top_uri, kTopUsingExtraFixture);
 
     auto loc = analyzer.definition_of(top_uri, 3, 10);
@@ -211,6 +213,7 @@ TEST_CASE("definition: macro lookup uses open extra file AST", "[definition]") {
     const std::string extra_uri = "file://" + extra_path.string();
     const std::string top_uri = "file:///tmp/lazyverilog_definition_top_macro.sv";
     analyzer.set_extra_files({extra_path.string()});
+    analyzer.wait_for_background_index_idle();
     analyzer.open(extra_uri, kExtraDefinitionFixture);
     analyzer.open(top_uri, kTopUsingExtraFixture);
 
@@ -242,6 +245,7 @@ TEST_CASE("definition: named subroutine argument lookup uses open extra file AST
     const std::string extra_uri = "file://" + extra_path.string();
     const std::string top_uri = "file:///tmp/lazyverilog_definition_top_arg.sv";
     analyzer.set_extra_files({extra_path.string()});
+    analyzer.wait_for_background_index_idle();
     analyzer.open(extra_uri, kExtraDefinitionFixture);
     analyzer.open(top_uri, kTopUsingExtraFixture);
 
@@ -261,6 +265,7 @@ TEST_CASE("definition: generic lookup uses open extra file AST", "[definition]")
     const std::string extra_uri = "file://" + extra_path.string();
     const std::string top_uri = "file:///tmp/lazyverilog_definition_top_generic.sv";
     analyzer.set_extra_files({extra_path.string()});
+    analyzer.wait_for_background_index_idle();
     analyzer.open(extra_uri, kExtraDefinitionFixture);
     analyzer.open(top_uri, kTopUsingExtraFixture);
 
@@ -310,6 +315,7 @@ TEST_CASE("extra file cache refreshes on explicit filelist reset and drops remov
                                           "endmodule\n");
     const std::string top_uri = "file:///tmp/lazyverilog_definition_cache_top.sv";
     analyzer.set_extra_files({extra_path.string()});
+    analyzer.wait_for_background_index_idle();
     auto snapshots = analyzer.extra_file_snapshots();
     REQUIRE(snapshots.size() == 1);
     CHECK(snapshots[0].state == nullptr);
@@ -327,9 +333,11 @@ TEST_CASE("extra file cache refreshes on explicit filelist reset and drops remov
         out << "module child(input logic clk, output logic ack);\nendmodule\n";
     }
     analyzer.set_extra_files({extra_path.string()});
+    analyzer.wait_for_background_index_idle();
     CHECK_FALSE(analyzer.definition_of(top_uri, 2, 31).has_value());
 
     std::filesystem::remove(extra_path);
     analyzer.set_extra_files({extra_path.string()});
+    analyzer.wait_for_background_index_idle();
     CHECK(analyzer.extra_file_snapshots().empty());
 }

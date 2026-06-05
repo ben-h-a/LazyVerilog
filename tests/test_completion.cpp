@@ -147,6 +147,7 @@ static SyntheticUvmFixture make_synthetic_uvm_fixture(std::string_view name) {
 static void configure_synthetic_uvm_index(Analyzer& analyzer, const SyntheticUvmFixture& setup) {
     analyzer.set_include_dirs(setup.include_dirs);
     analyzer.set_extra_files(setup.files);
+    analyzer.wait_for_background_index_idle();
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -649,6 +650,7 @@ TEST_CASE("completion: NamedPort uses cached project index for extra-file module
                "endmodule\n";
     }
     analyzer.set_extra_files({child_path.string()});
+    analyzer.wait_for_background_index_idle();
 
     const std::string uri = "file:///tmp/completion_namedport_extra_top.sv";
     const std::string text =
@@ -791,6 +793,7 @@ TEST_CASE("completion: macros from extra files do not leak into unrelated files"
                "endmodule\n";
     }
     analyzer.set_extra_files({extra.string()});
+    analyzer.wait_for_background_index_idle();
 
     const std::string uri = "file:///tmp/completion_macro_no_leak.sv";
     const std::string text =
@@ -819,6 +822,7 @@ TEST_CASE("completion: repeated visible macros are deduplicated", "[completion]"
                "endmodule\n";
     }
     analyzer.set_extra_files({extra.string()});
+    analyzer.wait_for_background_index_idle();
 
     const std::string uri = "file:///tmp/completion_duplicate_macro_current.sv";
     const std::string text =
@@ -963,6 +967,7 @@ TEST_CASE("completion: package scope survives opening package definition file", 
     }
 
     analyzer.set_extra_files({use.string(), lib.string()});
+    analyzer.wait_for_background_index_idle();
     const std::string use_uri = "file://" + use.string();
     const std::string lib_uri = "file://" + lib.string();
     analyzer.open(use_uri, use_text);
@@ -1018,6 +1023,7 @@ TEST_CASE("completion: project index shard follows live edits to extra file", "[
     }
 
     analyzer.set_extra_files({use.string(), lib.string()});
+    analyzer.wait_for_background_index_idle();
     const std::string use_uri = "file://" + use.string();
     const std::string lib_uri = "file://" + lib.string();
     analyzer.open(use_uri, use_text);
@@ -1104,6 +1110,7 @@ TEST_CASE("completion: imports from extra files do not leak into current file", 
                "endmodule\n";
     }
     analyzer.set_extra_files({extra.string()});
+    analyzer.wait_for_background_index_idle();
 
     const std::string uri = "file:///tmp/completion_import_no_leak.sv";
     const std::string text =
@@ -1140,6 +1147,7 @@ TEST_CASE("completion: current file listed in extra files is not duplicated", "[
         out << text;
     }
     analyzer.set_extra_files({path.string()});
+    analyzer.wait_for_background_index_idle();
 
     const std::string uri = "file://" + path.string();
     analyzer.open(uri, text);
@@ -1519,6 +1527,7 @@ TEST_CASE("completion: generic identifier completion avoids extra-file modules",
     CompletionEngine engine;
     Analyzer analyzer;
     analyzer.set_extra_files({extra_path.string()});
+    analyzer.wait_for_background_index_idle();
 
     const std::string uri = "file:///tmp/completion_scope_local.sv";
     // m_local_adder declared in the open document
@@ -1551,6 +1560,7 @@ TEST_CASE("completion: FileProvider returns svh from extra files", "[completion]
     CompletionEngine engine;
     Analyzer analyzer;
     analyzer.set_extra_files({header_path.string()});
+    analyzer.wait_for_background_index_idle();
 
     const std::string uri = "file:///tmp/completion_file.sv";
     // `include " triggers IncludeFile context

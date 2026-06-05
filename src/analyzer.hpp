@@ -72,6 +72,7 @@ struct RtlTreeNode {
     std::string file;
     std::vector<RtlTreeNode> children;
     bool recursive{false};
+    bool truncated{false};
 };
 
 class Analyzer {
@@ -129,6 +130,14 @@ class Analyzer {
     ///                       instead of stat()-ing every individual extra file.
     void set_extra_files(const std::vector<std::string>& paths,
                          const std::string& filelist_path = {});
+
+    /// Block until all currently queued project-index work is published.
+    ///
+    /// Production LSP request paths should not call this: project files are
+    /// intentionally indexed asynchronously.  Tests and command-line utilities
+    /// that need deterministic assertions after set_extra_files() may wait for
+    /// the background worker to become idle.
+    void wait_for_background_index_idle() const;
 
     /// Set preprocessor defines (from config.design.define).
     /// Applied on every subsequent make_state call.
@@ -223,7 +232,6 @@ class Analyzer {
         SyntaxIndex index;
     };
 
-    void refresh_extra_cache_locked() const;
     void start_background_indexer_locked() const;
     void schedule_background_reindex_locked() const;
     void schedule_background_project_publish_locked() const;
@@ -257,6 +265,7 @@ class Analyzer {
     // blocking behind a full .f parse.
     mutable std::condition_variable_any background_cv_;
     mutable std::deque<std::string> background_pending_files_;
+    mutable bool background_index_active_{false};
     mutable bool background_publish_requested_{false};
     mutable uint64_t background_generation_{0};
     mutable std::jthread background_indexer_;

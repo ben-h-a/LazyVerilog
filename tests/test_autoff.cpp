@@ -84,6 +84,7 @@ TEST_CASE("autowire uses cached extra-file modules", "[autowire]") {
 
     Analyzer analyzer;
     analyzer.set_extra_files({extra_path.string()});
+    analyzer.wait_for_background_index_idle();
     const std::string uri = "file:///tmp/lazyverilog_autowire_top.sv";
     analyzer.open(uri, "module top;\n"
                        "    child u_child(.dout(child_dout));\n"

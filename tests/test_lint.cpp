@@ -87,6 +87,7 @@ TEST_CASE("lint: stale autoinst uses merged extra-file module ports", "[lint]") 
 
     Analyzer analyzer;
     analyzer.set_extra_files({extra_path.string()});
+    analyzer.wait_for_background_index_idle();
     const std::string uri = "file:///lint_top.sv";
     analyzer.open(uri, "module top;\nchild u_child(.a(a), .old(b));\nendmodule\n");
     auto state = analyzer.get_state(uri);

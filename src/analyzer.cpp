@@ -32,6 +32,8 @@ bool perf_trace_enabled() {
 
 using Clock = std::chrono::steady_clock;
 
+constexpr size_t kMaxRtlTreeDepth = 256;
+
 void log_perf(std::string_view label, Clock::time_point start) {
     if (!perf_trace_enabled())
         return;
@@ -403,9 +405,12 @@ static std::optional<Location> find_port_definition(const SyntaxIndex& index,
 }
 
 static std::optional<std::string> symbol_id_for_index_location(const SyntaxIndex& index,
-                                                               const Location& loc) {
+                                                               const Location& loc,
+                                                               bool allow_name_fallback = false) {
     for (const auto& ref : index.references) {
-        if (!ref.symbol_id || ref.symbol_debug.starts_with("name:"))
+        if (!ref.symbol_id)
+            continue;
+        if (!allow_name_fallback && ref.symbol_debug.starts_with("name:"))
             continue;
         // ReferenceEntry no longer stores a URI string directly.  It stores a
         // compact FileID that is local to the SyntaxIndex shard, so always
@@ -1520,7 +1525,16 @@ std::optional<SymbolInfo> Analyzer::symbol_at(const std::string& uri, int line, 
             .name = target.name, .kind = "macro", .detail = "(empty)", .line = line, .col = col};
     }
 
-    auto definition = definition_of(uri, line, col);
+    // Reuse the extra-file snapshot already collected for hover.  Calling
+    // definition_of() here would collect the same snapshot again, and for open
+    // filelist entries that can mean repeating live-buffer index work during a
+    // single user-visible hover request.
+    auto definition_extra_files = extra_files;
+    definition_extra_files.erase(
+        std::remove_if(definition_extra_files.begin(), definition_extra_files.end(),
+                       [&uri](const ExtraFileInfo& e) { return e.uri == uri; }),
+        definition_extra_files.end());
+    auto definition = definition_of_state(*state, uri, line, col, definition_extra_files);
     if (definition) {
         std::string name = target.name.empty() ? ident : target.name;
         if (definition->uri == uri) {
@@ -1838,7 +1852,36 @@ std::vector<Location> Analyzer::find_references(const std::string& uri, int line
             }
         }
     }
+    std::string fallback_symbol_debug;
+    if (target_symbol_debug.empty()) {
+        // If the lightweight index cannot prove a scope-qualified identity, keep
+        // open-buffer references on the AST/definition-verification path below
+        // to avoid same-name false positives.  Closed project files cannot be
+        // walked as ASTs, so retain a conservative unresolved-name SymbolID for
+        // their compact occurrence shards.  This fixes the "empty references"
+        // case for symbols whose only indexed identity is `name:<identifier>`
+        // without downgrading precise open-file reference searches.
+        auto current_structural_index = get_structural_index(*state);
+        if (target_def->uri == uri) {
+            if (auto id = symbol_id_for_index_location(current_structural_index, *target_def, true);
+                id && id->starts_with("name:")) {
+                fallback_symbol_debug = *id;
+            }
+        }
+        if (fallback_symbol_debug.empty()) {
+            for (const auto& extra : extra_index_snapshots()) {
+                if (extra.uri != target_def->uri)
+                    continue;
+                if (auto id = symbol_id_for_index_location(extra.index, *target_def, true);
+                    id && id->starts_with("name:")) {
+                    fallback_symbol_debug = *id;
+                }
+                break;
+            }
+        }
+    }
     const SymbolID target_symbol_id = SymbolID::from_canonical(target_symbol_debug);
+    const SymbolID fallback_symbol_id = SymbolID::from_canonical(fallback_symbol_debug);
 
     std::vector<Location> result;
     std::set<std::tuple<std::string, int, int>> seen;
@@ -1979,11 +2022,15 @@ std::vector<Location> Analyzer::find_references(const std::string& uri, int line
     for (const auto& extra : extra_index_snapshots()) {
         if (open_uris.contains(extra.uri))
             continue;
-        if (!target_symbol_id)
+        if (!target_symbol_id && !fallback_symbol_id)
             continue;
         for (const auto& ref : extra.index.references) {
-            if (ref.symbol_id != target_symbol_id)
+            if (target_symbol_id) {
+                if (ref.symbol_id != target_symbol_id)
+                    continue;
+            } else if (ref.symbol_id != fallback_symbol_id) {
                 continue;
+            }
 
             add_indexed_reference(extra.uri, extra.index, ref);
         }
@@ -2068,10 +2115,20 @@ void Analyzer::set_extra_files(const std::vector<std::string>& paths,
     for (const auto& path : paths)
         extra_files_.push_back(normalize_path(path).string());
     clear_extra_project_index_locked();
-    if (filelist_path_.empty())
-        refresh_extra_cache_locked();
-    else
+
+    // Always index configured project files asynchronously, regardless of
+    // whether they came from a .f file or an explicit path list.  This keeps
+    // configuration reload / startup from synchronously parsing large designs.
+    if (!extra_files_.empty())
         schedule_background_reindex_locked();
+}
+
+void Analyzer::wait_for_background_index_idle() const {
+    std::unique_lock<std::mutex> lock(map_mutex_);
+    background_cv_.wait(lock, [&] {
+        return background_pending_files_.empty() && !background_index_active_ &&
+               !background_publish_requested_;
+    });
 }
 
 std::vector<ExtraFileInfo> Analyzer::extra_file_snapshots() const {
@@ -2081,23 +2138,30 @@ std::vector<ExtraFileInfo> Analyzer::extra_file_snapshots() const {
     // as configuration loaded at startup / config reload.  This avoids metadata
     // I/O in HPC environments and keeps edits to listed open buffers
     // incremental through update_extra_cache_for_live_state_locked().
-    if (!extra_files_.empty() && extra_cache_.size() < extra_files_.size() &&
-        filelist_path_.empty())
-        refresh_extra_cache_locked();
+    // Request paths must remain read-only with respect to parsing.  If the
+    // cache is still warming or some configured files failed to parse, return
+    // the shards currently available instead of synchronously parsing missing
+    // files under map_mutex_.
 
     std::vector<ExtraFileInfo> result;
     result.reserve(extra_cache_.size());
     for (const auto& [key, entry] : extra_cache_) {
         // Closed project files intentionally have no DocumentState here.  They
         // are represented only by the compact SyntaxIndex shard.  If the file
-        // is open, attach the live state so AST-only features can inspect the
-        // unsaved buffer without keeping closed project ASTs alive.
-        if (const auto it = docs_.find(entry.uri); it != docs_.end()) {
+        // is open, attach the live state so AST-only features can inspect
+        // unsaved text without keeping closed project ASTs alive.
+        //
+        // Do not rebuild the open file's dynamic index here.  Open filelist
+        // entries replace their shard in update_extra_cache_for_live_state_locked()
+        // on didOpen/didChange, so entry.index is already the live-buffer shard.
+        // Rebuilding while map_mutex_ is held would make hover/definition/RTL
+        // requests serialize behind AST-derived indexing work.
+        if (const auto it = docs_.find(entry.uri); it != docs_.end() && it->second) {
             result.push_back(ExtraFileInfo{
                 .path = entry.path,
                 .uri = entry.uri,
                 .state = it->second,
-                .index = build_dynamic_file_index(*it->second),
+                .index = entry.index,
             });
             continue;
         }
@@ -2154,13 +2218,20 @@ void Analyzer::set_project_index_publish_callback(std::function<void()> callback
 
 std::shared_ptr<const SyntaxIndex>
 Analyzer::opened_files_index(const std::string& current_uri) const {
-    std::lock_guard<std::mutex> lock(map_mutex_);
-    auto merged = std::make_shared<SyntaxIndex>();
-    for (const auto& [uri, state] : docs_) {
-        if (uri == current_uri || !state)
-            continue;
-        merged->merge(build_dynamic_file_index(*state));
+    std::vector<std::shared_ptr<const DocumentState>> states;
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        states.reserve(docs_.size());
+        for (const auto& [uri, state] : docs_) {
+            if (uri == current_uri || !state)
+                continue;
+            states.push_back(state);
+        }
     }
+
+    auto merged = std::make_shared<SyntaxIndex>();
+    for (const auto& state : states)
+        merged->merge(build_dynamic_file_index(*state));
     return merged;
 }
 
@@ -2293,9 +2364,9 @@ std::optional<RtlTreeNode> Analyzer::rtl_tree(const std::string& uri) const {
             root = &module;
     }
 
-    std::function<RtlTreeNode(const std::string&, const std::unordered_set<std::string>&)> build =
-        [&](const std::string& module_name,
-            const std::unordered_set<std::string>& seen) -> RtlTreeNode {
+    std::function<RtlTreeNode(const std::string&, size_t, std::unordered_set<std::string>&)> build =
+        [&](const std::string& module_name, size_t depth,
+            std::unordered_set<std::string>& seen) -> RtlTreeNode {
         auto module_it = view.module_uris.find(module_name);
         RtlTreeNode node{
             .name = module_name,
@@ -2306,22 +2377,27 @@ std::optional<RtlTreeNode> Analyzer::rtl_tree(const std::string& uri) const {
         };
         if (node.recursive || module_it == view.module_uris.end())
             return node;
+        if (depth >= kMaxRtlTreeDepth) {
+            node.truncated = true;
+            return node;
+        }
 
-        auto next_seen = seen;
-        next_seen.insert(module_name);
+        seen.insert(module_name);
         for (const auto& inst : view.instances) {
             if (inst.entry.parent_module != module_name)
                 continue;
             if (inst.entry.module_name == module_name)
                 continue;
-            auto child = build(inst.entry.module_name, next_seen);
+            auto child = build(inst.entry.module_name, depth + 1, seen);
             child.inst = inst.entry.instance_name;
             node.children.push_back(std::move(child));
         }
+        seen.erase(module_name);
         return node;
     };
 
-    return build(root->name, {});
+    std::unordered_set<std::string> seen;
+    return build(root->name, 0, seen);
 }
 
 std::optional<RtlTreeNode> Analyzer::rtl_tree_reverse(const std::string& uri) const {
@@ -2363,9 +2439,9 @@ std::optional<RtlTreeNode> Analyzer::rtl_tree_reverse(const std::string& uri) co
         });
     }
 
-    std::function<RtlTreeNode(const std::string&, const std::unordered_set<std::string>&)> build =
-        [&](const std::string& module_name,
-            const std::unordered_set<std::string>& seen) -> RtlTreeNode {
+    std::function<RtlTreeNode(const std::string&, size_t, std::unordered_set<std::string>&)> build =
+        [&](const std::string& module_name, size_t depth,
+            std::unordered_set<std::string>& seen) -> RtlTreeNode {
         auto module_it = view.module_uris.find(module_name);
         RtlTreeNode node{
             .name = module_name,
@@ -2376,68 +2452,31 @@ std::optional<RtlTreeNode> Analyzer::rtl_tree_reverse(const std::string& uri) co
         };
         if (node.recursive)
             return node;
-
-        auto next_seen = seen;
-        next_seen.insert(module_name);
-        auto refs = reverse_map.find(module_name);
-        if (refs == reverse_map.end())
+        if (depth >= kMaxRtlTreeDepth) {
+            node.truncated = true;
             return node;
+        }
+
+        seen.insert(module_name);
+        auto refs = reverse_map.find(module_name);
+        if (refs == reverse_map.end()) {
+            seen.erase(module_name);
+            return node;
+        }
 
         for (const auto& parent : refs->second) {
-            auto child = build(parent.parent_module, next_seen);
+            auto child = build(parent.parent_module, depth + 1, seen);
             child.inst = parent.inst_name;
             if (child.file.empty())
                 child.file = parent.file_uri;
             node.children.push_back(std::move(child));
         }
+        seen.erase(module_name);
         return node;
     };
 
-    return build(target->name, {});
-}
-
-void Analyzer::refresh_extra_cache_locked() const {
-    const auto start = Clock::now();
-    std::unordered_map<std::string, ExtraFileCacheEntry> refreshed;
-    refreshed.reserve(extra_files_.size());
-
-    for (const auto& configured_path : extra_files_) {
-        const auto path = normalize_path(configured_path);
-        const auto path_string = path.string();
-        const auto uri = path_to_uri(path);
-
-        // If this file is open in the editor, its DocumentState is the
-        // authoritative shard.  This makes project-wide completion see unsaved
-        // edits in b.sv when completing from top.sv, without reparsing every
-        // filelist source.
-        if (const auto doc = docs_.find(uri); doc != docs_.end() && doc->second) {
-            refreshed[uri] = ExtraFileCacheEntry{
-                .path = path_string,
-                .uri = uri,
-                .index = build_dynamic_file_index(*doc->second),
-            };
-            continue;
-        }
-
-        if (const auto existing = extra_cache_.find(uri); existing != extra_cache_.end()) {
-            refreshed[uri] = existing->second;
-            continue;
-        }
-
-        auto state = make_file_state_with_options(path, defines_, include_dirs_);
-        if (!state || !state->tree)
-            continue;
-
-        refreshed[uri] = ExtraFileCacheEntry{
-            .path = path_string,
-            .uri = uri,
-            .index = state->index,
-        };
-    }
-
-    extra_cache_ = std::move(refreshed);
-    publish_extra_project_index_locked();
-    log_perf("refresh_extra_cache files=" + std::to_string(extra_cache_.size()), start);
+    std::unordered_set<std::string> seen;
+    return build(target->name, 0, seen);
 }
 
 void Analyzer::start_background_indexer_locked() const {
@@ -2488,11 +2527,13 @@ void Analyzer::background_index_loop(std::stop_token stop) const {
             if (background_pending_files_.empty() && background_publish_requested_) {
                 background_publish_requested_ = false;
                 publish_extra_project_index_locked();
+                background_cv_.notify_all();
                 continue;
             }
 
             path_string = std::move(background_pending_files_.front());
             background_pending_files_.pop_front();
+            background_index_active_ = true;
             const auto path = normalize_path(path_string);
             path_string = path.string();
             uri = path_to_uri(path);
@@ -2510,18 +2551,27 @@ void Analyzer::background_index_loop(std::stop_token stop) const {
                     .index = build_dynamic_file_index(*doc->second),
                 };
                 background_publish_requested_ = true;
+                background_index_active_ = false;
+                background_cv_.notify_all();
                 continue;
             }
         }
 
         auto state = make_file_state_with_options(path_string, defines, include_dirs);
-        if (stop.stop_requested() || !state || !state->tree)
+        if (stop.stop_requested() || !state || !state->tree) {
+            std::lock_guard<std::mutex> lock(map_mutex_);
+            background_index_active_ = false;
+            background_cv_.notify_all();
             continue;
+        }
 
         {
             std::lock_guard<std::mutex> lock(map_mutex_);
-            if (generation != background_generation_)
+            if (generation != background_generation_) {
+                background_index_active_ = false;
+                background_cv_.notify_all();
                 continue;
+            }
 
             // If the user opened/edited this file while the disk parse was in
             // flight, the live buffer is newer and must win.
@@ -2540,6 +2590,8 @@ void Analyzer::background_index_loop(std::stop_token stop) const {
             // Publish from the background worker so request handlers never pay
             // the project-wide shard merge cost.
             publish_extra_project_index_locked();
+            background_index_active_ = false;
+            background_cv_.notify_all();
         }
     }
 }

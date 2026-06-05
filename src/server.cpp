@@ -117,6 +117,39 @@ static size_t advance_utf16_cols(const std::string& text, size_t pos, int col) {
     return pos;
 }
 
+static size_t utf16_units_until_newline(const std::string& text, size_t pos) {
+    size_t units = 0;
+    while (pos < text.size() && text[pos] != '\n') {
+        unsigned char c = static_cast<unsigned char>(text[pos]);
+        int bytes = 1;
+        int width = 1;
+        if (c < 0x80) {
+            bytes = 1;
+        } else if ((c & 0xE0) == 0xC0) {
+            bytes = 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            bytes = 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            bytes = 4;
+            width = 2;
+        }
+
+        bool valid_sequence = pos + static_cast<size_t>(bytes) <= text.size();
+        for (int i = 1; valid_sequence && i < bytes; ++i) {
+            unsigned char cc = static_cast<unsigned char>(text[pos + static_cast<size_t>(i)]);
+            valid_sequence = (cc & 0xC0) == 0x80;
+        }
+        if (!valid_sequence) {
+            bytes = 1;
+            width = 1;
+        }
+
+        units += static_cast<size_t>(width);
+        pos += static_cast<size_t>(bytes);
+    }
+    return units;
+}
+
 // Convert (line, col) LSP position to byte offset in text.
 static size_t lsp_offset(const std::string& text, int line, int col) {
     int cur = 0;
@@ -241,15 +274,14 @@ static int saturating_lsp_int(size_t value) {
 
 static lsPosition document_end_position(const std::string& text) {
     size_t line = 0;
-    size_t last_nl = std::string::npos;
+    size_t line_start = 0;
     for (size_t i = 0; i < text.size(); ++i) {
         if (text[i] == '\n') {
             ++line;
-            last_nl = i;
+            line_start = i + 1;
         }
     }
-    const size_t col = last_nl == std::string::npos ? text.size()
-                                                     : text.size() - last_nl - 1;
+    const size_t col = utf16_units_until_newline(text, line_start);
     return lsPosition(saturating_lsp_int(line), saturating_lsp_int(col));
 }
 
@@ -291,21 +323,26 @@ static std::string workspace_edit_json(const std::string& uri, const lsTextEdit&
 }
 
 static std::string rtl_tree_json(const RtlTreeNode& node, bool show_file,
-                                 bool show_instance_name) {
+                                 bool show_instance_name, size_t depth = 0) {
+    constexpr size_t kMaxRtlTreeJsonDepth = 512;
     std::string out = "{\"name\":" + json_string(node.name);
     if (show_instance_name)
         out += ",\"inst\":" + json_string(node.inst);
     if (show_file)
         out += ",\"file\":" + json_string(node.file);
     out += ",\"children\":[";
-    for (size_t i = 0; i < node.children.size(); ++i) {
-        if (i > 0)
-            out += ",";
-        out += rtl_tree_json(node.children[i], show_file, show_instance_name);
+    if (depth < kMaxRtlTreeJsonDepth) {
+        for (size_t i = 0; i < node.children.size(); ++i) {
+            if (i > 0)
+                out += ",";
+            out += rtl_tree_json(node.children[i], show_file, show_instance_name, depth + 1);
+        }
     }
     out += "]";
     if (node.recursive)
         out += ",\"recursive\":true";
+    if (node.truncated || depth >= kMaxRtlTreeJsonDepth)
+        out += ",\"truncated\":true";
     out += "}";
     return out;
 }
@@ -1117,14 +1154,16 @@ void LazyVerilogServer::register_handlers() {
                 if (!args || i >= args->size())
                     return {};
                 std::string s;
-                const_cast<lsp::Any&>((*args)[i]).Get(s);
+                auto value = (*args)[i];
+                value.Get(s);
                 return s;
             };
             auto get_int = [&](size_t i) -> int {
                 if (!args || i >= args->size())
                     return 0;
                 int v = 0;
-                const_cast<lsp::Any&>((*args)[i]).Get(v);
+                auto value = (*args)[i];
+                value.Get(v);
                 return v;
             };
 
