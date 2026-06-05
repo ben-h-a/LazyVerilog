@@ -2,7 +2,9 @@
 
 All options live under `[lint]` in `lazyverilog.toml`.
 
-Linting runs during background compilation and publishes diagnostics via `textDocument/publishDiagnostics`.
+Linting runs as part of foreground document diagnostics on open/change and publishes
+diagnostics via `textDocument/publishDiagnostics`. Optional background semantic
+compilation is separate and may contribute additional semantic diagnostics.
 Included files (`` `include ``) are skipped — only the top-level file is linted.
 
 ---

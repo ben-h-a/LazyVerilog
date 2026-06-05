@@ -39,7 +39,11 @@ When the user confirms the preview, Connect generates local text edits to:
 
 ## Declaration type rules
 
-Generated bridge signals are declared from the **output port** datatype.
+Generated bridge signals prefer the **source/output port** datatype. If the
+source port is being created during the same Connect operation and therefore has
+no existing datatype to copy, LazyVerilog falls back to the destination/input
+port datatype. If neither selected leaf port exists yet, the bridge declaration
+uses `logic`.
 
 For net-style output ports, the generated bridge signal is a variable declaration
 using `logic`, not a net declaration:

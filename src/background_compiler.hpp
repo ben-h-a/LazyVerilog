@@ -19,6 +19,14 @@ struct BackgroundCompileResult {
     std::vector<std::string> open_uris;
 };
 
+struct BackgroundCompilerConfig {
+    bool enabled{false};
+    int thread_count{1};
+    int debounce_ms{1500};
+    bool log_timing{false};
+    int nice_value{10};
+};
+
 class BackgroundCompiler {
   public:
     using ResultCallback = std::function<void(BackgroundCompileResult)>;
@@ -29,8 +37,7 @@ class BackgroundCompiler {
     BackgroundCompiler(const BackgroundCompiler&) = delete;
     BackgroundCompiler& operator=(const BackgroundCompiler&) = delete;
 
-    void configure(bool enabled, int thread_count, int debounce_ms, bool log_timing,
-                   int nice_value);
+    void configure(BackgroundCompilerConfig config);
     void schedule(CompilationSnapshot snapshot);
     void stop();
 

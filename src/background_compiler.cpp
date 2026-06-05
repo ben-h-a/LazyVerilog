@@ -133,18 +133,17 @@ std::vector<std::thread> BackgroundCompiler::collect_exited_workers_locked() {
     return exited_threads;
 }
 
-void BackgroundCompiler::configure(bool enabled, int thread_count, int debounce_ms,
-                                   bool log_timing, int nice_value) {
-    thread_count = std::max(1, thread_count);
-    debounce_ms = std::max(0, debounce_ms);
+void BackgroundCompiler::configure(BackgroundCompilerConfig config) {
+    config.thread_count = std::max(1, config.thread_count);
+    config.debounce_ms = std::max(0, config.debounce_ms);
 
     std::vector<std::thread> exited_threads;
     {
         std::unique_lock<std::mutex> lock(mutex_);
-        enabled_ = enabled;
-        log_timing_ = log_timing;
-        debounce_ms_ = debounce_ms;
-        nice_value_ = nice_value;
+        enabled_ = config.enabled;
+        log_timing_ = config.log_timing;
+        debounce_ms_ = config.debounce_ms;
+        nice_value_ = config.nice_value;
 
         exited_threads = collect_exited_workers_locked();
 
@@ -158,14 +157,14 @@ void BackgroundCompiler::configure(bool enabled, int thread_count, int debounce_
             // workers have exited, keep those workers instead of spawning an
             // unnecessary replacement.  Retire requests are only a graceful
             // shrink mechanism, not an irreversible cancellation.
-            if (static_cast<int>(workers_.size()) <= thread_count) {
+            if (static_cast<int>(workers_.size()) <= config.thread_count) {
                 for (auto& slot : workers_)
                     slot->retire = false;
             }
 
-            while (static_cast<int>(workers_.size()) < thread_count) {
+            while (static_cast<int>(workers_.size()) < config.thread_count) {
                 auto slot = std::make_shared<WorkerSlot>(next_worker_id_++);
-                slot->thread = std::thread([this, slot, nice_value] {
+                slot->thread = std::thread([this, slot, nice_value = config.nice_value] {
                     setpriority(PRIO_PROCESS, 0, nice_value);
                     worker_loop(std::move(slot));
                 });
@@ -180,7 +179,7 @@ void BackgroundCompiler::configure(bool enabled, int thread_count, int debounce_
             for (auto& slot : workers_) {
                 if (slot->exited)
                     continue;
-                if (kept < thread_count) {
+                if (kept < config.thread_count) {
                     ++kept;
                     continue;
                 }

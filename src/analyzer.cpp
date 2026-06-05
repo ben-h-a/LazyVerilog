@@ -563,13 +563,6 @@ static bool macro_has_user_source_location(const slang::SourceManager& sm,
     return name && name.location().valid() && sm.isFileLoc(name.location());
 }
 
-static std::string read_file_text(const std::filesystem::path& path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in)
-        return {};
-    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-}
-
 static std::optional<std::string> read_file_text_optional(const std::filesystem::path& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in)
@@ -817,24 +810,6 @@ static std::optional<SymbolInfo> find_macro_info(const slang::syntax::SyntaxTree
     return std::nullopt;
 }
 
-static std::optional<SymbolInfo> find_macro_info_in_file(const std::filesystem::path& path,
-                                                         const std::string& name) {
-    slang::SourceManager sm;
-    auto tree_or_error = slang::syntax::SyntaxTree::fromFile(path.string(), sm);
-    if (!tree_or_error)
-        return std::nullopt;
-    return find_macro_info(**tree_or_error, path_to_uri(path), name);
-}
-
-static std::optional<Location> find_macro_definition_in_file(const std::filesystem::path& path,
-                                                             const std::string& name) {
-    slang::SourceManager sm;
-    auto tree_or_error = slang::syntax::SyntaxTree::fromFile(path.string(), sm);
-    if (!tree_or_error)
-        return std::nullopt;
-    return find_macro_definition(**tree_or_error, path_to_uri(path), name);
-}
-
 static std::optional<Location>
 find_subroutine_argument_definition(const slang::syntax::SyntaxTree& tree, const std::string& uri,
                                     const std::string& subroutine_name,
@@ -876,18 +851,6 @@ find_subroutine_argument_definition(const slang::syntax::SyntaxTree& tree, const
     Visitor visitor(tree.sourceManager(), uri, subroutine_name, argument_name);
     tree.root().visit(visitor);
     return visitor.result;
-}
-
-static std::optional<Location>
-find_subroutine_argument_definition_in_file(const std::filesystem::path& path,
-                                            const std::string& subroutine_name,
-                                            const std::string& argument_name) {
-    slang::SourceManager sm;
-    auto tree_or_error = slang::syntax::SyntaxTree::fromFile(path.string(), sm);
-    if (!tree_or_error)
-        return std::nullopt;
-    return find_subroutine_argument_definition(**tree_or_error, path_to_uri(path), subroutine_name,
-                                               argument_name);
 }
 
 struct GenericDefinitionVisitor : public slang::syntax::SyntaxVisitor<GenericDefinitionVisitor> {
@@ -967,16 +930,6 @@ static std::optional<Location> find_generic_definition(const slang::syntax::Synt
     GenericDefinitionVisitor visitor(tree.sourceManager(), uri, name, preferred_module);
     tree.root().visit(visitor);
     return visitor.result();
-}
-
-static std::optional<Location>
-find_generic_definition_in_file(const std::filesystem::path& path, const std::string& name,
-                                const std::string& preferred_module) {
-    slang::SourceManager sm;
-    auto tree_or_error = slang::syntax::SyntaxTree::fromFile(path.string(), sm);
-    if (!tree_or_error)
-        return std::nullopt;
-    return find_generic_definition(**tree_or_error, path_to_uri(path), name, preferred_module);
 }
 
 static bool token_at_location(const slang::SourceManager& sm, const slang::parsing::Token& token,
@@ -1295,16 +1248,6 @@ symbol_info_from_definition(const slang::syntax::SyntaxTree& tree, const std::st
     Visitor visitor(tree.sourceManager(), uri, name, definition, index);
     tree.root().visit(visitor);
     return visitor.result;
-}
-
-static std::optional<SymbolInfo> symbol_info_from_definition_file(const std::filesystem::path& path,
-                                                                  const std::string& name,
-                                                                  const Location& definition) {
-    slang::SourceManager sm;
-    auto tree_or_error = slang::syntax::SyntaxTree::fromFile(path.string(), sm);
-    if (!tree_or_error)
-        return std::nullopt;
-    return symbol_info_from_definition(**tree_or_error, path_to_uri(path), name, definition);
 }
 
 static slang::SourceRange visible_range_for_token(const slang::SourceManager& sm,

@@ -326,6 +326,8 @@ static std::string did_change_config_file(lsp::Any settings_any) {
     try {
         settings_any.Get(settings);
     } catch (...) {
+        // Settings are client-provided and optional.  Malformed payloads should
+        // not fail configuration reload; fall back to root-based config lookup.
         return {};
     }
 
@@ -337,6 +339,8 @@ static std::string did_change_config_file(lsp::Any settings_any) {
     try {
         lazy_it->second.Get(lazyverilog);
     } catch (...) {
+        // Same best-effort rule as above: ignore non-object lazyverilog
+        // settings rather than rejecting the whole LSP notification.
         return {};
     }
 
@@ -348,6 +352,8 @@ static std::string did_change_config_file(lsp::Any settings_any) {
     try {
         file_it->second.GetForMapHelper(config_file);
     } catch (...) {
+        // configFile is a hint from our client.  If it is not a string, the
+        // server can still reload from the established workspace root.
         return {};
     }
     return config_file;
@@ -575,11 +581,13 @@ void LazyVerilogServer::configure_background_compiler() {
     if (!background_compiler_)
         return;
 
-    background_compiler_->configure(config_.compilation.background_compilation,
-                                    config_.compilation.background_compilation_threads,
-                                    config_.compilation.background_compilation_debounce_ms,
-                                    config_.compilation.log_timing,
-                                    config_.compilation.nice_value);
+    background_compiler_->configure(BackgroundCompilerConfig{
+        .enabled = config_.compilation.background_compilation,
+        .thread_count = config_.compilation.background_compilation_threads,
+        .debounce_ms = config_.compilation.background_compilation_debounce_ms,
+        .log_timing = config_.compilation.log_timing,
+        .nice_value = config_.compilation.nice_value,
+    });
 
     if (!config_.compilation.background_compilation)
         analyzer_.clear_all_semantic_diagnostics();
@@ -878,7 +886,10 @@ void LazyVerilogServer::register_handlers() {
     ep.registerHandler([&, remote](const Notify_Exit::notify&) {
         try {
             remote->stop();
+        } catch (const std::exception& e) {
+            std::cerr << "[lazyverilog] endpoint stop during exit failed: " << e.what() << "\n";
         } catch (...) {
+            std::cerr << "[lazyverilog] endpoint stop during exit failed\n";
         }
         impl_->exit_event.notify(std::make_unique<bool>(true));
     });

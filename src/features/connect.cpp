@@ -1134,13 +1134,6 @@ static std::vector<TextEdit> add_module_ports(const FileView& file, const std::s
     return edits;
 }
 
-static std::vector<TextEdit> add_module_port(const FileView& file, const std::string& module_name,
-                                             const std::string& direction,
-                                             const std::string& type,
-                                             const std::string& port_name) {
-    return add_module_ports(file, module_name, {{direction, type, port_name}});
-}
-
 static std::string workspace_edit_json(const std::vector<TextEdit>& edits) {
     if (edits.empty())
         return "null";
