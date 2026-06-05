@@ -838,6 +838,7 @@ void LazyVerilogServer::register_handlers() {
                 "lazyverilog.autowire",
                 "lazyverilog.autowirepreview",
                 "lazyverilog.connectInfo",
+                "lazyverilog.connectHierarchyChildren",
                 "lazyverilog.connectApply",
                 "lazyverilog.connectApplyPreview",
                 "lazyverilog.autoffPreview",
@@ -1503,7 +1504,14 @@ void LazyVerilogServer::register_handlers() {
                 }
             } else if (cmd == "lazyverilog.connectInfo") {
                 std::string uri = get_string(0);
-                rsp.result.SetJsonString(connect_info_json(analyzer_, uri), lsp::Any::kObjectType);
+                const bool lazy_hierarchy = get_string(1) == "lazy";
+                rsp.result.SetJsonString(connect_info_json(analyzer_, uri, lazy_hierarchy),
+                                         lsp::Any::kObjectType);
+            } else if (cmd == "lazyverilog.connectHierarchyChildren") {
+                std::string uri = get_string(0);
+                std::string parent_path = get_string(1);
+                rsp.result.SetJsonString(connect_hierarchy_children_json(analyzer_, uri, parent_path),
+                                         lsp::Any::kObjectType);
             } else if (cmd == "lazyverilog.connectApplyPreview") {
                 std::string uri = get_string(0);
                 std::string source_path = get_string(1);

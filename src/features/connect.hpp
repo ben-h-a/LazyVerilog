@@ -11,7 +11,10 @@
 /// strings manually. Keeping that boundary here avoids leaking LspCpp protocol
 /// types into the feature logic and makes the code easy to unit-test by parsing
 /// the returned JSON if needed.
-std::string connect_info_json(const Analyzer& analyzer, const std::string& uri);
+std::string connect_info_json(const Analyzer& analyzer, const std::string& uri,
+                              bool lazy_hierarchy = false);
+std::string connect_hierarchy_children_json(const Analyzer& analyzer, const std::string& uri,
+                                            const std::string& parent_path);
 std::string connect_apply_preview_json(const Analyzer& analyzer, const std::string& uri,
                                        const std::string& source_path,
                                        const std::string& source_port,

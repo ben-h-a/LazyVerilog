@@ -2031,6 +2031,66 @@ local function _connect_port_candidates(mods, path_to_module, boundary_path, dir
 	return names, module_name
 end
 
+local function _connect_request_children(client, bufnr, uri, parent_path, callback)
+	client:request("workspace/executeCommand", {
+		command   = "lazyverilog.connectHierarchyChildren",
+		arguments = { uri, parent_path or "" },
+	}, function(err, result)
+		if err then
+			vim.notify("[LazyVerilog] Connect hierarchy: " .. tostring(err.message), vim.log.levels.ERROR)
+			callback(nil)
+			return
+		end
+		if not result or result.error then
+			vim.notify("[LazyVerilog] Connect hierarchy: " .. (result and result.error or "no data"),
+				vim.log.levels.ERROR)
+			callback(nil)
+			return
+		end
+		callback(result.children or {})
+	end, bufnr)
+end
+
+local function _connect_select_instance(client, bufnr, uri, roots, target_module, path_to_module, callback)
+	local function remember(nodes)
+		for _, node in ipairs(nodes or {}) do
+			if node.hierarchical_path and node.module_name then
+				path_to_module[node.hierarchical_path] = node.module_name
+			end
+		end
+	end
+
+	local function choose(nodes, title)
+		remember(nodes)
+		if not nodes or #nodes == 0 then
+			vim.notify("[LazyVerilog] Connect: no hierarchy children here", vim.log.levels.WARN)
+			callback(nil)
+			return
+		end
+
+		_float_select(nodes, {
+			prompt      = title,
+			format_item = function(it)
+				local action = (not it.root and it.module_name == target_module) and "[select]" or "[expand]"
+				return string.format("%s %-8s %s  (%s)", action, it.module_name or "",
+					it.hierarchical_path or "", it.inst_name or "")
+			end,
+		}, function(sel)
+			if not sel then callback(nil); return end
+			if not sel.root and sel.module_name == target_module then
+				callback(sel)
+				return
+			end
+			_connect_request_children(client, bufnr, uri, sel.hierarchical_path, function(children)
+				if not children then callback(nil); return end
+				choose(children, "Expand " .. (sel.hierarchical_path or "") .. " for " .. target_module .. ":")
+			end)
+		end)
+	end
+
+	choose(roots or {}, "Select/expand hierarchy for " .. target_module .. ":")
+end
+
 local function _connect_prompt_boundary_ports(requests, idx, acc, callback)
 	if idx > #requests then
 		callback(acc)
@@ -2078,7 +2138,7 @@ function M.connect(module1, module2)
 
 		client:request("workspace/executeCommand", {
 			command   = "lazyverilog.connectInfo",
-			arguments = { uri },
+			arguments = { uri, "lazy" },
 		}, function(err, data)
 			if err then
 				vim.notify("[LazyVerilog] Connect: " .. tostring(err.message), vim.log.levels.ERROR)
@@ -2103,21 +2163,15 @@ function M.connect(module1, module2)
 			local mod1 = mods[module1]
 			local mod2 = mods[module2]
 			local path_to_module = _connect_path_to_module_map(mods)
+			local roots = data.roots or {}
 
 			vim.schedule(function()
 				-- Step 1: pick inst1
-				local insts1 = mod1.instances or {}
-				if #insts1 == 0 then
-					vim.notify("[LazyVerilog] Connect: no instances of '" .. module1 .. "' found",
+				if #roots == 0 then
+					vim.notify("[LazyVerilog] Connect: no hierarchy roots found",
 						vim.log.levels.ERROR); return
 				end
-				_float_select(insts1, {
-					prompt      = "Select " .. module1 .. " instance:",
-					format_item = function(it)
-						return it.inst_name ..
-						    "  (" .. it.hierarchical_path .. ")"
-					end,
-				}, function(inst1)
+				_connect_select_instance(client, src_bufnr, uri, roots, module1, path_to_module, function(inst1)
 					if not inst1 then return end
 
 					-- Step 2: pick or type the source leaf output port.  If the
@@ -2137,20 +2191,7 @@ function M.connect(module1, module2)
 						local port1 = { name = port1_name }
 
 						-- Step 3: pick inst2
-						local insts2 = mod2.instances or {}
-						if #insts2 == 0 then
-							vim.notify(
-								"[LazyVerilog] Connect: no instances of '" ..
-								module2 .. "' found",
-								vim.log.levels.ERROR); return
-						end
-						_float_select(insts2, {
-							prompt      = "Select " .. module2 .. " instance:",
-							format_item = function(it)
-								return it.inst_name ..
-								    "  (" .. it.hierarchical_path .. ")"
-							end,
-						}, function(inst2)
+						_connect_select_instance(client, src_bufnr, uri, roots, module2, path_to_module, function(inst2)
 							if not inst2 then return end
 
 							-- Step 4: pick or type the destination leaf input port.

@@ -24,6 +24,33 @@ endmodule
     CHECK(json.find("top.u_cons") != std::string::npos);
 }
 
+TEST_CASE("connect: lazy info defers hierarchy expansion", "[connect]") {
+    Analyzer analyzer;
+    const std::string uri = "file:///tmp/connect_lazy_hierarchy_fixture.sv";
+    analyzer.open(uri, R"(
+module leaf(output logic data);
+endmodule
+module mid;
+    leaf u_leaf (.data());
+endmodule
+module top;
+    mid u_mid ();
+endmodule
+)");
+
+    const auto info = connect_info_json(analyzer, uri, true);
+    CHECK(info.find("\"leaf\"") != std::string::npos);
+    CHECK(info.find("\"roots\"") != std::string::npos);
+    CHECK(info.find("top.u_mid.u_leaf") == std::string::npos);
+
+    const auto top_children = connect_hierarchy_children_json(analyzer, uri, "top");
+    CHECK(top_children.find("top.u_mid") != std::string::npos);
+    CHECK(top_children.find("top.u_mid.u_leaf") == std::string::npos);
+
+    const auto mid_children = connect_hierarchy_children_json(analyzer, uri, "top.u_mid");
+    CHECK(mid_children.find("top.u_mid.u_leaf") != std::string::npos);
+}
+
 TEST_CASE("connect: preview and apply produce wiring edits", "[connect]") {
     Analyzer analyzer;
     const std::string uri = "file:///tmp/connect_apply_fixture.sv";
@@ -445,4 +472,3 @@ endmodule
     CHECK(edit.find(".new_out(w)") != std::string::npos);
     CHECK(edit.find(".new_in(w)") != std::string::npos);
 }
-

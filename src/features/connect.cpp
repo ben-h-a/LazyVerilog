@@ -259,6 +259,33 @@ build_hierarchy(const std::vector<FileView>& files) {
     return resolved;
 }
 
+static std::vector<std::pair<const FileView*, const ModuleEntry*>>
+find_hierarchy_roots(const std::vector<FileView>& files) {
+    std::unordered_set<std::string> instantiated_modules;
+    for (const auto& file : files) {
+        for (const auto& inst : file.index.instances)
+            instantiated_modules.insert(inst.module_name);
+    }
+
+    std::vector<std::pair<const FileView*, const ModuleEntry*>> roots;
+    for (const auto& file : files) {
+        for (const auto& module : file.index.modules) {
+            if (!instantiated_modules.contains(module.name))
+                roots.push_back({&file, &module});
+        }
+    }
+
+    // Library-only snippets and recursive/cyclic designs may have no obvious
+    // top.  Match build_hierarchy()'s old behavior: expose every module as an
+    // expandable seed so the UI can still browse something useful.
+    if (roots.empty()) {
+        for (const auto& file : files)
+            for (const auto& module : file.index.modules)
+                roots.push_back({&file, &module});
+    }
+    return roots;
+}
+
 
 struct DesignLookup {
     std::unordered_map<std::string, const FileView*> module_file_by_name;
@@ -347,6 +374,76 @@ static std::optional<std::vector<ResolvedInst>> resolve_instance_route(
         parent_module = inst_entry->module_name;
     }
     return route;
+}
+
+static std::string resolved_inst_json(const ResolvedInst& inst) {
+    return "{\"inst_name\":" + q(inst.inst_name) + ",\"module_name\":" + q(inst.module_name) +
+           ",\"hierarchical_path\":" + q(inst.path) + ",\"file_uri\":" + q(inst.file_uri) + "}";
+}
+
+static std::string root_json(const FileView& file, const ModuleEntry& module) {
+    // Roots are not instances that Connect can wire directly; they are lazy
+    // hierarchy expansion anchors.  Keep the shape close to instance nodes so
+    // the client can use one tree picker for both roots and children.
+    return "{\"inst_name\":" + q(module.name) + ",\"module_name\":" + q(module.name) +
+           ",\"hierarchical_path\":" + q(module.name) + ",\"file_uri\":" + q(file.uri) +
+           ",\"root\":true}";
+}
+
+static std::vector<ResolvedInst> hierarchy_children_for_path(const std::vector<FileView>& files,
+                                                             const std::string& parent_path,
+                                                             std::string& error) {
+    auto lookup = build_design_lookup(files);
+    std::string parent_module = parent_path;
+    std::string normalized_parent_path = parent_path;
+
+    if (parent_path.empty()) {
+        error = "parent hierarchy path is empty";
+        return {};
+    }
+
+    const auto parts = split_hier_path(parent_path);
+    if (parts.empty()) {
+        error = "parent hierarchy path is empty";
+        return {};
+    }
+
+    if (parts.size() == 1) {
+        if (!lookup.module_by_name.contains(parts.front())) {
+            error = "root module '" + parts.front() + "' not found";
+            return {};
+        }
+        parent_module = parts.front();
+        normalized_parent_path = parts.front();
+    } else {
+        auto route = resolve_instance_route(lookup, parent_path, error);
+        if (!route || route->empty())
+            return {};
+        parent_module = route->back().module_name;
+        normalized_parent_path = route->back().path;
+    }
+
+    const auto module_file_it = lookup.module_file_by_name.find(parent_module);
+    if (module_file_it == lookup.module_file_by_name.end()) {
+        error = "module '" + parent_module + "' not found";
+        return {};
+    }
+
+    const FileView* inst_file = module_file_it->second;
+    std::vector<ResolvedInst> children;
+    for (const auto& inst : inst_file->index.instances) {
+        if (inst.parent_module != parent_module)
+            continue;
+        const std::string child_path = normalized_parent_path + "." + inst.instance_name;
+        children.push_back(ResolvedInst{.path = child_path,
+                                        .inst_name = inst.instance_name,
+                                        .module_name = inst.module_name,
+                                        .parent_path = normalized_parent_path,
+                                        .parent_module = parent_module,
+                                        .file_uri = inst_file->uri,
+                                        .entry = inst});
+    }
+    return children;
 }
 
 static std::unordered_map<std::string, ResolvedInst> route_hierarchy_map(
@@ -1408,9 +1505,11 @@ find_current_file_instance(const std::vector<FileView>& files, const std::string
 
 } // namespace
 
-std::string connect_info_json(const Analyzer& analyzer, const std::string& uri) {
+std::string connect_info_json(const Analyzer& analyzer, const std::string& uri,
+                              bool lazy_hierarchy) {
     auto files = collect_files(analyzer, uri);
-    auto hierarchy = build_hierarchy(files);
+    const auto hierarchy = lazy_hierarchy ? std::unordered_map<std::string, ResolvedInst>{}
+                                          : build_hierarchy(files);
     std::string out = "{\"modules\":{";
     bool first_mod = true;
     for (const auto& file : files) {
@@ -1426,13 +1525,55 @@ std::string connect_info_json(const Analyzer& analyzer, const std::string& uri) 
                 if (!first_inst)
                     out += ",";
                 first_inst = false;
-                out += "{\"inst_name\":" + q(inst.inst_name) + ",\"hierarchical_path\":" + q(path) +
-                       ",\"file_uri\":" + q(inst.file_uri) + "}";
+                out += resolved_inst_json(inst);
             }
             out += "]}";
         }
     }
-    out += "}}";
+    out += "}";
+    if (lazy_hierarchy) {
+        out += ",\"roots\":[";
+        bool first_root = true;
+        for (const auto& [file, module] : find_hierarchy_roots(files)) {
+            if (!first_root)
+                out += ",";
+            first_root = false;
+            out += root_json(*file, *module);
+        }
+        out += "]";
+    }
+    out += "}";
+    return out;
+}
+
+std::string connect_hierarchy_children_json(const Analyzer& analyzer, const std::string& uri,
+                                            const std::string& parent_path) {
+    auto files = collect_files(analyzer, uri);
+    if (parent_path.empty()) {
+        std::string out = "{\"children\":[";
+        bool first = true;
+        for (const auto& [file, module] : find_hierarchy_roots(files)) {
+            if (!first)
+                out += ",";
+            first = false;
+            out += root_json(*file, *module);
+        }
+        out += "]}";
+        return out;
+    }
+
+    std::string error;
+    auto children = hierarchy_children_for_path(files, parent_path, error);
+    if (!error.empty())
+        return "{\"error\":" + q(error) + "}";
+
+    std::string out = "{\"children\":[";
+    for (size_t i = 0; i < children.size(); ++i) {
+        if (i)
+            out += ",";
+        out += resolved_inst_json(children[i]);
+    }
+    out += "]}";
     return out;
 }
 
