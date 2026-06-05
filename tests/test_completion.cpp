@@ -4,6 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <filesystem>
 #include <fstream>
+#include <vector>
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -41,6 +42,19 @@ static std::pair<int, int> pos_of(const std::string& text, std::string_view need
     return {line, col};
 }
 
+static std::pair<int, int> pos_after(const std::string& text, std::string_view needle) {
+    auto [line, col] = pos_of(text, needle);
+    for (const char ch : needle) {
+        if (ch == '\n') {
+            ++line;
+            col = 0;
+        } else {
+            ++col;
+        }
+    }
+    return {line, col};
+}
+
 static CompletionList complete_at(CompletionEngine& engine, Analyzer& analyzer,
                                    const std::string& uri, int line, int col) {
     lsTextDocumentPositionParams params;
@@ -50,6 +64,89 @@ static CompletionList complete_at(CompletionEngine& engine, Analyzer& analyzer,
     auto state = analyzer.get_state(uri);
     REQUIRE(state != nullptr);
     return engine.complete(params, *state, analyzer, tok);
+}
+
+struct SyntheticUvmFixture {
+    std::filesystem::path root;
+    std::filesystem::path package_file;
+    std::filesystem::path macro_header;
+    std::vector<std::string> files;
+    std::vector<std::string> include_dirs;
+};
+
+static void write_text_file(const std::filesystem::path& path, std::string_view text) {
+    std::ofstream out(path);
+    REQUIRE(out.good());
+    out << text;
+    REQUIRE(out.good());
+}
+
+static SyntheticUvmFixture make_synthetic_uvm_fixture(std::string_view name) {
+    SyntheticUvmFixture setup;
+    setup.root = std::filesystem::temp_directory_path() /
+                 ("lazyverilog_completion_" + std::string(name));
+    std::filesystem::create_directories(setup.root);
+
+    setup.package_file = setup.root / "uvm_pkg.sv";
+    setup.macro_header = setup.root / "uvm_macros.svh";
+
+    // These tests intentionally use a tiny synthetic package instead of any
+    // repository fixture or downloaded UVM tree.  It contains only the
+    // declarations needed to exercise the same completion paths a real UVM
+    // installation uses:
+    //
+    //   - project-indexed package members for `uvm_pkg::...`;
+    //   - a parameterized class for `uvm_config_db#(...)::...`; and
+    //   - an include-resolved macro header for backtick macro completion.
+    //
+    // Keeping the fixture local to /tmp makes the tests hermetic while still
+    // proving that there is no special hard-coded UVM completion provider.
+    write_text_file(setup.package_file,
+                    "package uvm_pkg;\n"
+                    "  class uvm_object;\n"
+                    "  endclass\n"
+                    "  class uvm_component extends uvm_object;\n"
+                    "  endclass\n"
+                    "  class uvm_sequence_item extends uvm_object;\n"
+                    "  endclass\n"
+                    "  class uvm_env extends uvm_component;\n"
+                    "  endclass\n"
+                    "  class uvm_phase;\n"
+                    "  endclass\n"
+                    "  class uvm_config_db #(type T = int);\n"
+                    "    static function bit get();\n"
+                    "      return 1'b0;\n"
+                    "    endfunction\n"
+                    "    static function void set();\n"
+                    "    endfunction\n"
+                    "    static function bit exists();\n"
+                    "      return 1'b0;\n"
+                    "    endfunction\n"
+                    "    static task wait_modified();\n"
+                    "    endtask\n"
+                    "  endclass\n"
+                    "endpackage\n");
+
+    write_text_file(setup.macro_header,
+                    "`define uvm_object_utils(T)\n"
+                    "`define uvm_component_utils(T)\n"
+                    "`define uvm_info(ID, MSG, VERBOSITY)\n"
+                    "`define uvm_warning(ID, MSG)\n"
+                    "`define uvm_error(ID, MSG)\n"
+                    "`define uvm_fatal(ID, MSG)\n");
+
+    setup.files.push_back(std::filesystem::absolute(setup.package_file)
+                              .lexically_normal()
+                              .string());
+    setup.include_dirs.push_back(std::filesystem::absolute(setup.root)
+                                     .lexically_normal()
+                                     .string());
+    return setup;
+}
+
+static void configure_synthetic_uvm_index(Analyzer& analyzer, const SyntheticUvmFixture& setup) {
+    analyzer.set_include_dirs(setup.include_dirs);
+    analyzer.set_extra_files(setup.files);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -369,7 +466,7 @@ TEST_CASE("completion: NamedPort works after previous last connection line", "[c
     Analyzer analyzer;
     const std::string uri = "file:///tmp/completion_after_last_connection.sv";
 
-    // This mirrors editing below the final connection in demo/memory_top.sv:
+    // This mirrors editing below the final named-port connection in an instance:
     // the previous line has a complete ".o_data(...)" connection and no
     // trailing comma yet.  Completion context detection should still climb out
     // of the connection expression parentheses, find the enclosing instance
@@ -1099,81 +1196,115 @@ TEST_CASE("completion: package scope works inside procedural block", "[completio
     CHECK(has_label(result, "uvm_object"));
 }
 
-TEST_CASE("completion: demo UVM package scope returns indexed UVM symbols", "[completion]") {
+TEST_CASE("completion: UVM-like package scope returns indexed symbols", "[completion]") {
     CompletionEngine engine;
     Analyzer analyzer;
 
-    auto root = std::filesystem::current_path();
-    if (!std::filesystem::exists(root / "demo") && std::filesystem::exists(root.parent_path() / "demo"))
-        root = root.parent_path();
-    const auto demo_file = root / "demo" / "uvm_completion_demo.sv";
-    const auto vcode = root / "demo" / "vcode.f";
-    REQUIRE(std::filesystem::exists(demo_file));
-    REQUIRE(std::filesystem::exists(vcode));
+    const auto setup = make_synthetic_uvm_fixture("uvm_pkg_scope_basic");
+    configure_synthetic_uvm_index(analyzer, setup);
 
-    // Mirror the real demo setup: UVM is intentionally treated like any other
-    // source library.  vcode.f lists uvm_pkg.sv as the explicit source and
-    // +incdir+ points slang at the headers included by that package.
-    std::vector<std::string> files;
-    std::vector<std::string> include_dirs;
-    std::ifstream filelist(vcode);
-    REQUIRE(filelist.good());
-    std::string filelist_line;
-    while (std::getline(filelist, filelist_line)) {
-        if (auto pos = filelist_line.find("//"); pos != std::string::npos)
-            filelist_line.erase(pos);
-        if (auto pos = filelist_line.find('#'); pos != std::string::npos)
-            filelist_line.erase(pos);
-        auto first = filelist_line.find_first_not_of(" \t\r\n");
-        if (first == std::string::npos)
-            continue;
-        auto last = filelist_line.find_last_not_of(" \t\r\n");
-        auto item = filelist_line.substr(first, last - first + 1);
-        if (item.starts_with("+incdir+")) {
-            std::string rest = item.substr(std::string("+incdir+").size());
-            size_t start = 0;
-            while (start <= rest.size()) {
-                const size_t plus = rest.find('+', start);
-                auto dir_text = rest.substr(start, plus == std::string::npos
-                                                       ? std::string::npos
-                                                       : plus - start);
-                if (!dir_text.empty()) {
-                    auto dir = std::filesystem::path(dir_text);
-                    if (dir.is_relative())
-                        dir = vcode.parent_path() / dir;
-                    include_dirs.push_back(std::filesystem::absolute(dir).lexically_normal().string());
-                }
-                if (plus == std::string::npos)
-                    break;
-                start = plus + 1;
-            }
-            continue;
-        }
-        if (item.starts_with("+") || item.starts_with("-"))
-            continue;
-        auto path = std::filesystem::path(item);
-        if (path.is_relative())
-            path = vcode.parent_path() / path;
-        files.push_back(std::filesystem::absolute(path).lexically_normal().string());
-    }
-    REQUIRE(!files.empty());
-    REQUIRE(!include_dirs.empty());
-    analyzer.set_include_dirs(include_dirs);
-    analyzer.set_extra_files(files);
-
-    std::ifstream input(demo_file);
-    REQUIRE(input.good());
-    const std::string text((std::istreambuf_iterator<char>(input)),
-                           std::istreambuf_iterator<char>());
-    const std::string uri = "file://" + demo_file.string();
+    const std::string uri = "file:///tmp/completion_uvm_pkg_scope_basic.sv";
+    const std::string text =
+        "module top;\n"
+        "    initial begin\n"
+        "        uvm_pkg::\n"
+        "    end\n"
+        "endmodule\n";
     analyzer.open(uri, text);
 
-    auto [line, col] = pos_of(text, "uvm_pkg::");
-    auto result = complete_at(engine, analyzer, uri, line,
-                              col + (int)std::string("uvm_pkg::").size());
+    auto [line, col] = pos_after(text, "        uvm_pkg::");
+    auto result = complete_at(engine, analyzer, uri, line, col);
 
     CHECK(has_label(result, "uvm_object"));
     CHECK(has_label(result, "uvm_component"));
+}
+
+TEST_CASE("completion: UVM-like macro prefix returns macros from included headers", "[completion]") {
+    CompletionEngine engine;
+    Analyzer analyzer;
+
+    const auto setup = make_synthetic_uvm_fixture("uvm_macro_prefix");
+    configure_synthetic_uvm_index(analyzer, setup);
+
+    const std::string uri = "file:///tmp/completion_uvm_macro_prefix.sv";
+    const std::string text =
+        "`include \"uvm_macros.svh\"\n"
+        "import uvm_pkg::*;\n"
+        "class local_item extends uvm_object;\n"
+        "  `uvm_\n"
+        "endclass\n";
+    analyzer.open(uri, text);
+
+    // UVM macros are not package members, so this fixture includes the synthetic
+    // UVM macro header explicitly and relies on the synthetic include directory
+    // to resolve it.  Completing after a typed backtick prefix must then surface
+    // those macros as ordinary macro completions, without mixing in UVM classes.
+    auto [line, col] = pos_after(text, "  `uvm_");
+    auto result = complete_at(engine, analyzer, uri, line, col);
+
+    CHECK(has_label(result, "uvm_object_utils"));
+    CHECK(has_label(result, "uvm_component_utils"));
+    CHECK(has_label(result, "uvm_info"));
+    CHECK(has_label(result, "uvm_warning"));
+    CHECK(has_label(result, "uvm_error"));
+    CHECK(has_label(result, "uvm_fatal"));
+    CHECK_FALSE(has_label(result, "uvm_object"));
+}
+
+TEST_CASE("completion: UVM-like package scope returns expected package symbols", "[completion]") {
+    CompletionEngine engine;
+    Analyzer analyzer;
+
+    const auto setup = make_synthetic_uvm_fixture("uvm_pkg_scope_expected");
+    configure_synthetic_uvm_index(analyzer, setup);
+
+    const std::string uri = "file:///tmp/completion_uvm_package_scope_expected.sv";
+    const std::string text =
+        "module top;\n"
+        "    initial begin\n"
+        "        uvm_pkg::\n"
+        "    end\n"
+        "endmodule\n";
+    analyzer.open(uri, text);
+
+    auto [line, col] = pos_after(text, "        uvm_pkg::");
+    auto result = complete_at(engine, analyzer, uri, line, col);
+
+    CHECK(has_label(result, "uvm_object"));
+    CHECK(has_label(result, "uvm_component"));
+    CHECK(has_label(result, "uvm_sequence_item"));
+    CHECK(has_label(result, "uvm_env"));
+    CHECK(has_label(result, "uvm_phase"));
+    CHECK(has_label(result, "uvm_config_db"));
+}
+
+TEST_CASE("completion: UVM-like parameterized class scope returns static methods", "[completion]") {
+    CompletionEngine engine;
+    Analyzer analyzer;
+
+    const auto setup = make_synthetic_uvm_fixture("uvm_config_db_static");
+    configure_synthetic_uvm_index(analyzer, setup);
+
+    const std::string uri = "file:///tmp/completion_uvm_config_db_static.sv";
+    const std::string text =
+        "import uvm_pkg::*;\n"
+        "module top;\n"
+        "    initial begin\n"
+        "        uvm_config_db#(uvm_object)::\n"
+        "    end\n"
+        "endmodule\n";
+    analyzer.open(uri, text);
+
+    // uvm_config_db is a parameterized class in the indexed UVM package.  The
+    // completion engine should resolve the package class, ignore the concrete
+    // type parameter for lookup purposes, and then return static class methods.
+    auto [line, col] = pos_after(text, "        uvm_config_db#(uvm_object)::");
+    auto result = complete_at(engine, analyzer, uri, line, col);
+
+    CHECK(has_label(result, "get"));
+    CHECK(has_label(result, "set"));
+    CHECK(has_label(result, "exists"));
+    CHECK(has_label(result, "wait_modified"));
 }
 
 TEST_CASE("completion: parameterized class scope returns static methods", "[completion]") {

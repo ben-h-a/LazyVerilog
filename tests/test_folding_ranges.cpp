@@ -2,7 +2,9 @@
 #include "features/folding_range.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <algorithm>
+#include <fstream>
 #include <map>
+#include <sstream>
 #include <tuple>
 
 static FoldingRangeRequestParams make_params(const std::string& uri) {
@@ -32,6 +34,13 @@ static const FoldingRange* find_fold_kind(const std::vector<FoldingRange>& folds
     return it == folds.end() ? nullptr : &*it;
 }
 
+static bool has_fold_starting_at_and_ending_after(const std::vector<FoldingRange>& folds,
+                                                  int start, int after) {
+    return std::any_of(folds.begin(), folds.end(), [&](const FoldingRange& r) {
+        return r.startLine == start && r.endLine > after;
+    });
+}
+
 static bool has_exact_duplicate_fold(const std::vector<FoldingRange>& folds) {
     std::map<std::tuple<int, int, std::string>, int> seen;
     for (const auto& f : folds) {
@@ -39,6 +48,33 @@ static bool has_exact_duplicate_fold(const std::vector<FoldingRange>& folds) {
         if (++seen[key] > 1) return true;
     }
     return false;
+}
+
+static std::string read_demo_folding_file() {
+    for (const char* path : {"demo/folding_demo.sv", "../demo/folding_demo.sv"}) {
+        std::ifstream in(path);
+        if (!in)
+            continue;
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        return ss.str();
+    }
+    return {};
+}
+
+static int find_line_containing(const std::string& text, const std::string& needle) {
+    int line = 0;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t end = text.find('\n', pos);
+        if (end == std::string::npos)
+            end = text.size();
+        if (text.substr(pos, end - pos).find(needle) != std::string::npos)
+            return line;
+        pos = end + 1;
+        ++line;
+    }
+    return -1;
 }
 
 // ── module body ───────────────────────────────────────────────────────────
@@ -881,4 +917,185 @@ endmodule
     CHECK(has_fold(folds, 1, 4));
     // Module still folds
     CHECK(has_fold(folds, 0, 5));
+}
+
+// ── module headers and declaration runs ──────────────────────────────────────
+
+TEST_CASE("foldingRange: parameterized module folds parameter list port list and declarations",
+          "[folding]") {
+    Analyzer    analyzer;
+    std::string uri = "file:///tmp/fold_parameterized_header_and_decls.sv";
+    analyzer.open(uri, R"(module folding_demo #(
+    parameter int WIDTH = 8,
+    parameter int DEPTH = 16,
+    parameter int STAGES = 3
+)(
+    input     logic                   clk,
+    input     logic                   rst_n,
+    input     logic [WIDTH-1:0]       data_in,
+    input     logic                   valid_in,
+    output    logic [WIDTH-1:0]       data_out,
+    output    logic                   valid_out
+);
+
+logic               [WIDTH-1:0]         pipe_data[STAGES]                   ;
+logic                                   pipe_vld[STAGES]                    ;
+logic               [WIDTH-1:0]         selected_data                       ;
+endmodule
+)");
+    auto folds = provide_folding_range(analyzer, make_params(uri));
+
+    // Pretty expected fold map for the user-facing example:
+    //   region [0,3]   module parameter port list "#(...)", excluding the
+    //                  shared ")(" delimiter line for Neovim's line fold model.
+    //   region [5,10]  ANSI port list "(...)", excluding both delimiter lines.
+    //   region [13,15] consecutive module-scoped declarations
+    //   region [11,16] module/body fold starts at the header terminator line.
+    //
+    // LSP can describe exact column-delimited folds, but Neovim's built-in
+    // foldexpr merges adjacent line ranges like [0,4] + [4,11] + [11,16].
+    // These intentionally non-touching header folds keep zc on the header from
+    // collapsing the whole module.
+    CHECK(has_fold(folds, 0, 3));
+    CHECK(has_fold(folds, 5, 10));
+    CHECK_FALSE(has_fold(folds, 0, 11));
+    CHECK_FALSE(has_fold_starting_at_and_ending_after(folds, 0, 11));
+    CHECK(has_fold(folds, 13, 15));
+    CHECK(has_fold(folds, 11, 16));
+}
+
+TEST_CASE("foldingRange: demo folding_demo header splits parameter and port lists",
+          "[folding]") {
+    Analyzer    analyzer;
+    std::string uri = "file:///tmp/fold_demo_fixture.sv";
+    std::string text = read_demo_folding_file();
+    REQUIRE(!text.empty());
+
+    int module_line = find_line_containing(text, "module folding_demo #(");
+    REQUIRE(module_line >= 0);
+
+    analyzer.open(uri, text);
+    auto folds = provide_folding_range(analyzer, make_params(uri));
+
+    CHECK(has_fold(folds, module_line, module_line + 3));
+    CHECK(has_fold(folds, module_line + 5, module_line + 10));
+    CHECK_FALSE(has_fold(folds, module_line, module_line + 11));
+    CHECK_FALSE(has_fold_starting_at_and_ending_after(
+        folds, module_line, module_line + 11));
+}
+
+TEST_CASE("foldingRange: varied semicolon declarations fold as one consecutive run",
+          "[folding]") {
+    Analyzer    analyzer;
+    std::string uri = "file:///tmp/fold_varied_declaration_run.sv";
+    analyzer.open(uri, R"(module top;
+    localparam int WIDTH = 8;
+    wire [WIDTH-1:0] data_w;
+    var logic        explicit_v;
+    reg              data_q;
+    integer          loop_i;
+    time             last_seen;
+    supply0          tie_low;
+endmodule
+)");
+    auto folds = provide_folding_range(analyzer, make_params(uri));
+
+    // A declaration run should include parameter, net, variable, integer/time,
+    // explicit "var", and supply net declarations instead of only "logic"
+    // declarations.
+    CHECK(has_fold(folds, 1, 7));
+}
+
+TEST_CASE("foldingRange: declaration runs stop at non-declaration statements",
+          "[folding]") {
+    Analyzer    analyzer;
+    std::string uri = "file:///tmp/fold_declaration_run_break.sv";
+    analyzer.open(uri, R"(module top;
+    logic a;
+    logic b;
+    assign b = a;
+    logic c;
+    logic d;
+endmodule
+)");
+    auto folds = provide_folding_range(analyzer, make_params(uri));
+
+    // The assign statement is deliberately not folded into the declaration
+    // range, and it breaks the two declaration groups into independent folds.
+    CHECK(has_fold(folds, 1, 2));
+    CHECK(has_fold(folds, 4, 5));
+    CHECK_FALSE(has_fold(folds, 1, 5));
+}
+
+TEST_CASE("foldingRange: user-defined type declarations join declaration runs",
+          "[folding]") {
+    Analyzer    analyzer;
+    std::string uri = "file:///tmp/fold_user_type_declarations.sv";
+    analyzer.open(uri, R"(package types_pkg;
+    typedef struct packed {
+        logic valid;
+        logic [7:0] data;
+    } payload_t;
+endpackage
+
+module top;
+    typedef enum logic [1:0] {
+        IDLE,
+        BUSY
+    } state_e;
+
+    state_e              state_q;
+    types_pkg::payload_t payload_q;
+    logic                valid_q;
+endmodule
+)");
+    auto folds = provide_folding_range(analyzer, make_params(uri));
+
+    // The final declaration run must include the two identifier-led
+    // user-defined declarations as well as the keyword-led logic declaration.
+    // Lexically guessing "state_e state_q;" would be unsafe because a similar
+    // token sequence can be an instantiation; the implementation uses AST
+    // declaration nodes for this active-code case.
+    CHECK(has_fold_kind(folds, 13, 15, "declarations"));
+}
+
+TEST_CASE("foldingRange: AST folds from included files are not emitted for current document",
+          "[folding]") {
+    const std::string include_path = "/tmp/lazyverilog_folding_include.svh";
+    {
+        std::ofstream out(include_path);
+        out << R"(module included_fold_target #(
+    parameter int W = 8
+)(
+    input logic clk
+);
+    included_type_t from_include;
+    included_type_t also_from_include;
+endmodule
+)";
+    }
+
+    Analyzer    analyzer;
+    std::string uri = "file:///tmp/fold_include_owner.sv";
+    std::string text = R"(`include "lazyverilog_folding_include.svh"
+
+module current_top;
+    logic a;
+    logic b;
+endmodule
+)";
+    analyzer.open(uri, text);
+    auto folds = provide_folding_range(analyzer, make_params(uri));
+
+    const int current_line_count = 6;
+    for (const auto& fold : folds) {
+        CHECK(fold.startLine >= 0);
+        CHECK(fold.endLine < current_line_count);
+    }
+
+    // The current file's own declaration run remains available, but declaration
+    // and header folds from the included file must not be reported in this
+    // document's coordinates.
+    CHECK(has_fold_kind(folds, 3, 4, "declarations"));
+    CHECK_FALSE(has_fold(folds, 0, 4));
 }
