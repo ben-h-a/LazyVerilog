@@ -282,6 +282,57 @@ endmodule
     std::filesystem::remove(closed_path);
 }
 
+TEST_CASE("references: module-local subroutine excludes same-name closed project subroutine",
+          "[references]") {
+    const std::string current = R"(module top;
+    function int calc();
+        return 1;
+    endfunction
+
+    initial begin
+        int value = calc();
+    end
+endmodule
+)";
+    const std::string closed = R"(function int calc();
+    return 2;
+endfunction
+
+module other;
+    initial begin
+        int value = calc();
+    end
+endmodule
+)";
+
+    const auto closed_path =
+        std::filesystem::temp_directory_path() / "lazyverilog_refs_closed_global_calc.sv";
+    {
+        std::ofstream out(closed_path);
+        REQUIRE(out.good());
+        out << closed;
+    }
+
+    Analyzer analyzer;
+    analyzer.set_extra_files({closed_path.string()});
+    analyzer.wait_for_background_index_idle();
+    const std::string uri = "file:///tmp/lazyverilog_refs_current_local_calc.sv";
+    analyzer.open(uri, current);
+
+    const auto [line, col] = find_position_after(current, "calc", "function int");
+    const auto refs = analyzer.find_references(uri, line, col, true);
+
+    REQUIRE(refs.size() == 2);
+    for (const auto& ref : refs)
+        CHECK(ref.uri == uri);
+    CHECK(refs[0].line == 1);
+    CHECK(refs[0].col == 17);
+    CHECK(refs[1].line == 6);
+    CHECK(refs[1].col == 20);
+
+    std::filesystem::remove(closed_path);
+}
+
 TEST_CASE("references: typedef struct fields with same name stay separate", "[references]") {
     const std::string text = R"(typedef struct {
     logic [7:0] addr;

@@ -1715,7 +1715,15 @@ std::vector<Location> Analyzer::find_references(const std::string& uri, int line
         if (target_def->uri == uri) {
             if (auto id = symbol_id_for_index_location(current_structural_index, *target_def, true);
                 id && id->starts_with("name:")) {
-                fallback_symbol_debug = *id;
+                // Do not use unresolved `name:<identifier>` as a bridge from an
+                // open buffer into closed project shards.  The open-buffer AST
+                // path below can verify same-definition references precisely,
+                // but a closed shard cannot distinguish scopes for generic
+                // names such as a module-local function `calc` versus an
+                // unrelated global `calc`.  Owner-qualified SymbolIDs above
+                // still enable scalable cross-file references for modules,
+                // ports, parameters, typedef fields, macros, etc.
+                fallback_symbol_debug.clear();
             }
         }
         if (fallback_symbol_debug.empty()) {
