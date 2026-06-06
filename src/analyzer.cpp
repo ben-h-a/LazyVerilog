@@ -2799,7 +2799,7 @@ void Analyzer::background_index_loop(std::stop_token stop) const {
                             .index = std::make_shared<SyntaxIndex>(std::move(live_index)),
                         };
                         invalidate_extra_snapshots_locked();
-                        background_publish_requested_ = true;
+                        schedule_background_project_publish_locked();
                     }
                 }
             }
@@ -2844,15 +2844,14 @@ void Analyzer::background_index_loop(std::stop_token stop) const {
             };
             invalidate_extra_snapshots_locked();
 
-            // ProjectIndex is an immutable merged view derived from shards.
-            // Do not rebuild that merged view after every single file while the
-            // initial .f cache is warming: doing so repeatedly merges all shards
-            // seen so far (1 + 2 + ... + N work for N files). Mark a publish as
-            // pending once the queue drains. Open-buffer shard replacement uses
-            // schedule_background_project_publish_locked(), which remains able
-            // to request an earlier publish without making every disk-backed
-            // filelist shard rebuild the merged index.
-            background_publish_requested_ = background_pending_files_.empty();
+            // ProjectIndex is an immutable view derived from per-file shards.
+            // Do not publish after every single file while the initial .f cache
+            // is warming: that would repeatedly notify downstream features for
+            // partially warmed snapshots.  Request one debounced publish only
+            // after the queue drains so [design].project_index_publish_debounce_ms
+            // applies consistently to disk-backed reindex and live edit paths.
+            if (background_pending_files_.empty())
+                schedule_background_project_publish_locked();
             background_index_active_ = false;
             background_cv_.notify_all();
         }
