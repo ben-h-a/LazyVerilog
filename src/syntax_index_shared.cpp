@@ -342,6 +342,7 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
     std::unordered_set<std::string> ambiguous_enum_members;
     std::unordered_map<std::string, std::string> unique_type_ids;
     std::unordered_set<std::string> ambiguous_type_names;
+    std::unordered_map<std::string, std::string> package_type_ids;
     std::unordered_set<std::string> declared_subroutines;
 
     for (const auto& value : index.values) {
@@ -364,8 +365,10 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
         const std::string class_scope =
             cls.parent_scope.empty() ? cls.name : cls.parent_scope + "::" + cls.name;
         const auto class_id = symbol_canonical("class", cls.parent_scope, cls.name);
-        if (!ambiguous_type_names.contains(cls.name) &&
-            !unique_type_ids.try_emplace(cls.name, class_id).second) {
+        if (!cls.parent_scope.empty() && index.package_names.contains(cls.parent_scope)) {
+            package_type_ids.try_emplace(cls.parent_scope + "\n" + cls.name, class_id);
+        } else if (!ambiguous_type_names.contains(cls.name) &&
+                   !unique_type_ids.try_emplace(cls.name, class_id).second) {
             unique_type_ids.erase(cls.name);
             ambiguous_type_names.insert(cls.name);
         }
@@ -375,8 +378,10 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
 
     for (const auto& td : index.typedefs) {
         const auto typedef_id = symbol_canonical("typedef", td.parent_scope, td.name);
-        if (!ambiguous_type_names.contains(td.name) &&
-            !unique_type_ids.try_emplace(td.name, typedef_id).second) {
+        if (!td.parent_scope.empty() && index.package_names.contains(td.parent_scope)) {
+            package_type_ids.try_emplace(td.parent_scope + "\n" + td.name, typedef_id);
+        } else if (!ambiguous_type_names.contains(td.name) &&
+                   !unique_type_ids.try_emplace(td.name, typedef_id).second) {
             unique_type_ids.erase(td.name);
             ambiguous_type_names.insert(td.name);
         }
@@ -623,6 +628,7 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
         const std::unordered_map<std::string, std::string>& unique_typedef_scopes;
         const std::unordered_map<std::string, std::string>& unique_enum_member_ids;
         const std::unordered_map<std::string, std::string>& unique_type_ids;
+        const std::unordered_map<std::string, std::string>& package_type_ids;
         const std::unordered_set<std::string>& declared_subroutines;
         const decltype(module_owner_kind)& module_kind_fn;
         const decltype(resolve_subroutine_owner_from_qualified_name)& resolve_subroutine_owner;
@@ -630,6 +636,13 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
         SubroutineOwnerKind current_module_kind{SubroutineOwnerKind::Module};
         std::string current_package;
         std::string current_class;
+
+        struct TypeImport {
+            std::string package_name;
+            std::string symbol_name;
+            bool wildcard{false};
+        };
+        std::vector<TypeImport> visible_type_imports;
 
         Visitor(SyntaxIndex& index, const slang::SourceManager& sm,
                 decltype(add_reference)& add_reference,
@@ -641,6 +654,7 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
                 const std::unordered_map<std::string, std::string>& unique_typedef_scopes,
                 const std::unordered_map<std::string, std::string>& unique_enum_member_ids,
                 const std::unordered_map<std::string, std::string>& unique_type_ids,
+                const std::unordered_map<std::string, std::string>& package_type_ids,
                 const std::unordered_set<std::string>& declared_subroutines,
                 const decltype(module_owner_kind)& module_owner_kind,
                 const decltype(resolve_subroutine_owner_from_qualified_name)& resolve_subroutine_owner)
@@ -649,7 +663,8 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
               class_fields(class_fields), typedef_fields(typedef_fields),
               unique_typedef_scopes(unique_typedef_scopes),
               unique_enum_member_ids(unique_enum_member_ids), unique_type_ids(unique_type_ids),
-              declared_subroutines(declared_subroutines), module_kind_fn(module_owner_kind),
+              package_type_ids(package_type_ids), declared_subroutines(declared_subroutines),
+              module_kind_fn(module_owner_kind),
               resolve_subroutine_owner(resolve_subroutine_owner) {}
 
         void handle(const ModuleDeclarationSyntax& node) {
@@ -660,6 +675,7 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
             auto previous_module = current_module;
             auto previous_module_kind = current_module_kind;
             auto previous_package = current_package;
+            const auto import_stack_size = visible_type_imports.size();
             if (node.kind == SyntaxKind::PackageDeclaration) {
                 current_package = module_name;
                 current_module.clear();
@@ -672,16 +688,19 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
             current_module = std::move(previous_module);
             current_module_kind = std::move(previous_module_kind);
             current_package = std::move(previous_package);
+            visible_type_imports.resize(import_stack_size);
         }
 
         void handle(const CheckerDeclarationSyntax& node) {
             auto previous_module = current_module;
             auto previous_module_kind = current_module_kind;
+            const auto import_stack_size = visible_type_imports.size();
             current_module = std::string(node.name.valueText());
             current_module_kind = SubroutineOwnerKind::Checker;
             visitDefault(node);
             current_module = std::move(previous_module);
             current_module_kind = std::move(previous_module_kind);
+            visible_type_imports.resize(import_stack_size);
         }
 
         void handle(const ClassDeclarationSyntax& node) {
@@ -691,12 +710,14 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
                 add_ref(node.name, symbol_canonical("class", parent_scope, class_name));
 
             auto previous_class = current_class;
+            const auto import_stack_size = visible_type_imports.size();
             if (!current_class.empty())
                 current_class += "::" + class_name;
             else
                 current_class = parent_scope.empty() ? class_name : parent_scope + "::" + class_name;
             visitDefault(node);
             current_class = std::move(previous_class);
+            visible_type_imports.resize(import_stack_size);
         }
 
         std::optional<std::string> subroutine_id_for_unqualified_name(std::string_view name) const {
@@ -781,11 +802,66 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
             visitDefault(node);
         }
 
+        void handle(const PackageImportDeclarationSyntax& node) {
+            // Track package imports for syntactic type references.  Without an
+            // import, `state_t` outside `package cpu_pkg` must not be treated as
+            // `cpu_pkg::state_t`; with `import cpu_pkg::*;` or
+            // `import cpu_pkg::state_t;`, the unqualified spelling is intended
+            // to name the package type.  The stack is scoped by the surrounding
+            // module/class/package handlers above.
+            for (const auto* item : node.items) {
+                if (!item)
+                    continue;
+                TypeImport import;
+                import.package_name = std::string(item->package.valueText());
+                import.wildcard = item->item.kind == slang::parsing::TokenKind::Star;
+                if (!import.wildcard)
+                    import.symbol_name = std::string(item->item.valueText());
+                if (!import.package_name.empty())
+                    visible_type_imports.push_back(std::move(import));
+            }
+            visitDefault(node);
+        }
+
+        std::optional<std::string> imported_type_id_for_unqualified_name(
+            std::string_view name) const {
+            for (auto it = visible_type_imports.rbegin(); it != visible_type_imports.rend(); ++it) {
+                if (!it->wildcard && it->symbol_name != name)
+                    continue;
+                const auto type_it =
+                    package_type_ids.find(it->package_name + "\n" + std::string(name));
+                if (type_it != package_type_ids.end())
+                    return type_it->second;
+            }
+            return std::nullopt;
+        }
+
         void handle(const TypedefDeclarationSyntax& node) {
             const std::string typedef_name(node.name.valueText());
             const std::string parent_scope = !current_package.empty() ? current_package : std::string{};
             if (!typedef_name.empty())
                 add_ref(node.name, symbol_canonical("typedef", parent_scope, typedef_name));
+            visitDefault(node);
+        }
+
+        void handle(const ScopedNameSyntax& node) {
+            // Package-scoped types must be referenced with their package scope
+            // or through a tracked package import.  Do not let the generic
+            // token visitor below turn every unqualified `state_t` in an
+            // including module into `cpu_pkg::state_t`; that was
+            // the stale-reference bug where find-references on a package typedef
+            // reported unrelated module-local text with the same spelling.
+            const auto scope = render_syntax_node_text(sm, *node.left);
+            const auto name_token = last_identifier_token(*node.right);
+            if (!scope.empty() && name_token) {
+                const std::string name(name_token.valueText());
+                if (const auto it = package_type_ids.find(scope + "\n" + name);
+                    it != package_type_ids.end()) {
+                    add_ref(name_token, it->second);
+                    node.left->visit(*this);
+                    return;
+                }
+            }
             visitDefault(node);
         }
 
@@ -928,6 +1004,17 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
                     return;
                 }
             }
+            if (!current_package.empty()) {
+                if (const auto type_it = package_type_ids.find(current_package + "\n" + name);
+                    type_it != package_type_ids.end()) {
+                    add_ref(token, type_it->second);
+                    return;
+                }
+            }
+            if (auto imported_id = imported_type_id_for_unqualified_name(name)) {
+                add_ref(token, *imported_id);
+                return;
+            }
             if (const auto type_it = unique_type_ids.find(name); type_it != unique_type_ids.end()) {
                 add_ref(token, type_it->second);
                 return;
@@ -943,7 +1030,7 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
 
     Visitor visitor(index, sm, add_reference, module_values, module_value_types, package_values,
                     class_fields, typedef_fields, unique_typedef_scopes, unique_enum_member_ids,
-                    unique_type_ids, declared_subroutines, module_owner_kind,
+                    unique_type_ids, package_type_ids, declared_subroutines, module_owner_kind,
                     resolve_subroutine_owner_from_qualified_name);
     root.visit(visitor);
 }

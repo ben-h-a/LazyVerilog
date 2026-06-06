@@ -579,6 +579,7 @@ endpackage
 )";
     const std::string use = R"(`include "params.svh"
 module memory;
+    import cpu_pkg::*;
     states_t state;
     always_comb state = states_t::IDLE;
 endmodule
@@ -616,6 +617,62 @@ endmodule
     std::filesystem::remove(dir);
 }
 
+
+TEST_CASE("references: package typedef excludes unimported includer uses", "[references]") {
+    const auto dir = std::filesystem::temp_directory_path() / "lazyverilog_refs_unimported_pkg_typedef";
+    std::filesystem::create_directories(dir);
+
+    const auto header_path = dir / "params.svh";
+    const auto use_path = dir / "memory.sv";
+
+    const std::string header = R"(package cpu_pkg;
+typedef enum logic [1:0] {
+    IDLE,
+    FETCH
+} state_t;
+endpackage
+)";
+    const std::string use = R"(`include "params.svh"
+module memory;
+    state_t state;
+    always_comb state = state_t::IDLE;
+endmodule
+)";
+
+    {
+        std::ofstream out(header_path);
+        REQUIRE(out.good());
+        out << header;
+    }
+    {
+        std::ofstream out(use_path);
+        REQUIRE(out.good());
+        out << use;
+    }
+
+    Analyzer analyzer;
+    analyzer.set_include_dirs({dir.string()});
+    analyzer.set_extra_files({use_path.string()});
+    analyzer.wait_for_background_index_idle();
+
+    const auto header_uri = uri_from_path(header_path);
+    const auto use_uri = uri_from_path(use_path);
+    analyzer.open(header_uri, header);
+
+    const auto [line, col] = find_position(header, "state_t");
+    const auto refs = analyzer.find_references(header_uri, line, col, true);
+
+    REQUIRE(refs.size() == 1);
+    CHECK(refs[0].uri == header_uri);
+    CHECK(std::none_of(refs.begin(), refs.end(), [&](const Location& ref) {
+        return ref.uri == use_uri;
+    }));
+
+    std::filesystem::remove(use_path);
+    std::filesystem::remove(header_path);
+    std::filesystem::remove(dir);
+}
+
 TEST_CASE("references: package typedef from included header matches open includer uses",
           "[references]") {
     const auto dir = std::filesystem::temp_directory_path() / "lazyverilog_refs_include_pkg_typedef";
@@ -633,6 +690,7 @@ endpackage
 )";
     const std::string use = R"(`include "params.svh"
 module memory;
+    import cpu_pkg::*;
     states_t state;
     always_comb state = states_t::IDLE;
 endmodule
@@ -664,10 +722,10 @@ endmodule
         return ref.uri == header_uri && ref.line == 4 && ref.col == 2;
     }));
     CHECK(std::any_of(refs.begin(), refs.end(), [&](const Location& ref) {
-        return ref.uri == use_uri && ref.line == 2 && ref.col == 4;
+        return ref.uri == use_uri && ref.line == 3 && ref.col == 4;
     }));
     CHECK(std::any_of(refs.begin(), refs.end(), [&](const Location& ref) {
-        return ref.uri == use_uri && ref.line == 3 && ref.col == 24;
+        return ref.uri == use_uri && ref.line == 4 && ref.col == 24;
     }));
 
     std::filesystem::remove(use_path);
@@ -699,12 +757,14 @@ endpackage
 )";
     const std::string disk_use = R"(`include "params.svh"
 module memory;
+    import cpu_pkg::*;
     state_t state;
     always_comb state = state_t::IDLE;
 endmodule
 )";
     const std::string open_use = R"(`include "params.svh"
 module memory;
+    import cpu_pkg::*;
     states_t state;
     always_comb state = states_t::IDLE;
 endmodule
@@ -751,10 +811,10 @@ endmodule
         return ref.uri == header_uri && ref.line == 4 && ref.col == 2;
     }));
     CHECK(std::any_of(refs.begin(), refs.end(), [&](const Location& ref) {
-        return ref.uri == use_uri && ref.line == 2 && ref.col == 4;
+        return ref.uri == use_uri && ref.line == 3 && ref.col == 4;
     }));
     CHECK(std::any_of(refs.begin(), refs.end(), [&](const Location& ref) {
-        return ref.uri == use_uri && ref.line == 3 && ref.col == 24;
+        return ref.uri == use_uri && ref.line == 4 && ref.col == 24;
     }));
 
     std::filesystem::remove(use_path);
