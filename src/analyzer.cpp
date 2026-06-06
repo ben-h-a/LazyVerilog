@@ -101,7 +101,12 @@ static void collect_parse_diagnostics(DocumentState& state, const std::string& f
 struct OpenTextOverlay {
     std::string uri;
     std::string path;
-    std::string text;
+    // Keep the immutable open-buffer snapshot alive instead of copying its full
+    // text into every overlay vector.  didChange swaps DocumentState instances,
+    // so this shared_ptr gives SourceManager a stable view for the duration of
+    // the parse without retaining any closed/project ASTs beyond the open-buffer
+    // operation that already needed them.
+    std::shared_ptr<const DocumentState> state;
 };
 
 static void preload_open_text_overlays(slang::SourceManager& sm,
@@ -114,7 +119,9 @@ static void preload_open_text_overlays(slang::SourceManager& sm,
         // slang resolves `include directives.  This lets a dependent file such
         // as memory.sv see an unsaved rename in params.svh without polling or
         // reading every project file.  Only already-open buffers are copied.
-        sm.assignText(std::string_view(overlay.path), std::string_view(overlay.text));
+        if (!overlay.state)
+            continue;
+        sm.assignText(std::string_view(overlay.path), std::string_view(overlay.state->text));
     }
 }
 
@@ -192,7 +199,7 @@ std::shared_ptr<DocumentState> Analyzer::make_state(const std::string& uri,
             open_overlays.push_back(OpenTextOverlay{
                 .uri = open_uri,
                 .path = open_state->normalized_path,
-                .text = open_state->text,
+                .state = open_state,
             });
         }
     }
@@ -242,7 +249,7 @@ std::shared_ptr<DocumentState> Analyzer::make_file_state(const std::filesystem::
             open_overlays.push_back(OpenTextOverlay{
                 .uri = open_uri,
                 .path = open_state->normalized_path,
-                .text = open_state->text,
+                .state = open_state,
             });
         }
     }
@@ -2662,7 +2669,7 @@ void Analyzer::background_index_loop(std::stop_token stop) const {
                 open_overlays.push_back(OpenTextOverlay{
                     .uri = open_uri,
                     .path = open_state->normalized_path,
-                    .text = open_state->text,
+                    .state = open_state,
                 });
             }
 
