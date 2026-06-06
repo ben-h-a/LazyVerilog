@@ -69,7 +69,7 @@ local function _send_config_changed_to_client(client, changed_path, reason)
 	--
 	-- The server reloads from disk; configFile only selects the correct
 	-- lazyverilog.toml root when the LSP root and config root differ.
-	client.notify("workspace/didChangeConfiguration", {
+	client:notify("workspace/didChangeConfiguration", {
 		settings = {
 			lazyverilog = {
 				configFile = changed_path,
