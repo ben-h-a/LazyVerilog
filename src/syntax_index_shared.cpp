@@ -515,81 +515,10 @@ void collect_combined_occurrences(const slang::syntax::SyntaxTree& tree,
         return {SubroutineOwnerKind::Class, owner};
     };
 
-    // === SubroutineDeclarationCollector pre-pass (must run before main visitor) ===
-    struct SubroutineDeclarationCollector : SyntaxVisitor<SubroutineDeclarationCollector> {
-        const slang::SourceManager& sm;
-        std::unordered_set<std::string>& declared_subroutines;
-        const decltype(module_owner_kind)& module_kind_fn;
-        const decltype(resolve_subroutine_owner_from_qualified_name)& resolve_owner;
-        SubroutineOwnerKind current_owner_kind{SubroutineOwnerKind::Unit};
-        std::string current_owner_name;
-        std::string current_package;
-        std::string current_class;
-
-        SubroutineDeclarationCollector(
-            const slang::SourceManager& sm,
-            std::unordered_set<std::string>& declared_subroutines,
-            const decltype(module_owner_kind)& module_owner_kind,
-            const decltype(resolve_subroutine_owner_from_qualified_name)& resolve_owner)
-            : sm(sm), declared_subroutines(declared_subroutines),
-              module_kind_fn(module_owner_kind), resolve_owner(resolve_owner) {}
-
-        void handle(const ModuleDeclarationSyntax& node) {
-            const auto previous_kind = current_owner_kind;
-            const auto previous_name = current_owner_name;
-            const auto previous_package = current_package;
-            current_owner_kind = module_kind_fn(node.kind);
-            current_owner_name = std::string(node.header->name.valueText());
-            if (node.kind == SyntaxKind::PackageDeclaration)
-                current_package = current_owner_name;
-            visitDefault(node);
-            current_owner_kind = previous_kind;
-            current_owner_name = previous_name;
-            current_package = previous_package;
-        }
-
-        void handle(const CheckerDeclarationSyntax& node) {
-            const auto previous_kind = current_owner_kind;
-            const auto previous_name = current_owner_name;
-            current_owner_kind = SubroutineOwnerKind::Checker;
-            current_owner_name = std::string(node.name.valueText());
-            visitDefault(node);
-            current_owner_kind = previous_kind;
-            current_owner_name = previous_name;
-        }
-
-        void handle(const ClassDeclarationSyntax& node) {
-            const auto previous_kind = current_owner_kind;
-            const auto previous_name = current_owner_name;
-            const auto previous_class = current_class;
-            const std::string class_name(node.name.valueText());
-            if (!current_class.empty())
-                current_class += "::" + class_name;
-            else if (!current_package.empty())
-                current_class = current_package + "::" + class_name;
-            else
-                current_class = class_name;
-            current_owner_kind = SubroutineOwnerKind::Class;
-            current_owner_name = current_class;
-            visitDefault(node);
-            current_owner_kind = previous_kind;
-            current_owner_name = previous_name;
-            current_class = previous_class;
-        }
-
-        void handle(const FunctionDeclarationSyntax& node) {
-            if (!node.prototype || !node.prototype->name)
-                return;
-            const auto qualified_name = render_syntax_node_text(sm, *node.prototype->name);
-            const auto name = final_name_from_qualified_name(qualified_name);
-            if (!name.empty()) {
-                auto [owner_kind, owner_name] =
-                    resolve_owner(qualified_name, current_owner_kind, current_owner_name);
-                declared_subroutines.insert(subroutine_scope_key(owner_kind, owner_name, name));
-            }
-            visitDefault(node);
-        }
-    };
+    // Subroutine declarations are collected by the main CombinedVisitor below.
+    // Calls that appear before their declaration are stored as deferred
+    // invocations and resolved after the visitor finishes, so we no longer need
+    // a separate full-tree SubroutineDeclarationCollector pre-pass here.
 
     // === Declaration reference injection ===
     for (const auto& module : index.modules) {
