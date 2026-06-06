@@ -483,8 +483,11 @@ struct LintVisitor : public SyntaxVisitor<LintVisitor> {
                     node,
                     [&](const std::string& port) { return project->port_by_name.count(port) != 0; },
                     [&](auto&& fn) {
-                        for (const auto& port : project->ports)
+                        for (const auto& port : project->ports) {
+                            if (port.direction == "parameter" || port.direction == "localparam")
+                                continue;
                             fn(port.name);
+                        }
                     });
             }
         }

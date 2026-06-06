@@ -106,6 +106,36 @@ TEST_CASE("lint: stale autoinst uses merged extra-file module ports", "[lint]") 
     std::filesystem::remove(extra_path);
 }
 
+TEST_CASE("lint: stale autoinst ignores parameter-only module entries", "[lint]") {
+    const auto extra_path = std::filesystem::temp_directory_path() / "lazyverilog_lint_param_child.sv";
+    {
+        std::ofstream out(extra_path);
+        REQUIRE(out.good());
+        out << "module child #(parameter int WIDTH = 8)(input a);\nendmodule\n";
+    }
+
+    Analyzer analyzer;
+    analyzer.set_extra_files({extra_path.string()});
+    analyzer.wait_for_background_index_idle();
+    const std::string uri = "file:///lint_param_top.sv";
+    analyzer.open(uri, "module top;\nchild u_child(.a(a));\nendmodule\n");
+    auto state = analyzer.get_state(uri);
+    REQUIRE(state != nullptr);
+
+    auto project_index = analyzer.project_index_snapshot();
+    REQUIRE(project_index != nullptr);
+
+    LintConfig cfg;
+    cfg.module.stale_autoinst_diagnostic = true;
+    auto diags = run_lint(*state, cfg, project_index.get());
+
+    CHECK(!has_message_containing(diags, "missing port 'WIDTH'"));
+    CHECK(!has_message_containing(diags, "missing port 'a'"));
+    CHECK(!has_message_containing(diags, "unknown port"));
+
+    std::filesystem::remove(extra_path);
+}
+
 TEST_CASE("lint: statement rules emit diagnostics", "[lint]") {
     LintConfig cfg;
     cfg.statement.no_raw_always = true;
