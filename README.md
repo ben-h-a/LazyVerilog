@@ -57,9 +57,23 @@
 </details>
 
 <details>
+<summary><b>⚡ Auto-complete</b></summary>
+
+![Auto-complete](demo/videos/AutoComplete.gif)
+
+</details>
+
+<details>
 <summary><b>🌳 RTL tree</b></summary>
 
 ![RTL tree](demo/videos/RtlTree.gif)
+
+</details>
+
+<details>
+<summary><b>📂 Folding</b></summary>
+
+![Folding](demo/videos/Folding.gif)
 
 </details>
 
@@ -102,6 +116,13 @@
 <summary><b>💡 Hover</b></summary>
 
 ![Hover](demo/videos/hover.gif)
+
+</details>
+
+<details>
+<summary><b>💬 Inlay hints</b></summary>
+
+![Inlay hints](demo/videos/inlay_hint.png)
 
 </details>
 
