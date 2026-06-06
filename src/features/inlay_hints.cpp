@@ -74,6 +74,37 @@ static std::string display_port_direction(const std::string& direction) {
     return direction;
 }
 
+static std::string display_port_type(std::string type) {
+    // Many port declarations spell out the default net/type keyword
+    // explicitly (`logic` or `wire`) even when that keyword does not add much
+    // value to the inlay hint.  Keep the more informative suffix — for
+    // example a packed dimension — but drop the redundant leading keyword.
+    //
+    // Examples:
+    //   "logic"           -> ""
+    //   "wire"            -> ""
+    //   "logic [7:0]"     -> "[7:0]"
+    //   "wire [5:0]"      -> "[5:0]"
+    //
+    // We intentionally keep other type names intact (e.g. `bit`, `int`,
+    // `struct`, user-defined types) because they convey meaningful information.
+    auto strip_prefix = [&](const char* prefix) -> bool {
+        constexpr size_t prefix_len = 0; // placeholder to keep lambda local-only
+        (void)prefix_len;
+        const size_t len = std::char_traits<char>::length(prefix);
+        if (type.rfind(prefix, 0) != 0)
+            return false;
+        type.erase(0, len);
+        while (!type.empty() && type.front() == ' ')
+            type.erase(type.begin());
+        return true;
+    };
+
+    strip_prefix("logic");
+    strip_prefix("wire");
+    return type;
+}
+
 } // namespace
 
 std::vector<lsInlayHint> provide_inlay_hints(const Analyzer& analyzer, const std::string& uri,
@@ -121,9 +152,31 @@ std::vector<lsInlayHint> provide_inlay_hints(const Analyzer& analyzer, const std
 
             candidates.push_back(Candidate{
                 .line = line,
-                .col = conn.hint_col,
+                // Place the inlay hint immediately after the named port token,
+                // not inside the connection parentheses.
+                //
+                // Slang gives us both:
+                //   conn.col      -> the first character of the port name
+                //                    in `.port_name(...)`
+                //   conn.hint_col -> the first character of the connected
+                //                    expression inside the parentheses
+                //
+                // The old inlay position used conn.hint_col, which rendered
+                // the direction/type hint here:
+                //
+                //   .i_clk              (|hint ...)
+                //
+                // For aligned instance lists that is visually noisy because
+                // the hint appears after a long run of alignment spaces.  For
+                // inlay presentation, the useful anchor is the port itself:
+                //
+                //   .i_clk |hint        ( ... )
+                //
+                // Keep conn.hint_col unchanged for connection-edit features
+                // that still need to locate/replace the expression text.
+                .col = conn.col + static_cast<int>(conn.port_name.size()) + 1,
                 .direction = display_port_direction(port_it->second.direction),
-                .type = port_it->second.type,
+                .type = display_port_type(port_it->second.type),
             });
         }
 
