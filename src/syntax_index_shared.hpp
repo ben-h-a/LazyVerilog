@@ -83,7 +83,7 @@ std::string render_syntax_token_text(const slang::SourceManager& sm,
 std::string render_syntax_node_text(const slang::SourceManager& sm,
                                     const slang::syntax::SyntaxNode& node);
 
-std::string symbol_canonical(std::string kind, std::string scope, std::string name);
+std::string symbol_canonical(std::string_view kind, std::string_view scope, std::string_view name);
 bool is_module_value_kind(std::string_view kind);
 std::string canonical_type_name_from_text(std::string_view type);
 
@@ -99,14 +99,12 @@ std::string simple_identifier_from_expr(const slang::syntax::PropertyExprSyntax*
 std::vector<std::string> collect_include_dependency_uris(const slang::SourceManager& sm,
                                                          const std::string& owning_uri);
 
-/// Add declaration and use-site ReferenceEntry records to an already-populated
-/// SyntaxIndex.  Both closed-file indexing and dynamic/open-buffer indexing call
-/// this shared implementation so new symbol kinds cannot diverge between the
-/// two paths.
-void collect_reference_occurrences(const slang::syntax::SyntaxNode& root, SyntaxIndex& index,
-                                   const slang::SourceManager& sm);
-
-/// Add macro declaration and invocation ReferenceEntry records.  Macro
-/// definitions are preprocessor facts rather than normal SyntaxNode children,
-/// so this helper accepts the whole SyntaxTree.
-void collect_macro_reference_occurrences(const slang::syntax::SyntaxTree& tree, SyntaxIndex& index);
+/// Combined single-pass replacement for collect_reference_occurrences() and
+/// collect_macro_reference_occurrences().  Performs one SyntaxTree traversal
+/// instead of two by composing the macro-expansion visitToken() and the
+/// reference-resolution visitToken() into a single CombinedVisitor.
+/// The SubroutineDeclarationCollector pre-pass still runs as a separate walk
+/// because its output (declared_subroutines) is consumed by the main visitor.
+void collect_combined_occurrences(const slang::syntax::SyntaxTree& tree,
+                                  const slang::syntax::SyntaxNode& root, SyntaxIndex& index,
+                                  const slang::SourceManager& sm);

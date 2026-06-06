@@ -782,8 +782,7 @@ SyntaxIndex SyntaxIndex::build(const slang::syntax::SyntaxTree& tree, std::strin
     if (depth == IndexDepth::Full)
         collect_imports(root, index, sm);
 
-    collect_reference_occurrences(root, index, sm);
-    collect_macro_reference_occurrences(tree, index);
+    collect_combined_occurrences(tree, root, index, sm);
     if (!index.source_files.empty())
         index.include_dependencies = collect_include_dependency_uris(sm, index.source_files.front());
 

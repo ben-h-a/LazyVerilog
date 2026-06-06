@@ -559,8 +559,7 @@ SyntaxIndex build_current_ast_structural_index(const DocumentState& state) {
         process_member(*member);
     }
 
-    collect_reference_occurrences(root, index, sm);
-    collect_macro_reference_occurrences(*state.tree, index);
+    collect_combined_occurrences(*state.tree, root, index, sm);
     index.include_dependencies = collect_include_dependency_uris(sm, state.uri);
     return index;
 }

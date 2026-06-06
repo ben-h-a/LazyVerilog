@@ -186,10 +186,22 @@ std::string render_syntax_node_text(const slang::SourceManager& sm,
     return trim_copy(std::move(text));
 }
 
-std::string symbol_canonical(std::string kind, std::string scope, std::string name) {
-    if (scope.empty())
-        return kind + "::" + name;
-    return kind + "::" + scope + "::" + name;
+std::string symbol_canonical(std::string_view kind, std::string_view scope, std::string_view name) {
+    std::string result;
+    if (scope.empty()) {
+        result.reserve(kind.size() + 2 + name.size());
+        result = kind;
+        result += "::";
+        result += name;
+    } else {
+        result.reserve(kind.size() + 2 + scope.size() + 2 + name.size());
+        result = kind;
+        result += "::";
+        result += scope;
+        result += "::";
+        result += name;
+    }
+    return result;
 }
 
 bool is_module_value_kind(std::string_view kind) {
@@ -264,85 +276,6 @@ std::vector<std::string> collect_include_dependency_uris(const slang::SourceMana
 
     return result;
 }
-
-void collect_macro_reference_occurrences(const slang::syntax::SyntaxTree& tree,
-                                                SyntaxIndex& index) {
-    const auto& sm = tree.sourceManager();
-    SourceFileIdResolver file_ids;
-
-    auto add_macro_ref = [&](std::string name, SourceFileID file_id, int line, int col) {
-        if (name.empty())
-            return;
-        index.references.push_back(ReferenceEntry{
-            .name = name,
-            .file_id = file_id,
-            .symbol_id = SymbolID::from_canonical("macro::" + name),
-            .symbol_debug = "macro::" + name,
-            .line = line,
-            .col = col,
-            .end_col = col + (int)name.size(),
-        });
-    };
-
-    // Declaration occurrences live outside the normal parsed syntax tree, so
-    // collect them from slang's preprocessor macro table explicitly.
-    for (const auto* def : tree.getDefinedMacros()) {
-        if (!def || !def->name || !def->name.location().valid() ||
-            !sm.isFileLoc(def->name.location()))
-            continue;
-        const auto [line, col] = token_pos_line1_col0(sm, def->name);
-        add_macro_ref(std::string(def->name.valueText()), file_ids.for_token(index, sm, def->name),
-                      line, col);
-    }
-
-    struct Visitor : public SyntaxVisitor<Visitor> {
-        SyntaxIndex& index;
-        const slang::SourceManager& sm;
-        decltype(add_macro_ref)& add_ref;
-        SourceFileIdResolver& file_ids;
-        std::unordered_set<std::string> seen_expansions;
-
-        Visitor(SyntaxIndex& index, const slang::SourceManager& sm,
-                decltype(add_macro_ref)& add_macro_ref, SourceFileIdResolver& file_ids)
-            : index(index), sm(sm), add_ref(add_macro_ref), file_ids(file_ids) {}
-
-        void visitToken(slang::parsing::Token token) {
-            if (!token || !token.location().valid() || !sm.isMacroLoc(token.location()))
-                return;
-
-            const auto macro_name = sm.getMacroName(token.location());
-            if (macro_name.empty())
-                return;
-
-            const auto range = sm.getExpansionRange(token.location());
-            if (!range.start().valid())
-                return;
-
-            // One invocation can expand to many parser tokens.  Use the
-            // spelling range as the de-duplication key so each `FOO occurrence
-            // is reported once.
-            const auto uri = uri_from_source_location(sm, range.start());
-            const std::string key = uri + ":" + std::to_string(range.start().offset()) + ":" +
-                                    std::to_string(range.end().offset());
-            if (!seen_expansions.insert(key).second)
-                return;
-
-            const int line = (int)sm.getLineNumber(range.start());
-            int col = (int)sm.getColumnNumber(range.start()) - 1;
-            if (col < 0)
-                col = 0;
-            if (auto text = source_text_for_syntax_range(sm, range); text && text->starts_with('`'))
-                ++col;
-
-            add_ref(std::string(macro_name), file_ids.for_location(index, sm, range.start()),
-                          line, col);
-        }
-    };
-
-    Visitor visitor(index, sm, add_macro_ref, file_ids);
-    tree.root().visit(visitor);
-}
-
 
 namespace {
 
@@ -468,9 +401,14 @@ void add_reference_entry(SyntaxIndex& index, std::string name, SourceFileID file
 
 } // namespace
 
-void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
-                                   const slang::SourceManager& sm) {
+
+void collect_combined_occurrences(const slang::syntax::SyntaxTree& tree,
+                                  const slang::syntax::SyntaxNode& root, SyntaxIndex& index,
+                                  const slang::SourceManager& sm) {
+    // === Single shared SourceFileIdResolver ===
     SourceFileIdResolver file_ids;
+
+    // === Lookup tables (from collect_reference_occurrences) ===
     std::unordered_set<std::string> module_values;
     std::unordered_map<std::string, std::string> module_value_types;
     std::unordered_set<std::string> package_values;
@@ -495,8 +433,6 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
         if (is_module_value_kind(value.kind)) {
             const auto key = value.parent_scope + "\n" + value.name;
             module_values.insert(key);
-            // A file can contain duplicate declarations while being edited.
-            // Prefer the later syntactic type for member access resolution.
             module_value_types[key] = canonical_type_name_for_references(value.type);
         }
     }
@@ -550,7 +486,6 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
         if (!token || token.kind != slang::parsing::TokenKind::Identifier ||
             !token.location().valid())
             return;
-
         const auto [line, col] = token_pos(sm, token);
         add_reference_entry(index, std::string(token.valueText()),
                             file_ids.for_token(index, sm, token),
@@ -558,10 +493,6 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
     };
 
     auto module_owner_kind = [](SyntaxKind kind) -> SubroutineOwnerKind {
-        // slang represents module, interface, program, and package declarations
-        // with ModuleDeclarationSyntax.  Keep their SymbolIDs distinct so a
-        // package helper `foo`, an interface task `foo`, and a module task
-        // `foo` do not collapse back to a textual name match.
         if (kind == SyntaxKind::PackageDeclaration)
             return SubroutineOwnerKind::Package;
         if (kind == SyntaxKind::InterfaceDeclaration)
@@ -578,20 +509,13 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
         const size_t last_scope = qualified_name.rfind("::");
         if (last_scope == std::string_view::npos)
             return {fallback_kind, std::string(fallback_name)};
-
         const std::string owner(qualified_name.substr(0, last_scope));
         if (index.package_names.contains(owner))
             return {SubroutineOwnerKind::Package, owner};
-
-        // Out-of-block class methods are commonly spelled `function C::f;`.
-        // They are not lexically inside the class declaration, so recover the
-        // class owner from the qualified prototype name.  If the qualifier is
-        // package-qualified (`pkg::C::f`) keep the full qualifier as the class
-        // method owner; this mirrors how class scopes are represented elsewhere
-        // in the reference index.
         return {SubroutineOwnerKind::Class, owner};
     };
 
+    // === SubroutineDeclarationCollector pre-pass (must run before main visitor) ===
     struct SubroutineDeclarationCollector : SyntaxVisitor<SubroutineDeclarationCollector> {
         const slang::SourceManager& sm;
         std::unordered_set<std::string>& declared_subroutines;
@@ -614,14 +538,11 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
             const auto previous_kind = current_owner_kind;
             const auto previous_name = current_owner_name;
             const auto previous_package = current_package;
-
             current_owner_kind = module_kind_fn(node.kind);
             current_owner_name = std::string(node.header->name.valueText());
             if (node.kind == SyntaxKind::PackageDeclaration)
                 current_package = current_owner_name;
-
             visitDefault(node);
-
             current_owner_kind = previous_kind;
             current_owner_name = previous_name;
             current_package = previous_package;
@@ -641,7 +562,6 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
             const auto previous_kind = current_owner_kind;
             const auto previous_name = current_owner_name;
             const auto previous_class = current_class;
-
             const std::string class_name(node.name.valueText());
             if (!current_class.empty())
                 current_class += "::" + class_name;
@@ -649,11 +569,9 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
                 current_class = current_package + "::" + class_name;
             else
                 current_class = class_name;
-
             current_owner_kind = SubroutineOwnerKind::Class;
             current_owner_name = current_class;
             visitDefault(node);
-
             current_owner_kind = previous_kind;
             current_owner_name = previous_name;
             current_class = previous_class;
@@ -662,7 +580,6 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
         void handle(const FunctionDeclarationSyntax& node) {
             if (!node.prototype || !node.prototype->name)
                 return;
-
             const auto qualified_name = render_syntax_node_text(sm, *node.prototype->name);
             const auto name = final_name_from_qualified_name(qualified_name);
             if (!name.empty()) {
@@ -670,19 +587,11 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
                     resolve_owner(qualified_name, current_owner_kind, current_owner_name);
                 declared_subroutines.insert(subroutine_scope_key(owner_kind, owner_name, name));
             }
-
             visitDefault(node);
         }
     };
 
-    SubroutineDeclarationCollector subroutines(sm, declared_subroutines, module_owner_kind,
-                                               resolve_subroutine_owner_from_qualified_name);
-    root.visit(subroutines);
-
-    // Declarations are already extracted into the index.  Add owner-qualified
-    // declaration references from those tables so closed-file reference search
-    // can match e.g. `.clk(...)` to `module memory(input clk);` without loading
-    // the declaring file's AST.
+    // === Declaration reference injection ===
     for (const auto& module : index.modules) {
         if (!module.name.empty() && module.line > 0)
             add_reference_entry(index, module.name, module.file_id,
@@ -756,7 +665,33 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
         }
     }
 
-    struct Visitor : SyntaxVisitor<Visitor> {
+    // === Macro preamble ===
+    auto add_macro_ref = [&](std::string name, SourceFileID file_id, int line, int col) {
+        if (name.empty())
+            return;
+        index.references.push_back(ReferenceEntry{
+            .name = name,
+            .file_id = file_id,
+            .symbol_id = SymbolID::from_canonical("macro::" + name),
+            .symbol_debug = "macro::" + name,
+            .line = line,
+            .col = col,
+            .end_col = col + (int)name.size(),
+        });
+    };
+
+    // Macro declarations from the preprocessor table (not a tree walk)
+    for (const auto* def : tree.getDefinedMacros()) {
+        if (!def || !def->name || !def->name.location().valid() ||
+            !sm.isFileLoc(def->name.location()))
+            continue;
+        const auto [line, col] = token_pos_line1_col0(sm, def->name);
+        add_macro_ref(std::string(def->name.valueText()), file_ids.for_token(index, sm, def->name),
+                      line, col);
+    }
+
+    // === Combined visitor ===
+    struct CombinedVisitor : SyntaxVisitor<CombinedVisitor> {
         SyntaxIndex& index;
         const slang::SourceManager& sm;
         decltype(add_reference)& add_ref;
@@ -769,7 +704,7 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
         const std::unordered_map<std::string, std::string>& unique_enum_member_ids;
         const std::unordered_map<std::string, std::string>& unique_type_ids;
         const std::unordered_map<std::string, std::string>& package_type_ids;
-        const std::unordered_set<std::string>& declared_subroutines;
+        std::unordered_set<std::string>& declared_subroutines;
         const decltype(module_owner_kind)& module_kind_fn;
         const decltype(resolve_subroutine_owner_from_qualified_name)& resolve_subroutine_owner;
         std::string current_module;
@@ -783,21 +718,44 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
             bool wildcard{false};
         };
         std::vector<TypeImport> visible_type_imports;
+        std::string scope_key; // reused buffer for lookup key construction
 
-        Visitor(SyntaxIndex& index, const slang::SourceManager& sm,
-                decltype(add_reference)& add_reference,
-                const std::unordered_set<std::string>& module_values,
-                const std::unordered_map<std::string, std::string>& module_value_types,
-                const std::unordered_set<std::string>& package_values,
-                const std::unordered_set<std::string>& class_fields,
-                const std::unordered_set<std::string>& typedef_fields,
-                const std::unordered_map<std::string, std::string>& unique_typedef_scopes,
-                const std::unordered_map<std::string, std::string>& unique_enum_member_ids,
-                const std::unordered_map<std::string, std::string>& unique_type_ids,
-                const std::unordered_map<std::string, std::string>& package_type_ids,
-                const std::unordered_set<std::string>& declared_subroutines,
-                const decltype(module_owner_kind)& module_owner_kind,
-                const decltype(resolve_subroutine_owner_from_qualified_name)& resolve_subroutine_owner)
+        struct DeferredInvocation {
+            slang::parsing::Token name_token;
+            std::string rendered_name;
+            std::string class_ctx;
+            std::string module_ctx;
+            SubroutineOwnerKind module_kind_ctx{SubroutineOwnerKind::Module};
+            std::string package_ctx;
+        };
+        std::vector<DeferredInvocation> deferred_invocations;
+
+        // Extra fields for macro visitor
+        decltype(add_macro_ref)& add_macro;
+        SourceFileIdResolver& file_ids;
+        // Per-buffer classification: true = macro definition buffer, false = file buffer.
+        // Populated on first token seen from each buffer so isMacroLoc is called only once per buffer.
+        std::unordered_map<uint32_t, bool> buffer_is_macro;
+        // Deduplication for macro expansion sites. Key = (expansion_buf_id << 32) | expansion_offset.
+        // Avoids recording the same macro invocation multiple times when it expands to many tokens.
+        std::unordered_set<uint64_t> seen_expansions;
+
+        CombinedVisitor(SyntaxIndex& index, const slang::SourceManager& sm,
+                        decltype(add_reference)& add_reference,
+                        const std::unordered_set<std::string>& module_values,
+                        const std::unordered_map<std::string, std::string>& module_value_types,
+                        const std::unordered_set<std::string>& package_values,
+                        const std::unordered_set<std::string>& class_fields,
+                        const std::unordered_set<std::string>& typedef_fields,
+                        const std::unordered_map<std::string, std::string>& unique_typedef_scopes,
+                        const std::unordered_map<std::string, std::string>& unique_enum_member_ids,
+                        const std::unordered_map<std::string, std::string>& unique_type_ids,
+                        const std::unordered_map<std::string, std::string>& package_type_ids,
+                        std::unordered_set<std::string>& declared_subroutines,
+                        const decltype(module_owner_kind)& module_owner_kind,
+                        const decltype(resolve_subroutine_owner_from_qualified_name)& resolve_subroutine_owner,
+                        decltype(add_macro_ref)& add_macro_ref,
+                        SourceFileIdResolver& file_ids)
             : index(index), sm(sm), add_ref(add_reference), module_values(module_values),
               module_value_types(module_value_types), package_values(package_values),
               class_fields(class_fields), typedef_fields(typedef_fields),
@@ -805,7 +763,8 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
               unique_enum_member_ids(unique_enum_member_ids), unique_type_ids(unique_type_ids),
               package_type_ids(package_type_ids), declared_subroutines(declared_subroutines),
               module_kind_fn(module_owner_kind),
-              resolve_subroutine_owner(resolve_subroutine_owner) {}
+              resolve_subroutine_owner(resolve_subroutine_owner),
+              add_macro(add_macro_ref), file_ids(file_ids) {}
 
         void handle(const ModuleDeclarationSyntax& node) {
             const std::string module_name(node.header->name.valueText());
@@ -861,13 +820,6 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
         }
 
         std::optional<std::string> subroutine_id_for_unqualified_name(std::string_view name) const {
-            // SystemVerilog subroutines live in several lexical owners:
-            // compilation-unit, packages, modules/interfaces/programs,
-            // checkers, and classes.  Closed-file references cannot ask slang's
-            // semantic model which declaration a call bound to, but they can
-            // safely use a syntactic owner when the declaration and call are in
-            // the same lexical owner.  This prevents weak `name:<id>` matches
-            // from merging unrelated local tasks/functions with the same name.
             if (!current_class.empty()) {
                 const auto key = subroutine_scope_key(SubroutineOwnerKind::Class, current_class, name);
                 if (declared_subroutines.contains(key))
@@ -883,7 +835,6 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
                 if (declared_subroutines.contains(key))
                     return subroutine_symbol_id(SubroutineOwnerKind::Package, current_package, name);
             }
-
             const auto key = subroutine_scope_key(SubroutineOwnerKind::Unit, {}, name);
             if (declared_subroutines.contains(key))
                 return subroutine_symbol_id(SubroutineOwnerKind::Unit, {}, name);
@@ -895,7 +846,6 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
             const size_t last_scope = rendered_name.rfind("::");
             if (last_scope == std::string_view::npos)
                 return subroutine_id_for_unqualified_name(rendered_name);
-
             const auto callee = final_name_from_qualified_name(rendered_name);
             auto [owner_kind, owner_name] =
                 resolve_subroutine_owner(rendered_name, SubroutineOwnerKind::Unit, std::string_view{});
@@ -924,6 +874,8 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
                                 ? (current_module.empty() ? std::string_view(current_package)
                                                           : std::string_view(current_module))
                                 : std::string_view(current_class));
+                    declared_subroutines.insert(
+                        subroutine_scope_key(owner_kind, owner_name, name));
                     add_ref(name_token, subroutine_symbol_id(owner_kind, owner_name, name));
                 }
             }
@@ -932,23 +884,44 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
 
         void handle(const InvocationExpressionSyntax& node) {
             if (node.left) {
-                const auto name_token = last_identifier_token(*node.left);
-                if (name_token) {
-                    const auto rendered_name = render_syntax_node_text(sm, *node.left);
-                    if (auto id = subroutine_id_for_invocation_name(rendered_name))
+                slang::parsing::Token name_token;
+                std::string rendered_name;
+                // Fast path: simple function call foo(...) — avoid token iteration.
+                if (const auto* iname = node.left->as_if<IdentifierNameSyntax>()) {
+                    name_token = iname->identifier;
+                    if (name_token)
+                        rendered_name = std::string(name_token.valueText());
+                } else {
+                    name_token = last_identifier_token(*node.left);
+                    if (name_token)
+                        rendered_name = render_syntax_node_text(sm, *node.left);
+                }
+                if (name_token && !rendered_name.empty()) {
+                    if (auto id = subroutine_id_for_invocation_name(rendered_name)) {
                         add_ref(name_token, *id);
+                    } else {
+                        deferred_invocations.push_back({name_token, std::move(rendered_name),
+                                                        current_class, current_module,
+                                                        current_module_kind, current_package});
+                    }
                 }
             }
             visitDefault(node);
         }
 
+        void resolve_deferred_invocations() {
+            for (auto& inv : deferred_invocations) {
+                current_class = inv.class_ctx;
+                current_module = inv.module_ctx;
+                current_module_kind = inv.module_kind_ctx;
+                current_package = inv.package_ctx;
+                if (auto id = subroutine_id_for_invocation_name(inv.rendered_name))
+                    add_ref(inv.name_token, *id);
+            }
+            deferred_invocations.clear();
+        }
+
         void handle(const PackageImportDeclarationSyntax& node) {
-            // Track package imports for syntactic type references.  Without an
-            // import, `state_t` outside `package cpu_pkg` must not be treated as
-            // `cpu_pkg::state_t`; with `import cpu_pkg::*;` or
-            // `import cpu_pkg::state_t;`, the unqualified spelling is intended
-            // to name the package type.  The stack is scoped by the surrounding
-            // module/class/package handlers above.
             for (const auto* item : node.items) {
                 if (!item)
                     continue;
@@ -985,12 +958,31 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
         }
 
         void handle(const ScopedNameSyntax& node) {
-            // Package-scoped types must be referenced with their package scope
-            // or through a tracked package import.  Do not let the generic
-            // token visitor below turn every unqualified `state_t` in an
-            // including module into `cpu_pkg::state_t`; that was
-            // the stale-reference bug where find-references on a package typedef
-            // reported unrelated module-local text with the same spelling.
+            if (!node.left || !node.right) { visitDefault(node); return; }
+
+            // Fast path: scope::name where both sides are simple identifiers.
+            // Avoids token iteration and string construction in render_syntax_node_text.
+            if (const auto* lname = node.left->as_if<IdentifierNameSyntax>()) {
+                if (const auto* rname = node.right->as_if<IdentifierNameSyntax>()) {
+                    const std::string_view scope_sv = lname->identifier.valueText();
+                    const std::string_view name_sv = rname->identifier.valueText();
+                    if (!scope_sv.empty() && !name_sv.empty()) {
+                        scope_key = scope_sv;
+                        scope_key += '\n';
+                        scope_key.append(name_sv);
+                        if (const auto it = package_type_ids.find(scope_key);
+                            it != package_type_ids.end()) {
+                            add_ref(rname->identifier, it->second);
+                            node.left->visit(*this);
+                            return;
+                        }
+                    }
+                    visitDefault(node);
+                    return;
+                }
+            }
+
+            // Slow path: complex names (e.g., pkg::sub::Type).
             const auto scope = render_syntax_node_text(sm, *node.left);
             const auto name_token = last_identifier_token(*node.right);
             if (!scope.empty() && name_token) {
@@ -1026,14 +1018,12 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
             for (const auto* instance : node.instances) {
                 if (!instance)
                     continue;
-
                 if (instance->decl) {
                     const std::string instance_name(instance->decl->name.valueText());
                     if (!current_module.empty() && !instance_name.empty())
                         add_ref(instance->decl->name,
                                 symbol_canonical("instance", current_module, instance_name));
                 }
-
                 for (const auto* connection : instance->connections) {
                     const auto* named =
                         connection ? connection->as_if<NamedPortConnectionSyntax>() : nullptr;
@@ -1052,14 +1042,19 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
             const std::string field_name(node.name.valueText());
             const std::string object_name = simple_identifier_from_expr(node.left);
             if (!current_module.empty() && !field_name.empty() && !object_name.empty()) {
-                const auto value_it = module_value_types.find(current_module + "\n" + object_name);
+                scope_key = current_module;
+                scope_key += '\n';
+                scope_key += object_name;
+                const auto value_it = module_value_types.find(scope_key);
                 if (value_it != module_value_types.end()) {
                     std::string typedef_scope = value_it->second;
                     if (const auto scope_it = unique_typedef_scopes.find(typedef_scope);
                         scope_it != unique_typedef_scopes.end())
                         typedef_scope = scope_it->second;
-
-                    if (typedef_fields.contains(typedef_scope + "\n" + field_name)) {
+                    scope_key = typedef_scope;
+                    scope_key += '\n';
+                    scope_key += field_name;
+                    if (typedef_fields.contains(scope_key)) {
                         add_ref(node.name,
                                 symbol_canonical("typedef_field", typedef_scope, field_name));
                         if (node.left)
@@ -1095,26 +1090,67 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
 
         bool try_add_typedef_field_reference(const slang::parsing::Token& token,
                                              std::string_view field_name) {
-            const auto object_name = object_before_member_dot(token);
-            if (current_module.empty() || object_name.empty() || field_name.empty())
+            // Check the cheap module-context guard before the expensive source-text scan.
+            if (current_module.empty() || field_name.empty() || module_value_types.empty())
                 return false;
-            const auto value_it = module_value_types.find(current_module + "\n" + object_name);
+            const auto object_name = object_before_member_dot(token);
+            if (object_name.empty())
+                return false;
+            scope_key = current_module;
+            scope_key += '\n';
+            scope_key += object_name;
+            const auto value_it = module_value_types.find(scope_key);
             if (value_it == module_value_types.end())
                 return false;
-
             std::string typedef_scope = value_it->second;
             if (const auto scope_it = unique_typedef_scopes.find(typedef_scope);
                 scope_it != unique_typedef_scopes.end())
                 typedef_scope = scope_it->second;
-
-            if (!typedef_fields.contains(typedef_scope + "\n" + std::string(field_name)))
+            scope_key = typedef_scope;
+            scope_key += '\n';
+            scope_key.append(field_name);
+            if (!typedef_fields.contains(scope_key))
                 return false;
-
             add_ref(token, symbol_canonical("typedef_field", typedef_scope, std::string(field_name)));
             return true;
         }
 
         void visitToken(slang::parsing::Token token) {
+            if (!token || !token.location().valid())
+                return;
+
+            // Classify buffer on first encounter (saves repeated isMacroLoc calls).
+            const uint32_t buf_id = token.location().buffer().getId();
+            auto [it, inserted] = buffer_is_macro.emplace(buf_id, false);
+            if (inserted) {
+                it->second = sm.isMacroLoc(token.location());
+            }
+
+            if (it->second) {
+                // Macro token — record the macro invocation once per expansion site.
+                const auto range = sm.getExpansionRange(token.location());
+                if (!range.start().valid())
+                    return;
+                const uint64_t key = (static_cast<uint64_t>(range.start().buffer().getId()) << 32) |
+                                     static_cast<uint64_t>(range.start().offset());
+                if (!seen_expansions.insert(key).second)
+                    return; // already recorded this expansion site
+                const auto macro_name = sm.getMacroName(token.location());
+                if (macro_name.empty())
+                    return;
+                const int line_num = (int)sm.getLineNumber(range.start());
+                int col = (int)sm.getColumnNumber(range.start()) - 1;
+                if (col < 0)
+                    col = 0;
+                if (auto text = source_text_for_syntax_range(sm, range);
+                    text && text->starts_with('`'))
+                    ++col;
+                add_macro(std::string(macro_name),
+                          file_ids.for_location(index, sm, range.start()),
+                          line_num, col);
+                return;
+            }
+            // Reference fallback
             if (!token || token.kind != slang::parsing::TokenKind::Identifier ||
                 !token.location().valid())
                 return;
@@ -1124,28 +1160,32 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
             if (try_add_typedef_field_reference(token, name))
                 return;
             if (!current_class.empty()) {
-                const std::string key = current_class + "\n" + name;
-                if (class_fields.contains(key)) {
+                scope_key = current_class;
+                scope_key += '\n';
+                scope_key += name;
+                if (class_fields.contains(scope_key)) {
                     add_ref(token, symbol_canonical("class_field", current_class, name));
                     return;
                 }
             }
             if (!current_module.empty()) {
-                const std::string key = current_module + "\n" + name;
-                if (module_values.contains(key)) {
+                scope_key = current_module;
+                scope_key += '\n';
+                scope_key += name;
+                if (module_values.contains(scope_key)) {
                     add_ref(token, symbol_canonical("module_signal", current_module, name));
                     return;
                 }
             }
             if (!current_package.empty()) {
-                const std::string key = current_package + "\n" + name;
-                if (package_values.contains(key)) {
+                scope_key = current_package;
+                scope_key += '\n';
+                scope_key += name;
+                if (package_values.contains(scope_key)) {
                     add_ref(token, symbol_canonical("package_value", current_package, name));
                     return;
                 }
-            }
-            if (!current_package.empty()) {
-                if (const auto type_it = package_type_ids.find(current_package + "\n" + name);
+                if (const auto type_it = package_type_ids.find(scope_key);
                     type_it != package_type_ids.end()) {
                     add_ref(token, type_it->second);
                     return;
@@ -1164,13 +1204,18 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
                 add_ref(token, enum_it->second);
                 return;
             }
-            add_ref(token, "name:" + name);
+            scope_key = "name:";
+            scope_key += name;
+            add_ref(token, scope_key);
         }
     };
 
-    Visitor visitor(index, sm, add_reference, module_values, module_value_types, package_values,
-                    class_fields, typedef_fields, unique_typedef_scopes, unique_enum_member_ids,
-                    unique_type_ids, package_type_ids, declared_subroutines, module_owner_kind,
-                    resolve_subroutine_owner_from_qualified_name);
+    CombinedVisitor visitor(index, sm, add_reference, module_values, module_value_types,
+                            package_values, class_fields, typedef_fields, unique_typedef_scopes,
+                            unique_enum_member_ids, unique_type_ids, package_type_ids,
+                            declared_subroutines, module_owner_kind,
+                            resolve_subroutine_owner_from_qualified_name,
+                            add_macro_ref, file_ids);
     root.visit(visitor);
+    visitor.resolve_deferred_invocations();
 }
