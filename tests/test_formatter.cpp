@@ -1989,6 +1989,55 @@ TEST_CASE("formatter: expands instances after declarations like memory_top", "[f
     CHECK(formatted.find("memory u_mem (\n") != std::string::npos);
 }
 
+TEST_CASE("formatter: expands instances immediately after task and function declarations",
+          "[formatter][memory_top]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+    opts.instance.align = true;
+    opts.instance.port_indent_level = 1;
+    opts.instance.instance_port_name_width = 10;
+    opts.instance.instance_port_between_paren_width = 10;
+
+    const std::string formatted =
+        format_source("module top;\n"
+                      "task add_number(input int a, input int b, output int result);\n"
+                      "result = a + b;\n"
+                      "endtask\n"
+                      "memory u_after_task(\n"
+                      "           .i_clk(clk),\n"
+                      "           .o_data(data)\n"
+                      "       );\n"
+                      "function int calc(input int a, input int b);\n"
+                      "calc = a + b;\n"
+                      "endfunction\n"
+                      "memory u_after_function(.i_clk(clk), .o_data(data));\n"
+                      "endmodule\n",
+                      opts);
+
+    const std::string expected =
+        "module top;\n"
+        "task add_number(input int a, input int b, output int result);\n"
+        "    result = a + b;\n"
+        "endtask\n"
+        "memory u_after_task (\n"
+        "    .i_clk    (clk       ),\n"
+        "    .o_data   (data      )\n"
+        ");\n"
+        "function int calc(input int a, input int b);\n"
+        "    calc = a + b;\n"
+        "endfunction\n"
+        "memory u_after_function (\n"
+        "    .i_clk    (clk       ),\n"
+        "    .o_data   (data      )\n"
+        ");\n"
+        "endmodule\n";
+
+    INFO("formatted output:\n" << formatted);
+    CHECK(formatted == expected);
+    CHECK(format_source(formatted, opts) == expected);
+}
+
 TEST_CASE("formatter: typedef enum bodies are expanded", "[formatter]") {
     FormatOptions opts;
     opts.indent_size = 4;

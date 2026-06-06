@@ -678,7 +678,18 @@ inline bool is_instance_port_open(const TokenStream& tokens, size_t open) {
             kind_is(tokens[prev], TK::BeginKeyword) ||
             kind_is(tokens[prev], TK::EndKeyword) ||
             kind_is(tokens[prev], TK::GenerateKeyword) ||
-            kind_is(tokens[prev], TK::EndGenerateKeyword))
+            kind_is(tokens[prev], TK::EndGenerateKeyword) ||
+            // Module items may appear immediately after a subroutine body.
+            // For example, demo/memory_top.sv declares a module-local task
+            // and then instantiates `memory u_mem2 (...)`.  `endtask` and
+            // `endfunction` are therefore valid item boundaries just like a
+            // declaration semicolon.  Without these explicit boundaries the
+            // instance's top-level port list falls through to function-call
+            // wrapping, which indents named ports relative to the instance
+            // name column instead of using the configured instance-port
+            // indentation.
+            kind_is(tokens[prev], TK::EndTaskKeyword) ||
+            kind_is(tokens[prev], TK::EndFunctionKeyword))
             return true;
 
         if (is_identifier_like(tokens[prev])) {
