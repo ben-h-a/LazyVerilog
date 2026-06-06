@@ -39,18 +39,9 @@ std::string node_text_raw(const slang::SourceManager& sm, const SyntaxNode& node
     return node_text(node);
 }
 
-std::pair<int, int> token_pos(const slang::SourceManager& sm,
-                              const slang::parsing::Token& token) {
-    if (!token || !token.location().valid())
-        return {0, 0};
-    const auto line = sm.getLineNumber(token.location());
-    const auto col = sm.getColumnNumber(token.location());
-    return {line > 0 ? (int)line : 0, col > 0 ? (int)col - 1 : 0};
-}
-
 std::pair<int, int> token_pos0(const slang::SourceManager& sm,
                                const slang::parsing::Token& token) {
-    auto [line, col] = token_pos(sm, token);
+    auto [line, col] = token_pos_line1_col0(sm, token);
     return {line > 0 ? line - 1 : -1, col};
 }
 
@@ -103,7 +94,7 @@ ValueEntry* add_value(SyntaxIndex& index, const slang::SourceManager& sm,
                       std::string parent_scope) {
     if (!name)
         return nullptr;
-    auto [line, col] = token_pos(sm, name);
+    auto [line, col] = token_pos_line1_col0(sm, name);
     index.values.push_back(ValueEntry{.name = tok_text(name),
                                       .type = std::move(type),
                                       .kind = std::move(kind),
@@ -120,7 +111,7 @@ void add_port(ModuleEntry& module, SyntaxIndex& index, const slang::SourceManage
               std::string default_value = {}) {
     if (!name)
         return;
-    auto [line, col] = token_pos(sm, name);
+    auto [line, col] = token_pos_line1_col0(sm, name);
     module.ports.push_back(PortEntry{.name = tok_text(name),
                                      .file_id = source_file_id_for_token(index, sm, name),
                                      .direction = direction,
@@ -226,7 +217,7 @@ void process_hierarchy(const HierarchyInstantiationSyntax& hierarchy, SyntaxInde
         if (inst->decl) {
             entry.instance_name = tok_text(inst->decl->name);
             entry.file_id = source_file_id_for_token(index, sm, inst->decl->name);
-            entry.line = token_pos(sm, inst->decl->name).first;
+            entry.line = token_pos_line1_col0(sm, inst->decl->name).first;
         }
         entry.start_line = entry.line > 0 ? entry.line - 1 : 0;
         // Prefer slang's parsed source range over a raw ';' line scan.  The
@@ -238,8 +229,8 @@ void process_hierarchy(const HierarchyInstantiationSyntax& hierarchy, SyntaxInde
             lines.empty() ? entry.start_line : instance_end_line(lines, entry.start_line));
         for (const auto* conn : inst->connections) {
             if (const auto* named = conn ? conn->as_if<NamedPortConnectionSyntax>() : nullptr) {
-                auto [line, col] = token_pos(sm, named->name);
-                auto [paren_line, paren_col] = token_pos(sm, named->openParen);
+                auto [line, col] = token_pos_line1_col0(sm, named->name);
+                auto [paren_line, paren_col] = token_pos_line1_col0(sm, named->openParen);
                 entry.connections.push_back(NamedPortConn{.port_name = tok_text(named->name),
                                                           .signal_name =
                                                               simple_identifier_from_expr(named->expr),
@@ -261,7 +252,7 @@ void process_class(const ClassDeclarationSyntax& cls, SyntaxIndex& index,
     entry.name = tok_text(cls.name);
     entry.file_id = source_file_id_for_token(index, sm, cls.name);
     entry.parent_scope = std::move(parent_scope);
-    auto [line, col] = token_pos(sm, cls.name);
+    auto [line, col] = token_pos_line1_col0(sm, cls.name);
     entry.line = line;
     entry.col = col;
     if (cls.extendsClause)
@@ -276,7 +267,7 @@ void process_class(const ClassDeclarationSyntax& cls, SyntaxIndex& index,
                 for (const auto* decl : data->declarators) {
                     if (!decl)
                         continue;
-                    auto [fl, fc] = token_pos(sm, decl->name);
+                    auto [fl, fc] = token_pos_line1_col0(sm, decl->name);
                     entry.fields.push_back(FieldEntry{.name = tok_text(decl->name),
                                                       .type = with_dims(sm, type, *decl),
                                                       .file_id = source_file_id_for_token(index, sm, decl->name),
@@ -286,7 +277,7 @@ void process_class(const ClassDeclarationSyntax& cls, SyntaxIndex& index,
             }
         } else if (const auto* method = item->as_if<ClassMethodDeclarationSyntax>()) {
             const auto& proto = *method->declaration->prototype;
-            auto [ml, mc] = token_pos(sm, proto.keyword);
+            auto [ml, mc] = token_pos_line1_col0(sm, proto.keyword);
             entry.methods.push_back(MethodEntry{.name = node_text_raw(sm, *proto.name),
                                                 .return_type = node_text_raw(sm, *proto.returnType),
                                                 .is_task = method->declaration->kind ==
@@ -306,14 +297,14 @@ void process_typedef(const TypedefDeclarationSyntax& td, SyntaxIndex& index,
     entry.name = tok_text(td.name);
     entry.parent_scope = std::move(parent_scope);
     entry.file_id = source_file_id_for_token(index, sm, td.name);
-    auto [line, col] = token_pos(sm, td.name);
+    auto [line, col] = token_pos_line1_col0(sm, td.name);
     entry.line = line;
     entry.col = col;
     if (const auto* enum_type = td.type->as_if<EnumTypeSyntax>()) {
         entry.is_enum = true;
         for (const auto* member : enum_type->members) {
             if (member) {
-                auto [em_line, em_col] = token_pos(sm, member->name);
+                auto [em_line, em_col] = token_pos_line1_col0(sm, member->name);
                 entry.enum_members.push_back(EnumMemberEntry{
                     .name = tok_text(member->name),
                     .file_id = source_file_id_for_token(index, sm, member->name),
@@ -331,7 +322,7 @@ void process_typedef(const TypedefDeclarationSyntax& td, SyntaxIndex& index,
             for (const auto* decl : member->declarators) {
                 if (!decl)
                     continue;
-                auto [fl, fc] = token_pos(sm, decl->name);
+                auto [fl, fc] = token_pos_line1_col0(sm, decl->name);
                 entry.fields.push_back(FieldEntry{.name = tok_text(decl->name),
                                                   .type = with_dims(sm, type, *decl),
                                                   .file_id = source_file_id_for_token(index, sm, decl->name),
@@ -352,7 +343,7 @@ void process_module(const ModuleDeclarationSyntax& node, SyntaxIndex& index,
     ModuleEntry module;
     module.name = tok_text(node.header->name);
     module.file_id = source_file_id_for_token(index, sm, node.header->name);
-    auto [line, col] = token_pos(sm, node.header->name);
+    auto [line, col] = token_pos_line1_col0(sm, node.header->name);
     module.line = line;
     module.col = col;
     fill_module_edit_ranges(module, *node.header, sm);
@@ -429,7 +420,7 @@ void process_module(const ModuleDeclarationSyntax& node, SyntaxIndex& index,
             for (const auto* item : modport->items) {
                 if (!item)
                     continue;
-                auto [ml, mc] = token_pos(sm, item->name);
+                auto [ml, mc] = token_pos_line1_col0(sm, item->name);
                 module.modports.push_back(ModportEntry{.name = tok_text(item->name),
                                                        .file_id = source_file_id_for_token(index, sm, item->name),
                                                        .line = ml,
@@ -449,7 +440,7 @@ void process_module_signature(const ModuleDeclarationSyntax& node, SyntaxIndex& 
     ModuleEntry module;
     module.name = tok_text(node.header->name);
     module.file_id = source_file_id_for_token(index, sm, node.header->name);
-    auto [line, col] = token_pos(sm, node.header->name);
+    auto [line, col] = token_pos_line1_col0(sm, node.header->name);
     module.line = line;
     module.col = col;
     fill_module_edit_ranges(module, *node.header, sm);
@@ -519,7 +510,7 @@ void process_package(const ModuleDeclarationSyntax& pkg, SyntaxIndex& index,
     ModuleEntry module;
     module.name = tok_text(pkg.header->name);
     module.file_id = source_file_id_for_token(index, sm, pkg.header->name);
-    auto [line, col] = token_pos(sm, pkg.header->name);
+    auto [line, col] = token_pos_line1_col0(sm, pkg.header->name);
     module.line = line;
     module.col = col;
     index.package_names.insert(module.name);
@@ -541,7 +532,7 @@ void process_package(const ModuleDeclarationSyntax& pkg, SyntaxIndex& index,
                 for (const auto* decl : param->declarators) {
                     if (!decl)
                         continue;
-                    auto [pl, pc] = token_pos(sm, decl->name);
+                    auto [pl, pc] = token_pos_line1_col0(sm, decl->name);
                     index.values.push_back(ValueEntry{.name = tok_text(decl->name),
                                                       .type = type,
                                                       .kind = tok_text(param->keyword),
@@ -579,7 +570,7 @@ void collect_imports(const SyntaxNode& root, SyntaxIndex& index, const slang::So
         const slang::SourceManager& sm;
         explicit Visitor(SyntaxIndex& index, const slang::SourceManager& sm) : index(index), sm(sm) {}
         void handle(const PackageImportDeclarationSyntax& node) {
-            auto [line, _] = token_pos(sm, node.keyword);
+            auto [line, _] = token_pos_line1_col0(sm, node.keyword);
             for (const auto* item : node.items) {
                 if (!item)
                     continue;
@@ -603,7 +594,7 @@ void collect_macros(const slang::syntax::SyntaxTree& tree, SyntaxIndex& index) {
     for (const auto* def : tree.getDefinedMacros()) {
         if (!def || !def->name || !def->name.location().valid() || !sm.isFileLoc(def->name.location()))
             continue;
-        auto [line, _] = token_pos(sm, def->name);
+        auto [line, _] = token_pos_line1_col0(sm, def->name);
         MacroEntry mac;
         mac.name = tok_text(def->name);
         mac.file_id = source_file_id_for_token(index, sm, def->name);
@@ -656,7 +647,7 @@ void collect_macro_reference_occurrences(const slang::syntax::SyntaxTree& tree, 
     for (const auto* def : tree.getDefinedMacros()) {
         if (!def || !def->name || !def->name.location().valid() || !sm.isFileLoc(def->name.location()))
             continue;
-        const auto [line, col] = token_pos(sm, def->name);
+        const auto [line, col] = token_pos_line1_col0(sm, def->name);
         add_macro_ref(tok_text(def->name), source_file_id_for_token(index, sm, def->name),
                       line, col);
     }

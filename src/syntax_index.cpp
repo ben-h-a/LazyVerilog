@@ -32,15 +32,6 @@ static std::string simple_identifier_from_expr(const PropertyExprSyntax* expr) {
     return {};
 }
 
-static std::pair<int, int> token_pos(const slang::SourceManager& sm,
-                                     const slang::parsing::Token& token) {
-    if (!token || !token.location().valid())
-        return {0, 0};
-    const auto line = sm.getLineNumber(token.location());
-    const auto col = sm.getColumnNumber(token.location());
-    return {line > 0 ? (int)line : 0, col > 0 ? (int)col - 1 : 0};
-}
-
 static std::pair<int, int> source_range_lines(const slang::SourceManager& sm,
                                               slang::SourceRange range) {
     if (!range.start().valid() || !range.end().valid())
@@ -86,7 +77,7 @@ static void collect_macro_reference_occurrences(const slang::syntax::SyntaxTree&
     for (const auto* def : tree.getDefinedMacros()) {
         if (!def || !index_macro_has_user_source_location(sm, def->name))
             continue;
-        const auto [line, col] = token_pos(sm, def->name);
+        const auto [line, col] = token_pos_line1_col0(sm, def->name);
         add_macro_ref(std::string(def->name.valueText()), source_file_id_for_token(index, sm, def->name),
                       line, col);
     }
@@ -150,7 +141,7 @@ static MacroEntry macro_entry_from_define(SyntaxIndex& index, const slang::Sourc
                 mac.params.push_back(std::string(arg->name.valueText()));
         }
     }
-    mac.line = token_pos(sm, def.name).first;
+    mac.line = token_pos_line1_col0(sm, def.name).first;
     return mac;
 }
 
@@ -254,7 +245,7 @@ static void add_port(std::vector<PortEntry>& ports, SyntaxIndex& index,
     if (!name)
         return;
 
-    auto [line, col] = token_pos(sm, name);
+    auto [line, col] = token_pos_line1_col0(sm, name);
     ports.push_back(PortEntry{
         .name = tok_str(name),
         .file_id = source_file_id_for_token(index, sm, name),
@@ -359,7 +350,7 @@ static void extract_instances(const SyntaxList<MemberSyntax>& members,
             if (instance->decl) {
                 entry.instance_name = tok_str(instance->decl->name);
                 entry.file_id = source_file_id_for_token(index, sm, instance->decl->name);
-                entry.line = token_pos(sm, instance->decl->name).first;
+                entry.line = token_pos_line1_col0(sm, instance->decl->name).first;
             }
             entry.start_line = entry.line > 0 ? entry.line - 1 : 0;
             // Use the parsed hierarchy range when available.  A raw ';' search
@@ -377,8 +368,8 @@ static void extract_instances(const SyntaxList<MemberSyntax>& members,
                 if (!named)
                     continue;
 
-                auto [line, col] = token_pos(sm, named->name);
-                auto [paren_line, paren_col] = token_pos(sm, named->openParen);
+                auto [line, col] = token_pos_line1_col0(sm, named->name);
+                auto [paren_line, paren_col] = token_pos_line1_col0(sm, named->openParen);
                 entry.connections.push_back(NamedPortConn{
                     .port_name = tok_str(named->name),
                     .signal_name = simple_identifier_from_expr(named->expr),
@@ -399,7 +390,7 @@ static void process_module(const ModuleDeclarationSyntax& module, SyntaxIndex& i
     ModuleEntry entry;
     entry.name = tok_str(module.header->name);
     entry.file_id = source_file_id_for_token(index, sm, module.header->name);
-    auto [line, col] = token_pos(sm, module.header->name);
+    auto [line, col] = token_pos_line1_col0(sm, module.header->name);
     entry.line = line;
     entry.col = col;
 
@@ -438,7 +429,7 @@ static void process_module(const ModuleDeclarationSyntax& module, SyntaxIndex& i
             for (const auto* item : modport->items) {
                 if (!item)
                     continue;
-                auto [ml, mc] = token_pos(sm, item->name);
+                auto [ml, mc] = token_pos_line1_col0(sm, item->name);
                 entry.modports.push_back(ModportEntry{
                     .name = tok_str(item->name),
                     .file_id = source_file_id_for_token(index, sm, item->name),
@@ -478,7 +469,7 @@ static void process_module(const ModuleDeclarationSyntax& module, SyntaxIndex& i
             for (const auto* decl : data->declarators) {
                 if (!decl)
                     continue;
-                auto [vl, vc] = token_pos(sm, decl->name);
+                auto [vl, vc] = token_pos_line1_col0(sm, decl->name);
                 index.values.push_back(ValueEntry{
                     .name = tok_str(decl->name),
                     .type = with_declarator_dimensions(sm, type_text, *decl),
@@ -491,7 +482,7 @@ static void process_module(const ModuleDeclarationSyntax& module, SyntaxIndex& i
             }
         } else if (const auto* fn = member->as_if<FunctionDeclarationSyntax>()) {
             const auto& proto = *fn->prototype;
-            auto [vl, vc] = token_pos(sm, proto.keyword);
+            auto [vl, vc] = token_pos_line1_col0(sm, proto.keyword);
             index.values.push_back(ValueEntry{
                 .name = render_syntax_node_text(sm, *proto.name),
                 .type = render_syntax_node_text(sm, *proto.returnType),
@@ -535,7 +526,7 @@ static void process_module(const ModuleDeclarationSyntax& module, SyntaxIndex& i
             for (const auto* decl : node.declarators) {
                 if (!decl)
                     continue;
-                auto [vl, vc] = token_pos(sm, decl->name);
+                auto [vl, vc] = token_pos_line1_col0(sm, decl->name);
                 index.values.push_back(ValueEntry{
                     .name = tok_str(decl->name),
                     .type = with_declarator_dimensions(sm, type_text, *decl),
@@ -562,7 +553,7 @@ static void process_module(const ModuleDeclarationSyntax& module, SyntaxIndex& i
             for (const auto* decl : node.declarators) {
                 if (!decl)
                     continue;
-                auto [vl, vc] = token_pos(sm, decl->name);
+                auto [vl, vc] = token_pos_line1_col0(sm, decl->name);
                 index.values.push_back(ValueEntry{
                     .name = tok_str(decl->name),
                     .type = with_declarator_dimensions(sm, type_text, *decl),
@@ -597,7 +588,7 @@ static void process_class(const ClassDeclarationSyntax& cls, SyntaxIndex& index,
     entry.name = tok_str(cls.name);
     entry.file_id = source_file_id_for_token(index, sm, cls.name);
     entry.parent_scope = std::move(parent_scope);
-    auto [line, col] = token_pos(sm, cls.name);
+    auto [line, col] = token_pos_line1_col0(sm, cls.name);
     entry.line = line;
     entry.col = col;
 
@@ -613,7 +604,7 @@ static void process_class(const ClassDeclarationSyntax& cls, SyntaxIndex& index,
                 for (const auto* decl : data->declarators) {
                     if (!decl)
                         continue;
-                    auto [fl, fc] = token_pos(sm, decl->name);
+                    auto [fl, fc] = token_pos_line1_col0(sm, decl->name);
                     entry.fields.push_back(
                         FieldEntry{.name = tok_str(decl->name),
                                    .type = type_text,
@@ -629,7 +620,7 @@ static void process_class(const ClassDeclarationSyntax& cls, SyntaxIndex& index,
             m.return_type = render_syntax_node_text(sm, *proto.returnType);
             m.is_task = (meth->declaration->kind == SyntaxKind::TaskDeclaration);
             m.file_id = source_file_id_for_token(index, sm, proto.keyword);
-            auto [ml, mc] = token_pos(sm, proto.keyword);
+            auto [ml, mc] = token_pos_line1_col0(sm, proto.keyword);
             m.line = ml;
             m.col = mc;
             entry.methods.push_back(std::move(m));
@@ -646,7 +637,7 @@ static void process_typedef(const TypedefDeclarationSyntax& td, SyntaxIndex& ind
     entry.name = tok_str(td.name);
     entry.parent_scope = std::move(parent_scope);
     entry.file_id = source_file_id_for_token(index, sm, td.name);
-    auto [td_line, td_col] = token_pos(sm, td.name);
+    auto [td_line, td_col] = token_pos_line1_col0(sm, td.name);
     entry.line = td_line;
     entry.col = td_col;
 
@@ -654,7 +645,7 @@ static void process_typedef(const TypedefDeclarationSyntax& td, SyntaxIndex& ind
         entry.is_enum = true;
         for (const auto* member : enum_type->members) {
             if (member) {
-                auto [em_line, em_col] = token_pos(sm, member->name);
+                auto [em_line, em_col] = token_pos_line1_col0(sm, member->name);
                 entry.enum_members.push_back(EnumMemberEntry{
                     .name = tok_str(member->name),
                     .file_id = source_file_id_for_token(index, sm, member->name),
@@ -672,7 +663,7 @@ static void process_typedef(const TypedefDeclarationSyntax& td, SyntaxIndex& ind
             for (const auto* decl : member->declarators) {
                 if (!decl)
                     continue;
-                auto [fl, fc] = token_pos(sm, decl->name);
+                auto [fl, fc] = token_pos_line1_col0(sm, decl->name);
                 entry.fields.push_back(FieldEntry{
                     .name = tok_str(decl->name),
                     .type = with_declarator_dimensions(sm, type_text, *decl),
@@ -721,7 +712,7 @@ static void process_package(const ModuleDeclarationSyntax& pkg, SyntaxIndex& ind
             for (const auto* decl : data->declarators) {
                 if (decl) {
                     symbols.push_back(tok_str(decl->name));
-                    auto [vl, vc] = token_pos(sm, decl->name);
+                    auto [vl, vc] = token_pos_line1_col0(sm, decl->name);
                     index.values.push_back(ValueEntry{
                         .name = tok_str(decl->name),
                         .type = with_declarator_dimensions(sm, type_text, *decl),
@@ -739,7 +730,7 @@ static void process_package(const ModuleDeclarationSyntax& pkg, SyntaxIndex& ind
                 for (const auto* decl : param->declarators) {
                     if (decl) {
                         symbols.push_back(tok_str(decl->name));
-                        auto [vl, vc] = token_pos(sm, decl->name);
+                        auto [vl, vc] = token_pos_line1_col0(sm, decl->name);
                         index.values.push_back(ValueEntry{
                             .name = tok_str(decl->name),
                             .type = type_text,
@@ -818,7 +809,7 @@ static void collect_imports(const SyntaxNode& root, SyntaxIndex& index,
         }
 
         void handle(const PackageImportDeclarationSyntax& node) {
-            const auto [decl_line, decl_col] = token_pos(sm, node.keyword);
+            const auto [decl_line, decl_col] = token_pos_line1_col0(sm, node.keyword);
             (void)decl_col;
 
             for (const auto* item : node.items) {

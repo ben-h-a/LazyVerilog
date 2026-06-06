@@ -30,6 +30,19 @@ SourceFileID source_file_id_for_location(SyntaxIndex& index, const slang::Source
                                          slang::SourceLocation location);
 
 bool syntax_fragment_edge_is_wordlike(char c);
+
+/// Return a token position using slang's 1-based line numbers and LSP-style
+/// 0-based columns.  This is the historical coordinate shape stored in
+/// SyntaxIndex entries: callers convert the line to LSP coordinates at the
+/// API boundary with to_lsp_line().
+std::pair<int, int> token_pos_line1_col0(const slang::SourceManager& sm,
+                                         const slang::parsing::Token& token);
+
+/// Return a fully LSP-style token position: 0-based line and 0-based column.
+/// Feature implementations that edit the current document use this form
+/// directly because LSP text edits are already 0-based.
+std::pair<int, int> token_pos_line0_col0(const slang::SourceManager& sm,
+                                         const slang::parsing::Token& token);
 bool syntax_needs_space_between_fragments(std::string_view previous, std::string_view next);
 std::optional<std::string> source_text_for_syntax_range(const slang::SourceManager& sm,
                                                        slang::SourceRange range);

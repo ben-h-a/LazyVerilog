@@ -1,4 +1,5 @@
 #include "connect.hpp"
+#include "../syntax_index_shared.hpp"
 #include "../dynamic_file_index.hpp"
 
 #include <slang/syntax/AllSyntax.h>
@@ -584,16 +585,6 @@ static std::string type_from_net_declaration(const slang::syntax::NetDeclaration
     if (!data_type.empty())
         type += (type.empty() ? "" : " ") + data_type;
     return append_declarator_dimensions(std::move(type), declarator);
-}
-
-static std::pair<int, int> token_pos(const slang::SourceManager& sm,
-                                     const slang::parsing::Token& token) {
-    if (!token || !token.location().valid())
-        return {0, 0};
-    const auto line = sm.getLineNumber(token.location());
-    const auto col = sm.getColumnNumber(token.location());
-    return {line > 0 ? static_cast<int>(line) - 1 : 0,
-            col > 0 ? static_cast<int>(col) - 1 : 0};
 }
 
 static std::pair<int, int> range_end_pos(const slang::SourceManager& sm,

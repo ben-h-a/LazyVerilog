@@ -47,6 +47,24 @@ SourceFileID source_file_id_for_location(SyntaxIndex& index, const slang::Source
     return index.intern_source_file(std::move(uri));
 }
 
+
+std::pair<int, int> token_pos_line1_col0(const slang::SourceManager& sm,
+                                         const slang::parsing::Token& token) {
+    if (!token || !token.location().valid())
+        return {0, 0};
+
+    const auto line = sm.getLineNumber(token.location());
+    const auto col = sm.getColumnNumber(token.location());
+    return {line > 0 ? static_cast<int>(line) : 0,
+            col > 0 ? static_cast<int>(col) - 1 : 0};
+}
+
+std::pair<int, int> token_pos_line0_col0(const slang::SourceManager& sm,
+                                         const slang::parsing::Token& token) {
+    auto [line, col] = token_pos_line1_col0(sm, token);
+    return {line > 0 ? line - 1 : 0, col};
+}
+
 bool syntax_fragment_edge_is_wordlike(char c) {
     return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$' || c == '`';
 }

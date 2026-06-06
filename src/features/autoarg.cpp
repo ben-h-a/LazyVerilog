@@ -1,4 +1,5 @@
 #include "autoarg.hpp"
+#include "../syntax_index_shared.hpp"
 #include <algorithm>
 #include <slang/syntax/AllSyntax.h>
 #include <slang/syntax/SyntaxTree.h>
@@ -7,14 +8,6 @@
 
 using namespace slang;
 using namespace slang::syntax;
-
-static std::pair<int, int> token_pos(const SourceManager& sm, const slang::parsing::Token& token) {
-    if (!token || !token.location().valid())
-        return {0, 0};
-    const auto line = sm.getLineNumber(token.location());
-    const auto col = sm.getColumnNumber(token.location());
-    return {line > 0 ? (int)line - 1 : 0, col > 0 ? (int)col - 1 : 0};
-}
 
 static bool line_in_node(const SourceManager& sm, const SyntaxNode& node, int line) {
     auto first = node.getFirstToken();
@@ -68,10 +61,10 @@ struct AllModulesFinder : public SyntaxVisitor<AllModulesFinder> {
         if (port_names.empty())
             return;
 
-        auto [open_line, open_col] = token_pos(sm, node.header->ports->getFirstToken());
+        auto [open_line, open_col] = token_pos_line0_col0(sm, node.header->ports->getFirstToken());
         if (!node.header->semi)
             return;
-        auto [end_line, end_col] = token_pos(sm, node.header->semi);
+        auto [end_line, end_col] = token_pos_line0_col0(sm, node.header->semi);
 
         AutoargResult result;
         result.port_names = std::move(port_names);
@@ -123,8 +116,8 @@ std::optional<AutoargResult> autoarg_impl(const DocumentState& state, int line, 
     if (port_names.empty())
         return std::nullopt;
 
-    auto [open_line, open_col] = token_pos(sm, module->header->ports->getFirstToken());
-    auto [end_line, end_col] = token_pos(sm, module->header->semi);
+    auto [open_line, open_col] = token_pos_line0_col0(sm, module->header->ports->getFirstToken());
+    auto [end_line, end_col] = token_pos_line0_col0(sm, module->header->semi);
     if (!module->header->semi)
         return std::nullopt;
 
