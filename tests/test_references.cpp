@@ -78,6 +78,48 @@ endmodule
     CHECK(refs[0].range.start.line == 4);
 }
 
+TEST_CASE("references: project snapshot publishes SymbolID reference lookup", "[references]") {
+    const std::string text = R"(
+module leaf;
+endmodule
+
+module top;
+    leaf u_leaf();
+endmodule
+)";
+    const auto path =
+        std::filesystem::temp_directory_path() / "lazyverilog_project_reference_lookup.sv";
+    {
+        std::ofstream out(path);
+        REQUIRE(out.good());
+        out << text;
+    }
+
+    Analyzer analyzer;
+    analyzer.set_extra_files({path.string()});
+    analyzer.wait_for_background_index_idle();
+
+    const auto snapshot = analyzer.project_index_snapshot();
+    REQUIRE(snapshot != nullptr);
+
+    const auto symbol = SymbolID::from_canonical("module::leaf");
+    const auto bucket = snapshot->references_by_symbol.find(symbol);
+    REQUIRE(bucket != snapshot->references_by_symbol.end());
+    CHECK_FALSE(bucket->second.empty());
+    CHECK(std::all_of(bucket->second.begin(), bucket->second.end(),
+                      [&](const ProjectIndexReferenceRef& ref) {
+                          return ref.shard_index < snapshot->shards.size() &&
+                                 snapshot->shards[ref.shard_index].index &&
+                                 ref.reference_index <
+                                     snapshot->shards[ref.shard_index].index->references.size() &&
+                                 snapshot->shards[ref.shard_index]
+                                         .index->references[ref.reference_index]
+                                         .symbol_id == symbol;
+                      }));
+
+    std::filesystem::remove(path);
+}
+
 TEST_CASE("references: macro invocation resolves through macro SymbolID", "[references]") {
     Analyzer analyzer;
     const std::string uri = "file:///tmp/references_macro_fixture.sv";

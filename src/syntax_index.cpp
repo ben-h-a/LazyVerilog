@@ -836,6 +836,8 @@ std::string SyntaxIndex::source_uri(SourceFileID file_id) const {
 void SyntaxIndex::rebuild_reference_location_lookup() {
     references_by_location.clear();
     references_by_location.reserve(references.size());
+    references_by_symbol.clear();
+    references_by_symbol.reserve(references.size());
     for (size_t i = 0; i < references.size(); ++i) {
         const auto& ref = references[i];
         references_by_location[ReferenceLocationKey{
@@ -843,6 +845,8 @@ void SyntaxIndex::rebuild_reference_location_lookup() {
             .line = ref.line,
             .col = ref.col,
         }].push_back(i);
+        if (ref.symbol_id)
+            references_by_symbol[ref.symbol_id].push_back(i);
     }
 }
 

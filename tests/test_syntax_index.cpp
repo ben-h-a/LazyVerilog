@@ -106,6 +106,16 @@ endmodule
     // identity instead of relying on plain text.
     CHECK(has_ref("memory", "module::memory"));
     CHECK(has_ref("uart", "module::uart"));
+
+    const auto memory_symbol = SymbolID::from_canonical("module::memory");
+    const auto memory_bucket = idx.references_by_symbol.find(memory_symbol);
+    REQUIRE(memory_bucket != idx.references_by_symbol.end());
+    CHECK_FALSE(memory_bucket->second.empty());
+    CHECK(std::all_of(memory_bucket->second.begin(), memory_bucket->second.end(),
+                      [&](size_t ref_index) {
+                          return ref_index < idx.references.size() &&
+                                 idx.references[ref_index].symbol_id == memory_symbol;
+                      }));
 }
 
 TEST_CASE("syntax_index: symbol IDs include module, package, class, and typedef scopes",

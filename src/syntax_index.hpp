@@ -363,6 +363,22 @@ struct SyntaxIndex {
     std::unordered_map<ReferenceLocationKey, std::vector<size_t>, ReferenceLocationKeyHash>
         references_by_location;
 
+    // SymbolID -> reference-vector positions for hot cross-file references and
+    // rename request paths.
+    //
+    // `references` remains the owning storage so existing code can iterate in a
+    // stable, cache-friendly order.  This lookup is only an index of vector
+    // positions and is rebuilt when a shard is built or merged.  Keeping the
+    // lookup with each immutable shard lets callers avoid scanning every
+    // occurrence in that shard when they already know the target SymbolID:
+    //
+    //   target: module::memory
+    //   lookup: references_by_symbol[module::memory] -> declaration + uses
+    //
+    // Empty SymbolIDs are intentionally skipped because they are not actionable
+    // semantic identities and would otherwise create one enormous bucket.
+    std::unordered_map<SymbolID, std::vector<size_t>, SymbolIDHash> references_by_symbol;
+
     /// Build index from a parsed SyntaxTree.
     /// @param source  the source text that produced @p tree (used for line-number lookup).
     static SyntaxIndex build(const slang::syntax::SyntaxTree& tree, std::string_view source = {},
@@ -382,6 +398,11 @@ struct ProjectIndexModuleRef {
     size_t module_index{0};
 };
 
+struct ProjectIndexReferenceRef {
+    size_t shard_index{0};
+    size_t reference_index{0};
+};
+
 struct ProjectIndexSnapshot {
     struct Shard {
         std::string path;
@@ -391,4 +412,13 @@ struct ProjectIndexSnapshot {
 
     std::vector<Shard> shards;
     std::unordered_map<std::string, ProjectIndexModuleRef> module_by_name;
+    // Project-wide SymbolID -> shard/reference positions built at publish time.
+    //
+    // This is the request-path acceleration for large .f designs: references
+    // no longer need to linearly scan every ReferenceEntry in every closed-file
+    // shard.  The lookup stores positions instead of copying ReferenceEntry
+    // objects, so the immutable per-file SyntaxIndex shards remain the single
+    // source of truth for locations, include-file attribution, and debug data.
+    std::unordered_map<SymbolID, std::vector<ProjectIndexReferenceRef>, SymbolIDHash>
+        references_by_symbol;
 };

@@ -2017,17 +2017,30 @@ std::vector<Location> Analyzer::find_references(const std::string& uri, int line
             continue;
         if (!target_symbol_id && !fallback_symbol_id)
             continue;
-        for (const auto& ref : extra.index.references) {
-            if (target_symbol_id) {
-                if (ref.symbol_id != target_symbol_id &&
-                    (!fallback_symbol_id || ref.symbol_id != fallback_symbol_id))
-                    continue;
-            } else if (ref.symbol_id != fallback_symbol_id) {
-                continue;
-            }
 
-            add_indexed_reference(extra.uri, extra.index, ref);
-        }
+        // P1: closed-file shards can contain hundreds of thousands of compact
+        // ReferenceEntry records in large filelists.  Do not linearly scan the
+        // whole vector on every references/rename request.  Each immutable
+        // SyntaxIndex shard builds SymbolID -> reference positions at index
+        // construction / merge time, so the hot path touches only the buckets
+        // for the target identity plus the optional unresolved-name fallback.
+        auto add_symbol_bucket = [&](SymbolID symbol_id) {
+            if (!symbol_id)
+                return;
+            const auto bucket = extra.index.references_by_symbol.find(symbol_id);
+            if (bucket == extra.index.references_by_symbol.end())
+                return;
+
+            for (size_t ref_index : bucket->second) {
+                if (ref_index >= extra.index.references.size())
+                    continue;
+                add_indexed_reference(extra.uri, extra.index, extra.index.references[ref_index]);
+            }
+        };
+
+        add_symbol_bucket(target_symbol_id);
+        if (fallback_symbol_id && fallback_symbol_id != target_symbol_id)
+            add_symbol_bucket(fallback_symbol_id);
     }
 
     std::sort(result.begin(), result.end(), [](const Location& a, const Location& b) {
@@ -2841,6 +2854,7 @@ std::function<void()> Analyzer::publish_project_index_snapshot_locked() const {
         if (!entry.index)
             continue;
 
+        const size_t shard_index = snapshot->shards.size();
         snapshot->shards.push_back(ProjectIndexSnapshot::Shard{
             .path = entry.path,
             .uri = entry.uri,
@@ -2855,6 +2869,23 @@ std::function<void()> Analyzer::publish_project_index_snapshot_locked() const {
                 .shard = entry.index,
                 .module_index = i,
             });
+        }
+
+        // Build a project-level SymbolID -> references lookup while publishing
+        // the immutable background snapshot.  This keeps request handlers from
+        // walking all ReferenceEntry records in all shards for every
+        // textDocument/references / rename request.  We iterate the per-shard
+        // lookup rather than the raw reference vector so empty/non-actionable
+        // SymbolIDs stay excluded by the same rule as SyntaxIndex.
+        for (const auto& [symbol_id, refs] : entry.index->references_by_symbol) {
+            auto& bucket = snapshot->references_by_symbol[symbol_id];
+            bucket.reserve(bucket.size() + refs.size());
+            for (size_t reference_index : refs) {
+                bucket.push_back(ProjectIndexReferenceRef{
+                    .shard_index = shard_index,
+                    .reference_index = reference_index,
+                });
+            }
         }
     }
 
