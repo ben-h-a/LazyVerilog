@@ -2467,13 +2467,25 @@ std::optional<RtlTreeNode> Analyzer::rtl_tree(const std::string& uri) const {
     if (state_index.modules.empty())
         return std::nullopt;
 
+    std::vector<std::pair<std::string, std::shared_ptr<const DocumentState>>> open_states;
+    std::shared_ptr<const std::vector<ExtraFileInfo>> extra_snapshot;
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        open_states.reserve(docs_.size());
+        for (const auto& [state_uri, state_snapshot] : docs_)
+            open_states.emplace_back(state_uri, state_snapshot);
+        if (!extra_file_snapshot_cache_)
+            extra_file_snapshot_cache_ = build_extra_file_snapshot_locked();
+        extra_snapshot = extra_file_snapshot_cache_;
+    }
+
     RtlIndexView view;
     std::unordered_set<std::string> seen_uris;
-    for_each_state([&](const std::string& state_uri, const auto& state_snapshot) {
+    for (const auto& [state_uri, state_snapshot] : open_states) {
         if (state_snapshot && state_snapshot->tree)
             add_rtl_index_file(view, seen_uris, state_uri, get_structural_index(*state_snapshot));
-    });
-    for (const auto& extra : *extra_file_snapshot_ptr())
+    }
+    for (const auto& extra : *extra_snapshot)
         add_rtl_index_file(view, seen_uris, extra.uri, extra.index);
 
     const auto* root = &state_index.modules.front();
@@ -2526,13 +2538,25 @@ std::optional<RtlTreeNode> Analyzer::rtl_tree_reverse(const std::string& uri) co
     if (state_index.modules.empty())
         return std::nullopt;
 
+    std::vector<std::pair<std::string, std::shared_ptr<const DocumentState>>> open_states;
+    std::shared_ptr<const std::vector<ExtraFileInfo>> extra_snapshot;
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        open_states.reserve(docs_.size());
+        for (const auto& [state_uri, state_snapshot] : docs_)
+            open_states.emplace_back(state_uri, state_snapshot);
+        if (!extra_file_snapshot_cache_)
+            extra_file_snapshot_cache_ = build_extra_file_snapshot_locked();
+        extra_snapshot = extra_file_snapshot_cache_;
+    }
+
     RtlIndexView view;
     std::unordered_set<std::string> seen_uris;
-    for_each_state([&](const std::string& state_uri, const auto& state_snapshot) {
+    for (const auto& [state_uri, state_snapshot] : open_states) {
         if (state_snapshot && state_snapshot->tree)
             add_rtl_index_file(view, seen_uris, state_uri, get_structural_index(*state_snapshot));
-    });
-    for (const auto& extra : *extra_file_snapshot_ptr())
+    }
+    for (const auto& extra : *extra_snapshot)
         add_rtl_index_file(view, seen_uris, extra.uri, extra.index);
 
     const auto* target = &state_index.modules.front();
