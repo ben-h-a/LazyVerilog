@@ -38,7 +38,6 @@ struct LexemeFacts {
 
     slang::SourceRange range;
 
-    bool is_comment{false};
     bool is_directive{false};
     bool is_whitespace_sensitive{false};
 

@@ -812,40 +812,38 @@ void LazyVerilogServer::register_handlers() {
                     return {uri.substr(7)};
                 return {uri};
             };
+
+            // Apply the workspace root selected by either the modern LSP
+            // `rootUri` field or the legacy `rootPath` fallback.  Keep all
+            // config/vcode/background-index side effects in one place so a
+            // future change (for example, adding another project-level cache or
+            // warning diagnostic) cannot accidentally update only one
+            // initialize branch.
+            auto initialize_workspace_root = [&](const std::filesystem::path& p) {
+                if (!std::filesystem::exists(p))
+                    return;
+
+                root_ = p;
+                config_found_ = std::filesystem::exists(root_ / "lazyverilog.toml");
+
+                std::string warn;
+                ConfigWarning warning_detail;
+                config_ = load_config(root_, &warn, &warning_detail);
+                if (!warn.empty())
+                    show_warning(warn);
+                publish_config_diagnostic(warn.empty() ? nullptr : &warning_detail);
+
+                auto vcode = load_vcode(root_, config_);
+                analyzer_.set_project_config(config_.design.define, vcode.include_dirs,
+                                             vcode.files, resolve_vcode_path(root_, config_));
+                configure_background_compiler();
+                schedule_background_compilation();
+            };
+
             if (req.params.rootUri && !req.params.rootUri->raw_uri_.empty()) {
-                auto p = uri_to_path(req.params.rootUri->raw_uri_);
-                if (std::filesystem::exists(p)) {
-                    root_ = p;
-                    config_found_ = std::filesystem::exists(root_ / "lazyverilog.toml");
-                    std::string warn;
-                    ConfigWarning warning_detail;
-                    config_ = load_config(root_, &warn, &warning_detail);
-                    if (!warn.empty())
-                        show_warning(warn);
-                    publish_config_diagnostic(warn.empty() ? nullptr : &warning_detail);
-                    { auto vcode = load_vcode(root_, config_);
-                      analyzer_.set_project_config(config_.design.define, vcode.include_dirs,
-                                                   vcode.files, resolve_vcode_path(root_, config_)); }
-                    configure_background_compiler();
-                    schedule_background_compilation();
-                }
+                initialize_workspace_root(uri_to_path(req.params.rootUri->raw_uri_));
             } else if (req.params.rootPath && !req.params.rootPath->empty()) {
-                std::filesystem::path p(*req.params.rootPath);
-                if (std::filesystem::exists(p)) {
-                    root_ = p;
-                    config_found_ = std::filesystem::exists(root_ / "lazyverilog.toml");
-                    std::string warn;
-                    ConfigWarning warning_detail;
-                    config_ = load_config(root_, &warn, &warning_detail);
-                    if (!warn.empty())
-                        show_warning(warn);
-                    publish_config_diagnostic(warn.empty() ? nullptr : &warning_detail);
-                    { auto vcode = load_vcode(root_, config_);
-                      analyzer_.set_project_config(config_.design.define, vcode.include_dirs,
-                                                   vcode.files, resolve_vcode_path(root_, config_)); }
-                    configure_background_compiler();
-                    schedule_background_compilation();
-                }
+                initialize_workspace_root(std::filesystem::path(*req.params.rootPath));
             }
 
             // Inlay hints

@@ -609,7 +609,7 @@ static void collect_token_folds(const svfmt::TokenStream& tokens,
         if (t.lex->is_disabled_region_body) continue;
 
         // ── comments ──────────────────────────────────────────────────────
-        if (t.lex->is_comment) {
+        if (t.lex->comment_kind != svfmt::CommentLexemeKind::None) {
             if (active_decl_start < 0)
                 flush_decl_run();
             size_t offset = t.lex->range.start().offset();
@@ -981,7 +981,7 @@ static void collect_token_folds(const svfmt::TokenStream& tokens,
             // Look ahead past comments/unknowns to the first content token.
             size_t next = i + 1;
             while (next < tokens.size() &&
-                   (tokens[next].lex->is_comment ||
+                   (tokens[next].lex->comment_kind != svfmt::CommentLexemeKind::None ||
                     tokens[next].lex->kind == TK::Unknown ||
                     tokens[next].lex->is_disabled_region_body))
                 ++next;

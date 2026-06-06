@@ -46,6 +46,15 @@ inline const char* comment_role_name(CommentRole role) {
     return "<unknown-comment-role>";
 }
 
+inline const char* comment_lexeme_kind_name(CommentLexemeKind kind) {
+    switch (kind) {
+    case CommentLexemeKind::None: return "None";
+    case CommentLexemeKind::Line: return "Line";
+    case CommentLexemeKind::Block: return "Block";
+    }
+    return "<unknown-comment-lexeme-kind>";
+}
+
 inline std::string token_kind_name(slang::parsing::TokenKind kind) {
     std::string_view spelling = slang::parsing::LexerFacts::getTokenKindText(kind);
     if (!spelling.empty())
@@ -114,7 +123,7 @@ inline std::string token_stream_to_log(const TokenStream& tokens) {
         out << "  lex.text: \"" << escaped_for_log(lex.text) << "\"\n";
         out << "  lex.lower_text: \"" << escaped_for_log(lex.lower_text) << "\"\n";
         out << "  lex.range: " << lex.range.start().offset() << ".." << lex.range.end().offset() << "\n";
-        out << "  lex.is_comment: " << bool01(lex.is_comment) << "\n";
+        out << "  lex.comment_kind: " << comment_lexeme_kind_name(lex.comment_kind) << "\n";
         out << "  lex.is_directive: " << bool01(lex.is_directive) << "\n";
         out << "  lex.is_whitespace_sensitive: " << bool01(lex.is_whitespace_sensitive) << "\n";
 

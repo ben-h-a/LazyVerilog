@@ -164,7 +164,7 @@ inline bool is_identifier_like(const Tok& t) {
 }
 
 inline bool is_code_token(const Tok& t) {
-    return !t.lex->is_comment && !t.lex->is_directive && !is_passthrough(t);
+    return t.lex->comment_kind == CommentLexemeKind::None && !t.lex->is_directive && !is_passthrough(t);
 }
 
 inline bool is_covergroup_event_at(const TokenStream& tokens, size_t at) {
@@ -176,25 +176,6 @@ inline bool is_covergroup_event_at(const TokenStream& tokens, size_t at) {
         if (kind_is(tokens[i], TK::Semicolon))
             break;
         if (kind_is(tokens[i], TK::CoverGroupKeyword))
-            return true;
-    }
-    return false;
-}
-
-inline bool is_inside_argument_list(const TokenStream& tokens, size_t idx) {
-    if (idx >= tokens.size()) return false;
-    return tokens[idx].immutable.topology.inside_argument_list;
-}
-
-inline bool is_nested_argument_list_open(const TokenStream& tokens, size_t open) {
-    if (open >= tokens.size() || !kind_is(tokens[open], TK::OpenParenthesis))
-        return false;
-    for (size_t n = open; n > 0; --n) {
-        size_t parent = n - 1;
-        if (!kind_is(tokens[parent], TK::OpenParenthesis))
-            continue;
-        size_t close = tokens[parent].immutable.syntax.matching_token;
-        if (close != npos && close > open && tokens[parent].immutable.topology.starts_argument_list)
             return true;
     }
     return false;
@@ -768,7 +749,7 @@ public:
             }
             // ends_argument_list is set later when matching token is known (see below)
 
-            if (t.lex->is_comment) {
+            if (t.lex->comment_kind != CommentLexemeKind::None) {
                 bool comma_interstitial_block = false;
                 if (t.immutable.input_trivia.starts_original_line &&
                     t.lex->comment_kind == CommentLexemeKind::Block) {
@@ -814,8 +795,8 @@ public:
                 stmt_start = i + 1;
             }
         }
-        // Precompute inside_argument_list: O(n), replaces O(n) backward scan in
-        // is_inside_argument_list().  A token is inside an argument list when
+        // Precompute inside_argument_list: O(n).  A token is inside an
+        // argument list when
         // depth > 0, with ( exclusive (depth increments after) and ) exclusive
         // (depth decrements before), matching the original backward-scan semantics.
         {
@@ -1062,7 +1043,7 @@ public:
             auto& t = tokens[i];
             if (i == 0)
                 t.mutable_.wrap.must_break_before = true;
-            if (t.lex->is_comment && t.immutable.comment.role == CommentRole::OwnLine) {
+            if (t.lex->comment_kind != CommentLexemeKind::None && t.immutable.comment.role == CommentRole::OwnLine) {
                 t.mutable_.wrap.must_break_before = true;
                 t.mutable_.wrap.must_break_after = true;
             } else if (t.immutable.comment.role == CommentRole::Trailing &&
@@ -1093,7 +1074,7 @@ public:
             if (kind_is(t, TK::MacroUsage) && t.mutable_.macro.force_line_break) {
                 size_t break_at = i;
                 for (size_t j = i + 1; j < tokens.size(); ++j) {
-                    if (tokens[j].lex->is_comment) continue;
+                    if (tokens[j].lex->comment_kind != CommentLexemeKind::None) continue;
                     if (kind_is(tokens[j], TK::OpenParenthesis) &&
                         tokens[j].immutable.syntax.matching_token != npos)
                         break_at = tokens[j].immutable.syntax.matching_token;
@@ -1128,10 +1109,10 @@ public:
                 // defer the line break to after the comment so it renders inline.
                 for (size_t j = i + 1; j < tokens.size(); ++j) {
                     if (is_passthrough(tokens[j])) continue;
-                    if (tokens[j].lex->is_comment &&
+                    if (tokens[j].lex->comment_kind != CommentLexemeKind::None &&
                         tokens[j].immutable.comment.role == CommentRole::Trailing) {
                         t.mutable_.wrap.must_break_after = false;
-                        if (j > i + 1 && tokens[j - 1].lex->is_comment)
+                        if (j > i + 1 && tokens[j - 1].lex->comment_kind != CommentLexemeKind::None)
                             tokens[j - 1].mutable_.wrap.must_break_after = false;
                         tokens[j].mutable_.wrap.must_break_after = true;
                         continue;
@@ -1235,10 +1216,10 @@ public:
             // physical line break after the comment.  The semicolon path above
             // handles ordinary statements, but EOF comments after final
             // `endmodule` / `endclass` labels need the same treatment.
-            if (t.mutable_.wrap.must_break_after && !t.lex->is_comment) {
+            if (t.mutable_.wrap.must_break_after && t.lex->comment_kind == CommentLexemeKind::None) {
                 for (size_t j = i + 1; j < tokens.size(); ++j) {
                     if (is_passthrough(tokens[j])) continue;
-                    if (tokens[j].lex->is_comment &&
+                    if (tokens[j].lex->comment_kind != CommentLexemeKind::None &&
                         tokens[j].immutable.comment.role == CommentRole::Trailing) {
                         t.mutable_.wrap.must_break_after = false;
                         tokens[j].mutable_.wrap.must_break_after = true;
@@ -1268,7 +1249,7 @@ public:
                     for (size_t c = item.first; c > open + 1; --c) {
                         size_t p = c - 1;
                         if (tokens[p].lex->comment_kind == CommentLexemeKind::Block) {
-                            if (!(p + 1 < tokens.size() && tokens[p + 1].lex->is_comment &&
+                            if (!(p + 1 < tokens.size() && tokens[p + 1].lex->comment_kind != CommentLexemeKind::None &&
                                   tokens[p + 1].immutable.comment.role == CommentRole::OwnLine))
                                 leading_block_comment = p;
                             break;
@@ -1292,7 +1273,7 @@ public:
                     bool preceded_by_own_line_comment = false;
                     for (size_t p = item.first; p > open + 1; --p) {
                         size_t c = p - 1;
-                        if (tokens[c].lex->is_comment &&
+                        if (tokens[c].lex->comment_kind != CommentLexemeKind::None &&
                             tokens[c].immutable.comment.role == CommentRole::OwnLine) {
                             preceded_by_own_line_comment = true;
                             break;
@@ -1306,11 +1287,11 @@ public:
                 if (item.comma != npos) {
                     size_t break_token = item.comma;
                     for (size_t c = item.comma + 1; c < tokens.size(); ++c) {
-                        if (tokens[c].lex->is_comment &&
+                        if (tokens[c].lex->comment_kind != CommentLexemeKind::None &&
                             tokens[c].immutable.comment.role == CommentRole::Trailing &&
                             (kind == WrapListKind::InstancePorts ||
                              tokens[c].lex->comment_kind == CommentLexemeKind::Line ||
-                             (c + 1 < tokens.size() && tokens[c + 1].lex->is_comment &&
+                             (c + 1 < tokens.size() && tokens[c + 1].lex->comment_kind != CommentLexemeKind::None &&
                               tokens[c + 1].immutable.comment.role == CommentRole::OwnLine))) {
                             break_token = c;
                             break;
@@ -1331,7 +1312,7 @@ public:
                 tokens[close].mutable_.wrap.must_break_before = false;
 
             size_t after_open = open + 1;
-            if (after_open < close && tokens[after_open].lex->is_comment &&
+            if (after_open < close && tokens[after_open].lex->comment_kind != CommentLexemeKind::None &&
                 tokens[after_open].immutable.comment.role == CommentRole::Trailing) {
                 tokens[open].mutable_.wrap.must_break_after = false;
                 tokens[after_open].mutable_.wrap.must_break_after = true;
@@ -1370,7 +1351,7 @@ public:
                     if (items[n].comma != npos && keep_with_prev[n + 1]) {
                             tokens[items[n].comma].mutable_.wrap.must_break_after = false;
                             for (size_t c = items[n].comma + 1; c < tokens.size(); ++c) {
-                                if (tokens[c].lex->is_comment &&
+                                if (tokens[c].lex->comment_kind != CommentLexemeKind::None &&
                                     tokens[c].immutable.comment.role == CommentRole::Trailing)
                                     tokens[c].mutable_.wrap.must_break_after = false;
                                 if (is_code_token(tokens[c]))
@@ -1389,9 +1370,9 @@ public:
         };
 
         // Precompute whether an opening parenthesis is nested inside another
-        // argument-list parenthesis.  Calling is_nested_argument_list_open()
-        // used to scan backward from each function-call open, which is
-        // quadratic on generated files with thousands of calls.
+        // argument-list parenthesis.  Keeping this as a vector avoids the old
+        // per-open backward scan, which was quadratic on generated files with
+        // thousands of calls.
         std::vector<bool> nested_argument_open(tokens.size(), false);
         std::vector<size_t> argument_stack;
         for (size_t i = 0; i < tokens.size(); ++i) {
@@ -1535,7 +1516,7 @@ public:
         // line terminator in SystemVerilog; allowing any later token to render
         // after it changes that token into comment text on the next pass.
         for (auto& t : tokens) {
-            if (!t.lex->is_comment)
+            if (t.lex->comment_kind == CommentLexemeKind::None)
                 continue;
             if (t.immutable.comment.role == CommentRole::OwnLine) {
                 t.mutable_.wrap.must_break_before = true;
@@ -1626,7 +1607,7 @@ private:
                 ctrl_just_closed = true;
             }
 
-            if (single_stmt_pending && !ctrl_just_closed && !t.lex->is_comment) {
+            if (single_stmt_pending && !ctrl_just_closed && t.lex->comment_kind == CommentLexemeKind::None) {
                 single_stmt_pending = false;
                 const bool is_block = kind_is(t, TK::BeginKeyword) ||
                                       is_fork_block_open(tokens, i) ||
@@ -1761,7 +1742,7 @@ public:
             if (closes) level = std::max(0, level - 1);
 
             // Resolve single-stmt pending on first non-passthrough, non-comment token AFTER control expr close
-            if (single_stmt_pending && !ctrl_just_closed && !t.lex->is_comment) {
+            if (single_stmt_pending && !ctrl_just_closed && t.lex->comment_kind == CommentLexemeKind::None) {
                 single_stmt_pending = false;
                 bool is_block = kind_is(t, TK::BeginKeyword) ||
                                 is_fork_block_open(tokens, i) ||
@@ -1871,7 +1852,7 @@ public:
             tokens[first].mutable_.indent.base_indent = std::max(0, indent);
             for (size_t k = first + 1; k <= last && k < tokens.size(); ++k) {
                 if (tokens[k].mutable_.wrap.must_break_before ||
-                    (tokens[k].lex->is_comment && tokens[k].immutable.comment.role == CommentRole::OwnLine))
+                    (tokens[k].lex->comment_kind != CommentLexemeKind::None && tokens[k].immutable.comment.role == CommentRole::OwnLine))
                     tokens[k].mutable_.indent.base_indent = std::max(0, indent);
             }
         };
@@ -1943,7 +1924,7 @@ public:
             for (const auto& item : items)
                 set_item_indent(item.first, item.last, item_indent);
             for (size_t k = open + 1; k < close; ++k) {
-                if (tokens[k].lex->is_comment &&
+                if (tokens[k].lex->comment_kind != CommentLexemeKind::None &&
                     (tokens[k].immutable.comment.role == CommentRole::OwnLine ||
                      tokens[k].mutable_.wrap.must_break_before))
                     tokens[k].mutable_.indent.base_indent = std::max(0, item_indent);
@@ -2060,7 +2041,7 @@ public:
             for (size_t k = scan_start; k < end_idx; ++k) {
                 auto& tok = tokens[k];
                 if (is_passthrough(tok)) { ln.disabled = true; continue; }
-                if (tok.lex->is_comment) continue;
+                if (tok.lex->comment_kind != CommentLexemeKind::None) continue;
                 if (kind_is(tok, TK::OpenParenthesis))  ++pd;
                 else if (kind_is(tok, TK::CloseParenthesis) && pd > 0)  --pd;
                 else if (kind_is(tok, TK::OpenBracket))   ++bd;
@@ -2907,7 +2888,7 @@ public:
     const char* name() const override { return "comment"; }
     void run(TokenStream& tokens) override {
         for (auto& t : tokens) {
-            if (!t.lex->is_comment)
+            if (t.lex->comment_kind == CommentLexemeKind::None)
                 continue;
             if (t.immutable.comment.role == CommentRole::OwnLine)
                 t.mutable_.comment.force_own_line = true;
@@ -2933,7 +2914,7 @@ public:
 
             // Basic no-space rules
             if (no_space_before(t.lex->kind) || no_space_after(L.lex->kind)) spaces = 0;
-            if (t.lex->is_comment && kind_is(L, TK::OpenParenthesis))
+            if (t.lex->comment_kind != CommentLexemeKind::None && kind_is(L, TK::OpenParenthesis))
                 spaces = 1;
             // Empty positional argument: `, ,` — keep one space so the slot is visible
             if (kind_is(t, TK::Comma) && kind_is(L, TK::Comma)) spaces = 1;

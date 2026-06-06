@@ -181,7 +181,7 @@ private:
     }
 
     void add_token(slang::parsing::TokenKind kind, std::string_view text, size_t pos,
-                   bool is_comment, bool is_directive, bool whitespace_sensitive,
+                   bool is_directive, bool whitespace_sensitive,
                    CommentLexemeKind comment_kind = CommentLexemeKind::None,
                    bool is_format_off_marker = false,
                    bool is_format_on_marker = false,
@@ -196,7 +196,6 @@ private:
             lex->lower_text = lower_ascii(text);
         lex->range = slang::SourceRange(slang::SourceLocation(slang::BufferID::getPlaceholder(), pos),
                                         slang::SourceLocation(slang::BufferID::getPlaceholder(), pos + text.size()));
-        lex->is_comment = is_comment;
         lex->is_directive = is_directive;
         lex->is_whitespace_sensitive = whitespace_sensitive;
         lex->comment_kind = comment_kind;
@@ -242,7 +241,7 @@ private:
                 CommentLexemeKind::None;
             const bool format_on = is_comment && is_format_marker(raw, format_on_re_, opts_.format_on_comment_pattern);
             if (!raw_chunk.empty())
-                add_token(TK::Unknown, raw_chunk, cursor_, is_comment, false, true,
+                add_token(TK::Unknown, raw_chunk, cursor_, false, true,
                           comment_kind, false, format_on);
             if (trivia.kind == TV::LineComment || trivia.kind == TV::BlockComment) {
                 if (format_on)
@@ -259,7 +258,7 @@ private:
             bool format_on = is_format_marker(raw, format_on_re_, opts_.format_on_comment_pattern);
             const CommentLexemeKind comment_kind =
                 trivia.kind == TV::LineComment ? CommentLexemeKind::Line : CommentLexemeKind::Block;
-            add_token(TK::Unknown, raw, pos, true, false, disabled_ || format_off || format_on,
+            add_token(TK::Unknown, raw, pos, false, disabled_ || format_off || format_on,
                       comment_kind, format_off, format_on);
             if (format_off) {
                 disabled_ = true;
@@ -317,7 +316,7 @@ private:
             if (define_end > pos) {
                 std::string_view define_raw(source_.data() + pos, define_end - pos);
                 add_token(slang::parsing::TokenKind::Directive, define_raw, pos,
-                          false, true, /*whitespace_sensitive=*/true);
+                          true, /*whitespace_sensitive=*/true);
                 consume_text(define_raw, false);
                 passthrough_end_ = define_end;
                 return;
@@ -342,13 +341,13 @@ private:
             if (line_end == std::string::npos)
                 line_end = source_.size();
             std::string_view directive_raw(source_.data() + pos, line_end - pos);
-            add_token(kind, directive_raw, pos, false, true, false);
+            add_token(kind, directive_raw, pos, true, false);
             consume_text(directive_raw, false);
             passthrough_end_ = line_end;
             return;
         }
 
-        add_token(kind, raw, pos, false, directive, false);
+        add_token(kind, raw, pos, directive, false);
         consume_text(raw, false);
     }
 
@@ -362,7 +361,7 @@ private:
         std::string_view raw_chunk(source_.data() + cursor_, end - cursor_);
         if (raw_chunk.empty())
             return;
-        add_token(token.kind, raw_chunk, cursor_, false,
+        add_token(token.kind, raw_chunk, cursor_,
                   token.kind == slang::parsing::TokenKind::Directive, true);
         consume_text(raw_chunk, false);
     }
@@ -445,7 +444,7 @@ private:
         if (body_end > body_start) {
             std::string_view raw_body(source_.data() + body_start, body_end - body_start);
             add_token(slang::parsing::TokenKind::Unknown, raw_body, body_start,
-                      false, false, true, CommentLexemeKind::None,
+                      false, true, CommentLexemeKind::None,
                       false, false, true);
             consume_text(raw_body, false);
         }
