@@ -1,5 +1,6 @@
 #include "analyzer.hpp"
 #include "features/references.hpp"
+#include "string_utils.hpp"
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <filesystem>
@@ -331,6 +332,222 @@ endmodule
     CHECK(refs[1].col == 20);
 
     std::filesystem::remove(closed_path);
+}
+
+TEST_CASE("references: changed watched file refreshes only that project shard", "[references]") {
+    const auto path =
+        std::filesystem::temp_directory_path() / "lazyverilog_refs_watched_refresh.sv";
+    {
+        std::ofstream out(path);
+        REQUIRE(out.good());
+        out << "module old_name; endmodule\n";
+    }
+
+    Analyzer analyzer;
+    analyzer.set_extra_files({path.string()});
+    analyzer.wait_for_background_index_idle();
+
+    auto project = analyzer.extra_project_index();
+    REQUIRE(project);
+    REQUIRE(project->modules.size() == 1);
+    CHECK(project->modules[0].name == "old_name");
+
+    {
+        std::ofstream out(path, std::ios::trunc);
+        REQUIRE(out.good());
+        out << "module new_name; endmodule\n";
+    }
+
+    // Simulate the exact event the server receives from workspace edits / file
+    // watchers.  The analyzer should enqueue this one file only; no mtime scan
+    // or full filelist refresh is needed to replace the stale closed-file shard.
+    analyzer.refresh_changed_extra_files({uri_from_path(path)});
+    analyzer.wait_for_background_index_idle();
+
+    project = analyzer.extra_project_index();
+    REQUIRE(project);
+    REQUIRE(project->modules.size() == 1);
+    CHECK(project->modules[0].name == "new_name");
+
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("references: renamed package typedef finds closed project uses", "[references]") {
+    const auto dir = std::filesystem::temp_directory_path() / "lazyverilog_refs_renamed_pkg_typedef";
+    std::filesystem::create_directories(dir);
+
+    const auto header_path = dir / "params.svh";
+    const auto use_path = dir / "memory.sv";
+
+    const std::string header = R"(package cpu_pkg;
+typedef enum logic [1:0] {
+    IDLE,
+    FETCH
+} states_t;
+endpackage
+)";
+    const std::string use = R"(`include "params.svh"
+module memory;
+    states_t state;
+    always_comb state = states_t::IDLE;
+endmodule
+)";
+
+    {
+        std::ofstream out(header_path);
+        REQUIRE(out.good());
+        out << header;
+    }
+    {
+        std::ofstream out(use_path);
+        REQUIRE(out.good());
+        out << use;
+    }
+
+    Analyzer analyzer;
+    analyzer.set_include_dirs({dir.string()});
+    analyzer.set_extra_files({use_path.string()});
+    analyzer.wait_for_background_index_idle();
+
+    const auto header_uri = uri_from_path(header_path);
+    analyzer.open(header_uri, header);
+
+    const auto [line, col] = find_position(header, "states_t");
+    const auto refs = analyzer.find_references(header_uri, line, col, true);
+
+    REQUIRE(refs.size() == 3);
+    CHECK(std::any_of(refs.begin(), refs.end(), [&](const Location& ref) {
+        return ref.uri == header_uri && ref.line == 4 && ref.col == 2;
+    }));
+
+    std::filesystem::remove(use_path);
+    std::filesystem::remove(header_path);
+    std::filesystem::remove(dir);
+}
+
+TEST_CASE("references: package typedef from included header matches open includer uses",
+          "[references]") {
+    const auto dir = std::filesystem::temp_directory_path() / "lazyverilog_refs_include_pkg_typedef";
+    std::filesystem::create_directories(dir);
+
+    const auto header_path = dir / "params.svh";
+    const auto use_path = dir / "memory.sv";
+
+    const std::string header = R"(package cpu_pkg;
+typedef enum logic [1:0] {
+    IDLE,
+    FETCH
+} states_t;
+endpackage
+)";
+    const std::string use = R"(`include "params.svh"
+module memory;
+    states_t state;
+    always_comb state = states_t::IDLE;
+endmodule
+)";
+
+    {
+        std::ofstream out(header_path);
+        REQUIRE(out.good());
+        out << header;
+    }
+    {
+        std::ofstream out(use_path);
+        REQUIRE(out.good());
+        out << use;
+    }
+
+    Analyzer analyzer;
+    analyzer.set_include_dirs({dir.string()});
+    const auto header_uri = uri_from_path(header_path);
+    const auto use_uri = uri_from_path(use_path);
+    analyzer.open(header_uri, header);
+    analyzer.open(use_uri, use);
+
+    const auto [line, col] = find_position(header, "states_t");
+    const auto refs = analyzer.find_references(header_uri, line, col, true);
+
+    REQUIRE(refs.size() == 3);
+    CHECK(std::any_of(refs.begin(), refs.end(), [&](const Location& ref) {
+        return ref.uri == header_uri && ref.line == 4 && ref.col == 2;
+    }));
+    CHECK(std::any_of(refs.begin(), refs.end(), [&](const Location& ref) {
+        return ref.uri == use_uri && ref.line == 2 && ref.col == 4;
+    }));
+    CHECK(std::any_of(refs.begin(), refs.end(), [&](const Location& ref) {
+        return ref.uri == use_uri && ref.line == 3 && ref.col == 24;
+    }));
+
+    std::filesystem::remove(use_path);
+    std::filesystem::remove(header_path);
+    std::filesystem::remove(dir);
+}
+
+TEST_CASE("references: renamed unsaved included typedef matches open includer fallback uses",
+          "[references]") {
+    const auto dir = std::filesystem::temp_directory_path() / "lazyverilog_refs_unsaved_include_typedef";
+    std::filesystem::create_directories(dir);
+
+    const auto header_path = dir / "params.svh";
+    const auto use_path = dir / "memory.sv";
+
+    const std::string disk_header = R"(package cpu_pkg;
+typedef enum logic [1:0] {
+    IDLE,
+    FETCH
+} state_t;
+endpackage
+)";
+    const std::string open_header = R"(package cpu_pkg;
+typedef enum logic [1:0] {
+    IDLE,
+    FETCH
+} states_t;
+endpackage
+)";
+    const std::string open_use = R"(`include "params.svh"
+module memory;
+    states_t state;
+    always_comb state = states_t::IDLE;
+endmodule
+)";
+
+    {
+        std::ofstream out(header_path);
+        REQUIRE(out.good());
+        out << disk_header;
+    }
+    {
+        std::ofstream out(use_path);
+        REQUIRE(out.good());
+        out << open_use;
+    }
+
+    Analyzer analyzer;
+    analyzer.set_include_dirs({dir.string()});
+    const auto header_uri = uri_from_path(header_path);
+    const auto use_uri = uri_from_path(use_path);
+    analyzer.open(header_uri, open_header);
+    analyzer.open(use_uri, open_use);
+
+    const auto [line, col] = find_position(open_header, "states_t");
+    const auto refs = analyzer.find_references(header_uri, line, col, true);
+
+    REQUIRE(refs.size() == 3);
+    CHECK(std::any_of(refs.begin(), refs.end(), [&](const Location& ref) {
+        return ref.uri == header_uri && ref.line == 4 && ref.col == 2;
+    }));
+    CHECK(std::any_of(refs.begin(), refs.end(), [&](const Location& ref) {
+        return ref.uri == use_uri && ref.line == 2 && ref.col == 4;
+    }));
+    CHECK(std::any_of(refs.begin(), refs.end(), [&](const Location& ref) {
+        return ref.uri == use_uri && ref.line == 3 && ref.col == 24;
+    }));
+
+    std::filesystem::remove(use_path);
+    std::filesystem::remove(header_path);
+    std::filesystem::remove(dir);
 }
 
 TEST_CASE("references: typedef struct fields with same name stay separate", "[references]") {

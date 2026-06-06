@@ -168,6 +168,16 @@ class Analyzer {
     /// Return extra files from .f filelist.
     std::vector<std::string> extra_files() const;
 
+    /// Refresh project-index shards for files that the client reports changed.
+    ///
+    /// This is intentionally event-driven: callers pass the exact changed URIs
+    /// from workspace/didChangeWatchedFiles or an equivalent client-side edit
+    /// hook.  The analyzer does not scan the workspace, poll mtimes, or stat
+    /// every configured file, which keeps shared/HPC filesystems off normal
+    /// request paths.
+    void refresh_changed_extra_files(const std::vector<std::string>& changed_uris,
+                                     const std::vector<std::string>& deleted_uris = {});
+
     /// Return project-file index shards.
     ///
     /// Historical note: this used to return cached closed-file DocumentState

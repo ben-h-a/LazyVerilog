@@ -1703,6 +1703,22 @@ std::vector<Location> Analyzer::find_references(const std::string& uri, int line
         }
     }
     std::string fallback_symbol_debug;
+    if (!target_symbol_debug.empty() && target_symbol_debug.starts_with("typedef::")) {
+        // Unsaved include edge case:
+        //
+        //   params.svh   typedef enum ... states_t;   // open buffer, not saved
+        //   memory.sv    `include "params.svh"
+        //                states_t state;
+        //
+        // Parsing memory.sv asks slang to resolve the include from disk, where
+        // params.svh may still contain the pre-rename spelling `state_t`.  The
+        // visible `states_t` tokens in memory.sv therefore cannot be tied to the
+        // precise typedef SymbolID and are indexed as `name:states_t`.  Keep a
+        // narrow fallback for typedef targets so find-references immediately
+        // after rename can still bridge those open/included uses without
+        // reintroducing generic-name matching for functions/tasks/signals.
+        fallback_symbol_debug = "name:" + target->name;
+    }
     if (target_symbol_debug.empty()) {
         // If the lightweight index cannot prove a scope-qualified identity, keep
         // open-buffer references on the AST/definition-verification path below
@@ -1867,7 +1883,8 @@ std::vector<Location> Analyzer::find_references(const std::string& uri, int line
             // SymbolID path avoids that by matching `module:memory` directly.
             const auto open_index = get_structural_index(*state);
             for (const auto& ref : open_index.references) {
-                if (ref.symbol_id == target_symbol_id)
+                if (ref.symbol_id == target_symbol_id ||
+                    (fallback_symbol_id && ref.symbol_id == fallback_symbol_id))
                     add_indexed_reference(state_uri, open_index, ref);
             }
         } else {
@@ -1884,7 +1901,8 @@ std::vector<Location> Analyzer::find_references(const std::string& uri, int line
             continue;
         for (const auto& ref : extra.index.references) {
             if (target_symbol_id) {
-                if (ref.symbol_id != target_symbol_id)
+                if (ref.symbol_id != target_symbol_id &&
+                    (!fallback_symbol_id || ref.symbol_id != fallback_symbol_id))
                     continue;
             } else if (ref.symbol_id != fallback_symbol_id) {
                 continue;
@@ -2020,6 +2038,60 @@ void Analyzer::set_project_config(const std::vector<std::string>& defines,
 
     if (!extra_files_.empty())
         schedule_background_reindex_locked();
+}
+
+void Analyzer::refresh_changed_extra_files(const std::vector<std::string>& changed_uris,
+                                           const std::vector<std::string>& deleted_uris) {
+    auto normalized_project_path = [](std::string uri) -> std::string {
+        if (uri.starts_with("file://"))
+            uri = uri.substr(7);
+        if (uri.empty())
+            return {};
+        return normalize_path(uri).string();
+    };
+
+    std::lock_guard<std::mutex> lock(map_mutex_);
+
+    bool queued_changed_file = false;
+    bool removed_deleted_file = false;
+    std::unordered_set<std::string> seen_changed_paths;
+
+    for (const auto& uri : deleted_uris) {
+        const auto path = normalized_project_path(uri);
+        if (path.empty() || !extra_file_set_.contains(path))
+            continue;
+        extra_cache_.erase(uri_from_path(path));
+        removed_deleted_file = true;
+    }
+
+    for (const auto& uri : changed_uris) {
+        const auto path = normalized_project_path(uri);
+        if (path.empty() || !extra_file_set_.contains(path) || !seen_changed_paths.insert(path).second)
+            continue;
+
+        // Queue only the explicitly reported file.  This is the important HPC
+        // property: a rename/workspace-edit notification does not trigger a
+        // whole-design rescan and does not perform metadata checks for every
+        // filelist entry.  The background worker will parse disk contents for a
+        // closed file, or use the live DocumentState if the file is open.
+        background_pending_files_.push_front(path);
+        queued_changed_file = true;
+    }
+
+    if (!queued_changed_file && !removed_deleted_file)
+        return;
+
+    // Invalidate any in-flight parse that started before the client reported
+    // these edits.  Pending unrelated files remain queued and will parse under
+    // the new generation when the worker reaches them.
+    ++background_generation_;
+
+    if (removed_deleted_file)
+        schedule_background_project_publish_locked();
+    if (queued_changed_file) {
+        start_background_indexer_locked();
+        background_cv_.notify_all();
+    }
 }
 
 void Analyzer::wait_for_background_index_idle() const {

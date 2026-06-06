@@ -32,6 +32,12 @@ class LazyVerilogServer {
     Config config_;
     Analyzer analyzer_;
     std::unique_ptr<BackgroundCompiler> background_compiler_;
+    // Last applied textDocument version per open URI.  This lets us accept an
+    // immediate full-document sync from the Neovim workspace-edit hook, then
+    // ignore Neovim's later debounced duplicate incremental sync for the same
+    // buffer version.  Without this, a rename edit such as state_t -> states_t
+    // can be applied twice on the server as statess_t.
+    std::unordered_map<std::string, int> document_versions_;
     std::unordered_map<std::string, std::unordered_set<std::string>> diagnostic_uris_by_owner_;
 
     struct Impl;

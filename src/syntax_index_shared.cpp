@@ -168,20 +168,17 @@ std::string canonical_type_name_from_text(std::string_view type) {
 
 namespace {
 
-bool reference_type_char_is_wordlike(char c, bool allow_backtick) {
-    return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$' ||
-           (allow_backtick && c == '`');
-}
-
-std::string canonical_type_name_for_references(std::string_view type,
-                                               ReferenceCollectionOptions options) {
+std::string canonical_type_name_for_references(std::string_view type) {
+    // Keep macro-spelled type tokens intact for both closed-file and dynamic
+    // indexes.  This is still textual canonicalization, not macro expansion,
+    // but both indexing paths now use one wordlike definition so live-buffer
+    // references cannot disagree with project shards only because a type was
+    // written as `PACKET_T.
     size_t end = type.size();
-    while (end > 0 && !reference_type_char_is_wordlike(type[end - 1],
-                                                       options.canonical_type_allows_backtick))
+    while (end > 0 && !syntax_fragment_edge_is_wordlike(type[end - 1]))
         --end;
     size_t begin = end;
-    while (begin > 0 && reference_type_char_is_wordlike(type[begin - 1],
-                                                        options.canonical_type_allows_backtick))
+    while (begin > 0 && syntax_fragment_edge_is_wordlike(type[begin - 1]))
         --begin;
     return std::string(type.substr(begin, end - begin));
 }
@@ -221,8 +218,7 @@ void add_reference_entry(SyntaxIndex& index, std::string name, SourceFileID file
 } // namespace
 
 void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
-                                   const slang::SourceManager& sm,
-                                   ReferenceCollectionOptions options) {
+                                   const slang::SourceManager& sm) {
     std::unordered_set<std::string> module_values;
     std::unordered_map<std::string, std::string> module_value_types;
     std::unordered_set<std::string> package_values;
@@ -247,7 +243,7 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
             module_values.insert(key);
             // A file can contain duplicate declarations while being edited.
             // Prefer the later syntactic type for member access resolution.
-            module_value_types[key] = canonical_type_name_for_references(value.type, options);
+            module_value_types[key] = canonical_type_name_for_references(value.type);
         }
     }
 

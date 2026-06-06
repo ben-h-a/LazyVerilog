@@ -764,10 +764,7 @@ SyntaxIndex build_current_ast_structural_index(const DocumentState& state) {
         process_member(*member);
     }
 
-    collect_reference_occurrences(root, index, sm,
-                                  ReferenceCollectionOptions{
-                                      .canonical_type_allows_backtick = false,
-                                  });
+    collect_reference_occurrences(root, index, sm);
     collect_macro_reference_occurrences(*state.tree, index);
     return index;
 }

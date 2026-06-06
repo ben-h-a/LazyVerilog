@@ -43,25 +43,9 @@ std::string symbol_canonical(std::string kind, std::string scope, std::string na
 bool is_module_value_kind(std::string_view kind);
 std::string canonical_type_name_from_text(std::string_view type);
 
-struct ReferenceCollectionOptions {
-    // Historical behavior differs slightly between the closed-file SyntaxIndex
-    // path and the dynamic/open-buffer path:
-    //
-    //   syntax_index.cpp         used index_fragment_edge_is_wordlike(),
-    //                            where '`' counts as part of the final token.
-    //   dynamic_file_index.cpp   used an inline alnum/_/$ classifier,
-    //                            where '`' stops the final token.
-    //
-    // Keep that distinction explicit so the shared implementation remains a
-    // refactor instead of changing dynamic reference matching for macro-spelled
-    // type names.
-    bool canonical_type_allows_backtick{true};
-};
-
 /// Add declaration and use-site ReferenceEntry records to an already-populated
 /// SyntaxIndex.  Both closed-file indexing and dynamic/open-buffer indexing call
 /// this shared implementation so new symbol kinds cannot diverge between the
 /// two paths.
 void collect_reference_occurrences(const slang::syntax::SyntaxNode& root, SyntaxIndex& index,
-                                   const slang::SourceManager& sm,
-                                   ReferenceCollectionOptions options = {});
+                                   const slang::SourceManager& sm);
