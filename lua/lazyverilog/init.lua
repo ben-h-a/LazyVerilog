@@ -2567,7 +2567,9 @@ end
 --- @param filter_file string|nil  absolute path to restrict results to, or nil for all files
 --- @param label string            prefix for notify messages (e.g. "Lint" or "LintAll")
 --- @param command string          server executeCommand name
-local function _run_lint(filter_file, label, command)
+--- @param opts table|nil          optional behavior, e.g. { progress = true }
+local function _run_lint(filter_file, label, command, opts)
+	opts = opts or {}
 	local src_bufnr = vim.api.nvim_get_current_buf()
 	local clients = vim.lsp.get_clients({ bufnr = src_bufnr, name = "lazyverilog" })
 	if #clients == 0 then
@@ -2585,10 +2587,33 @@ local function _run_lint(filter_file, label, command)
 		return
 	end
 	local current_uri = vim.uri_from_bufnr(src_bufnr)
+	local progress_timer = nil
+	local progress_started_at = nil
+	if opts.progress then
+		progress_started_at = vim.loop.hrtime()
+		progress_timer = vim.loop.new_timer()
+		if progress_timer then
+			progress_timer:start(1000, 3000, vim.schedule_wrap(function()
+				local elapsed = (vim.loop.hrtime() - progress_started_at) / 1e9
+				vim.notify(
+					string.format("[LazyVerilog] %s still running... %.0fs elapsed", label, elapsed),
+					vim.log.levels.INFO
+				)
+			end))
+		end
+	end
+	local function stop_progress()
+		if progress_timer then
+			progress_timer:stop()
+			progress_timer:close()
+			progress_timer = nil
+		end
+	end
 	client:request("workspace/executeCommand", {
 		command = command,
 		arguments = { current_uri },
 	}, function(err, result)
+		stop_progress()
 		if err then
 			vim.notify("[LazyVerilog] " .. label .. ": " .. tostring(err.message), vim.log.levels.ERROR)
 			return
@@ -2658,7 +2683,7 @@ function M.lint_all()
 		return
 	end
 	vim.notify("[LazyVerilog] LintAll: parsing and linting all .f files...", vim.log.levels.INFO)
-	_run_lint(nil, "LintAll", "lazyverilog.lintAll")
+	_run_lint(nil, "LintAll", "lazyverilog.lintAll", { progress = true })
 end
 
 return M
