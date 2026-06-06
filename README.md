@@ -196,15 +196,15 @@ doesn't work for your codebase, bug reports are welcome.
 | Find references | ✅ | Symbols and macros across open files and configured project files |
 | Rename symbol | ✅ | Best-effort across project files |
 | Hover | ✅ | Symbol details for modules, ports, signals, parameters, typedefs, subroutines, and macros |
-| Completion | ⚠️ | Fixed keywords plus current-file module/port names; not context-aware |
+| Completion | ✅ | Context-aware auto-completions |
 | Signature help | ✅ | Functions and tasks |
-| Inlay hints | ✅ | Port names on instantiation |
+| Inlay hints | ✅ | Port directions on instantiation |
 | Workspace symbols | ✅ | Modules and classes from indexed design files |
 | RTL tree | ✅ | Module instantiation hierarchy |
-| Auto-instantiation | ✅ | |
-| Auto-wire | ✅ | |
-| Auto-arg / auto-function / auto-FF | ✅ | |
-| Project-local config | ✅ | `lazyverilog.toml` walked up from file |
+| Auto-instantiation | ✅ | Code Action AutoInst |
+| Auto-wire | ✅ | Code Action AutoWire |
+| Auto-arg / auto-function / auto-FF | ✅ | Code Action AutoArg |
+| Project-local config | ✅ | Full customization available by `lazyverilog.toml` at project root |
 
 &nbsp;
 
