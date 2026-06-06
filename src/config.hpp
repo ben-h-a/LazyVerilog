@@ -167,7 +167,7 @@ struct FormatOptions {
     PortDeclarationOptions port_declaration;
     VarDeclarationOptions var_declaration;
     InstanceOptions instance;
-    FunctionOptions function;
+    FunctionOptions function_call;
     FunctionDeclarationOptions function_declaration;
     ModuleOptions module;
     EnumOptions enum_declaration;

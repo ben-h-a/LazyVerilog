@@ -103,7 +103,13 @@ output  logic            valid
 
 ### `enable_format_on_save`
 
-When `true`, the LSP server responds to `textDocument/formatting` requests (triggered by editor save). When `false`, formatting requests return no edits.
+When `true`, the LSP server applies whole-document formatting in response to
+`textDocument/formatting` requests (typically triggered by editor save).
+
+When `false`, the server skips the whole-document formatter for those requests.
+This does **not** disable other save-time generators.  For example,
+`[autoarg].autoarg_on_save = true` may still return edits from AutoArg; those
+generated edits are formatted as module-header fragments for consistency.
 
 ```toml
 [format]

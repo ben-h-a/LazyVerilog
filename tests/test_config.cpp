@@ -231,12 +231,12 @@ autoarg_on_save = true
     CHECK(cfg.format.instance.instance_port_name_width == 12);
     CHECK(cfg.format.instance.align_adaptive == true);
 
-    CHECK(cfg.format.function.break_policy == "always");
-    CHECK(cfg.format.function.line_length == 80);
-    CHECK(cfg.format.function.arg_count == 3);
-    CHECK(cfg.format.function.layout == "hanging");
-    CHECK(cfg.format.function.space_before_paren == true);
-    CHECK(cfg.format.function.space_inside_paren == true);
+    CHECK(cfg.format.function_call.break_policy == "always");
+    CHECK(cfg.format.function_call.line_length == 80);
+    CHECK(cfg.format.function_call.arg_count == 3);
+    CHECK(cfg.format.function_call.layout == "hanging");
+    CHECK(cfg.format.function_call.space_before_paren == true);
+    CHECK(cfg.format.function_call.space_inside_paren == true);
 
     CHECK(cfg.format.spacing.control_keyword_space == false);
     CHECK(cfg.format.spacing.space_inside_parens == true);

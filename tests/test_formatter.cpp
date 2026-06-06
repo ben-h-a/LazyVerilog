@@ -10,8 +10,8 @@
 
 TEST_CASE("formatter: function calls support block layout", "[formatter]") {
     FormatOptions opts;
-    opts.function.break_policy = "always";
-    opts.function.layout = "block";
+    opts.function_call.break_policy = "always";
+    opts.function_call.layout = "block";
     opts.indent_size = 4;
 
     CHECK(format_source("result = my_func(arg1, arg2, arg3);\n", opts) == "result = my_func(\n"
@@ -24,9 +24,9 @@ TEST_CASE("formatter: function calls support block layout", "[formatter]") {
 
 TEST_CASE("formatter: member function calls support hanging layout", "[formatter]") {
     FormatOptions opts;
-    opts.function.break_policy = "auto";
-    opts.function.arg_count = 3;
-    opts.function.layout = "hanging";
+    opts.function_call.break_policy = "auto";
+    opts.function_call.arg_count = 3;
+    opts.function_call.layout = "hanging";
 
     CHECK(format_source("op.configure(.parent(this), .size(2), .lsb_pos(0));\n", opts) ==
           "op.configure(.parent(this),\n"
@@ -59,9 +59,9 @@ TEST_CASE("formatter: function call pass ignores hidden source whitespace", "[fo
 
 TEST_CASE("formatter: function call leading line comments keep following argument separate", "[formatter]") {
     FormatOptions opts;
-    opts.function.break_policy = "auto";
-    opts.function.arg_count = 3;
-    opts.function.layout = "hanging";
+    opts.function_call.break_policy = "auto";
+    opts.function_call.arg_count = 3;
+    opts.function_call.layout = "hanging";
 
     const std::string src =
         "function void f();\n"
@@ -111,9 +111,9 @@ TEST_CASE("formatter: predefined uvm block macros affect indentation", "[formatt
 
 TEST_CASE("formatter: pp conditional function call formats all argument segments", "[formatter]") {
     FormatOptions opts;
-    opts.function.break_policy = "auto";
-    opts.function.arg_count = 3;
-    opts.function.layout = "hanging";
+    opts.function_call.break_policy = "auto";
+    opts.function_call.arg_count = 3;
+    opts.function_call.layout = "hanging";
 
     const std::string src =
         "abits.configure(.parent(this), .size(6), .lsb_pos(4), .access(\"RO\"), .volatile(0),\n"
@@ -466,8 +466,8 @@ TEST_CASE("formatter: final ANSI port with line comment does not gain comma", "[
 
 TEST_CASE("formatter: function calls inside if conditions use configured layout", "[formatter]") {
     FormatOptions opts;
-    opts.function.break_policy = "always";
-    opts.function.layout = "block";
+    opts.function_call.break_policy = "always";
+    opts.function_call.layout = "block";
     opts.indent_size = 4;
     opts.default_indent_level_inside_outmost_block = 0;
 
@@ -498,8 +498,8 @@ TEST_CASE("formatter: function calls inside if conditions use configured layout"
 TEST_CASE("formatter: block function call in indented if condition keeps nested indent",
           "[formatter]") {
     FormatOptions opts;
-    opts.function.break_policy = "always";
-    opts.function.layout = "block";
+    opts.function_call.break_policy = "always";
+    opts.function_call.layout = "block";
     opts.indent_size = 4;
     opts.default_indent_level_inside_outmost_block = 0;
 
@@ -525,8 +525,8 @@ TEST_CASE("formatter: block function call in indented if condition keeps nested 
 
 TEST_CASE("formatter: function calls support hanging layout", "[formatter]") {
     FormatOptions opts;
-    opts.function.break_policy = "always";
-    opts.function.layout = "hanging";
+    opts.function_call.break_policy = "always";
+    opts.function_call.layout = "hanging";
 
     CHECK(format_source("result = my_func(arg1, arg2, arg3);\n", opts) ==
           "result = my_func(arg1,\n"
@@ -536,8 +536,8 @@ TEST_CASE("formatter: function calls support hanging layout", "[formatter]") {
 
 TEST_CASE("formatter: multiline function calls use hanging indentation", "[formatter]") {
     FormatOptions opts;
-    opts.function.break_policy = "always";
-    opts.function.layout = "hanging";
+    opts.function_call.break_policy = "always";
+    opts.function_call.layout = "hanging";
     opts.indent_size = 4;
     opts.default_indent_level_inside_outmost_block = 0;
 
@@ -626,7 +626,7 @@ TEST_CASE("formatter: define continuation block is preserved through basic forma
 
 TEST_CASE("formatter: define macro body not reformatted", "[formatter]") {
     FormatOptions opts;
-    opts.function.break_policy = "always";
+    opts.function_call.break_policy = "always";
     const std::string src = "`define print_bytes(ARR, STARTBYTE, NUMBYTES) \\\n"
                             "    for (int ii=STARTBYTE; ii<STARTBYTE+NUMBYTES; ii++) begin \\\n"
                             "        $display(\"0x%x \", ARR[ii]); \\\n"
@@ -676,8 +676,8 @@ TEST_CASE("formatter: function-like macro call without semicolon is formatted", 
     FormatOptions opts;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.indent_size = 4;
-    opts.function.break_policy = "always";
-    opts.function.layout = "hanging";
+    opts.function_call.break_policy = "always";
+    opts.function_call.layout = "hanging";
 
     std::string formatted;
     REQUIRE_NOTHROW(formatted = format_source("module top;\n"
@@ -694,9 +694,9 @@ TEST_CASE("formatter: object-like macro argument is a function call argument", "
     FormatOptions opts;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.indent_size = 4;
-    opts.function.break_policy = "auto";
-    opts.function.arg_count = 3;
-    opts.function.layout = "hanging";
+    opts.function_call.break_policy = "auto";
+    opts.function_call.arg_count = 3;
+    opts.function_call.layout = "hanging";
 
     std::string formatted;
     REQUIRE_NOTHROW(formatted = format_source("module top;\n"
@@ -757,7 +757,7 @@ TEST_CASE("formatter: function-like macro preserves following statement newline"
 
 TEST_CASE("formatter: macro arg call after blank line is idempotent", "[formatter]") {
     FormatOptions opts;
-    opts.function.break_policy = "always";
+    opts.function_call.break_policy = "always";
 
     const std::string src =
         "class c;\n"
@@ -1013,7 +1013,7 @@ TEST_CASE("formatter: macro call indent follows surrounding block", "[formatter]
 TEST_CASE("formatter: comments with parentheses are not treated as calls", "[formatter]") {
     FormatOptions opts;
     opts.safe_mode = true;
-    opts.function.break_policy = "always";
+    opts.function_call.break_policy = "always";
 
     const std::string src = "module top;\n"
                             "// If the memory supports write (WO or RW) then keep this comment.\n"
@@ -1025,7 +1025,7 @@ TEST_CASE("formatter: comments with parentheses are not treated as calls", "[for
 TEST_CASE("formatter: verilog_format on marker does not gain blank line", "[formatter]") {
     FormatOptions opts;
     opts.default_indent_level_inside_outmost_block = 0;
-    opts.function.break_policy = "always";
+    opts.function_call.break_policy = "always";
 
     const std::string src = "module top;\n"
                             "// verilog_format: off\n"
@@ -1075,7 +1075,7 @@ TEST_CASE("formatter: custom format control comment regex", "[formatter]") {
 TEST_CASE("formatter: calls with empty positional arguments are preserved", "[formatter]") {
     FormatOptions opts;
     opts.safe_mode = true;
-    opts.function.break_policy = "always";
+    opts.function_call.break_policy = "always";
 
     const std::string src = "module top;\n"
                             "  issue_data(req.data, rsp.data, , num_bits);\n"
@@ -1143,8 +1143,8 @@ TEST_CASE("formatter: leading interstitial call comment moves with argument",
     FormatOptions opts;
     opts.indent_size = 4;
     opts.default_indent_level_inside_outmost_block = 0;
-    opts.function.break_policy = "always";
-    opts.function.layout = "block";
+    opts.function_call.break_policy = "always";
+    opts.function_call.layout = "block";
 
     const std::string once = format_source("module top;\n"
                                            "initial foo(a, /*test*/ b, c);\n"
@@ -1166,8 +1166,8 @@ TEST_CASE("formatter: mixed trailing and own-line interstitial call comments sta
     FormatOptions opts;
     opts.indent_size = 4;
     opts.default_indent_level_inside_outmost_block = 0;
-    opts.function.break_policy = "always";
-    opts.function.layout = "block";
+    opts.function_call.break_policy = "always";
+    opts.function_call.layout = "block";
 
     const std::string once = format_source("module top;\n"
                                            "always_comb begin\n"
@@ -1200,8 +1200,8 @@ TEST_CASE("formatter: block function call after inline block comment indents fro
     FormatOptions opts;
     opts.indent_size = 4;
     opts.default_indent_level_inside_outmost_block = 0;
-    opts.function.break_policy = "always";
-    opts.function.layout = "block";
+    opts.function_call.break_policy = "always";
+    opts.function_call.layout = "block";
 
     CHECK(format_source("module top;\n"
                         "always_comb begin\n"
@@ -2933,9 +2933,9 @@ TEST_CASE("formatter: procedural event control at spacing supports all modes", "
 TEST_CASE("formatter: function call spacing options work without forced line breaks", "[formatter][options]") {
     FormatOptions opts;
     opts.default_indent_level_inside_outmost_block = 0;
-    opts.function.break_policy = "never";
-    opts.function.space_before_paren = true;
-    opts.function.space_inside_paren = true;
+    opts.function_call.break_policy = "never";
+    opts.function_call.space_before_paren = true;
+    opts.function_call.space_inside_paren = true;
 
     CHECK(format_source("module top;\ninitial begin\nresult = foo(a,b,c);\nobj.bar(x);\nend\nendmodule\n", opts) ==
           "module top;\ninitial begin\n  result = foo ( a, b, c );\n  obj.bar ( x );\nend\nendmodule\n");
@@ -2945,16 +2945,16 @@ TEST_CASE("formatter: function call auto policy breaks by line length and arg co
     FormatOptions opts;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.indent_size = 4;
-    opts.function.break_policy = "auto";
-    opts.function.layout = "block";
-    opts.function.arg_count = -1;
-    opts.function.line_length = 24;
+    opts.function_call.break_policy = "auto";
+    opts.function_call.layout = "block";
+    opts.function_call.arg_count = -1;
+    opts.function_call.line_length = 24;
 
     CHECK(format_source("module top;\ninitial result = very_long_function_name(alpha, beta);\nendmodule\n", opts) ==
           "module top;\ninitial\n    result = very_long_function_name(\n                 alpha,\n                 beta\n             );\nendmodule\n");
 
-    opts.function.line_length = 200;
-    opts.function.arg_count = 3;
+    opts.function_call.line_length = 200;
+    opts.function_call.arg_count = 3;
     CHECK(format_source("module top;\ninitial result = short_name(a, b, c);\nendmodule\n", opts) ==
           "module top;\ninitial\n    result = short_name(\n                 a,\n                 b,\n                 c\n             );\nendmodule\n");
 }
@@ -3126,9 +3126,9 @@ TEST_CASE("formatter: memory_top regression statement assignment columns", "[for
 TEST_CASE("formatter: memory_top regression function-call wrapping boundaries", "[formatter][memory_top]") {
     FormatOptions opts;
     opts.default_indent_level_inside_outmost_block = 0;
-    opts.function.break_policy = "auto";
-    opts.function.arg_count = 3;
-    opts.function.layout = "block";
+    opts.function_call.break_policy = "auto";
+    opts.function_call.arg_count = 3;
+    opts.function_call.layout = "block";
 
     const std::string macro_src =
         "`define print_bytes(ARR, STARTBYTE, NUMBYTES) \\\n"

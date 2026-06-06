@@ -41,9 +41,9 @@ static std::vector<std::string> validate_config(const Config& cfg) {
                "[lint.module].module_instantiation_style", {"positional", "named", "both"});
     check_enum(cfg.lint.function.function_call_style, "[lint.function].function_call_style",
                {"positional", "named", "both"});
-    check_enum(cfg.format.function.break_policy, "[format.function_call].break_policy",
+    check_enum(cfg.format.function_call.break_policy, "[format.function_call].break_policy",
                {"auto", "always", "never"});
-    check_enum(cfg.format.function.layout, "[format.function_call].layout", {"block", "hanging"});
+    check_enum(cfg.format.function_call.layout, "[format.function_call].layout", {"block", "hanging"});
     check_enum(cfg.format.function_declaration.layout, "[format.function_declaration].layout",
                {"block", "hanging"});
     check_enum(cfg.format.module.parameter_layout, "[format.module].parameter_layout",
@@ -228,17 +228,17 @@ Config load_config(const std::filesystem::path& root, std::string* warning,
             }
             if (auto fn = (*f)["function_call"].as_table()) {
                 if (auto v = (*fn)["break_policy"].value<std::string>())
-                    cfg.format.function.break_policy = *v;
+                    cfg.format.function_call.break_policy = *v;
                 if (auto v = (*fn)["line_length"].value<int64_t>())
-                    cfg.format.function.line_length = static_cast<int>(*v);
+                    cfg.format.function_call.line_length = static_cast<int>(*v);
                 if (auto v = (*fn)["arg_count"].value<int64_t>())
-                    cfg.format.function.arg_count = static_cast<int>(*v);
+                    cfg.format.function_call.arg_count = static_cast<int>(*v);
                 if (auto v = (*fn)["layout"].value<std::string>())
-                    cfg.format.function.layout = *v;
+                    cfg.format.function_call.layout = *v;
                 if (auto v = (*fn)["space_before_paren"].value<bool>())
-                    cfg.format.function.space_before_paren = *v;
+                    cfg.format.function_call.space_before_paren = *v;
                 if (auto v = (*fn)["space_inside_paren"].value<bool>())
-                    cfg.format.function.space_inside_paren = *v;
+                    cfg.format.function_call.space_inside_paren = *v;
             }
             if (auto fd = (*f)["function_declaration"].as_table()) {
                 if (auto v = (*fd)["layout"].value<std::string>())

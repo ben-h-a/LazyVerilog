@@ -680,8 +680,8 @@ endmodule
 
     Config config;
     config.format.indent_size = 4;
-    config.format.function.arg_count = 3;
-    config.format.function.layout = "hanging";
+    config.format.function_call.arg_count = 3;
+    config.format.function_call.layout = "hanging";
     config.autofunc.indent_size = 4;
     config.autofunc.use_named_arguments = true;
 

@@ -1488,17 +1488,17 @@ public:
                 if (items.empty())
                     continue;
                 bool do_break = false;
-                if (opts_.function.break_policy == "always")
+                if (opts_.function_call.break_policy == "always")
                     do_break = items.size() > 1;
-                else if (opts_.function.break_policy == "auto") {
-                    do_break = (opts_.function.arg_count >= 0 &&
-                                static_cast<int>(items.size()) >= opts_.function.arg_count);
+                else if (opts_.function_call.break_policy == "auto") {
+                    do_break = (opts_.function_call.arg_count >= 0 &&
+                                static_cast<int>(items.size()) >= opts_.function_call.arg_count);
                     int approx = line_prefix_width(tokens, open) + 1 + compact_width(tokens, open + 1, close) + 1;
-                    if (approx > opts_.function.line_length)
+                    if (approx > opts_.function_call.line_length)
                         do_break = true;
                 }
-                if (do_break && opts_.function.break_policy != "never") {
-                    bool hanging = opts_.function.layout == "hanging";
+                if (do_break && opts_.function_call.break_policy != "never") {
+                    bool hanging = opts_.function_call.layout == "hanging";
                     apply_list(open, hanging ? WrapListKind::FunctionHanging
                                              : WrapListKind::FunctionBlock,
                                !hanging, !hanging, !hanging);
@@ -2980,7 +2980,7 @@ public:
 
             // Function/task call spacing
             if (kind_is(t, TK::OpenParenthesis) && (kind_is(L, TK::Identifier) || kind_is(L, TK::SystemIdentifier) || kind_is(L, TK::MacroUsage)))
-                spaces = opts_.function.space_before_paren ? 1 : 0;
+                spaces = opts_.function_call.space_before_paren ? 1 : 0;
             if (kind_is(t, TK::OpenParenthesis) && t.mutable_.wrap.list_kind == WrapListKind::InstancePorts &&
                 opts_.instance.align)
                 spaces = 1;
@@ -2993,8 +2993,8 @@ public:
                 spaces = opts_.spacing.control_keyword_space ? 1 : 0;
             if ((kind_is(L, TK::OpenParenthesis) || kind_is(t, TK::CloseParenthesis)) && opts_.spacing.space_inside_parens) spaces = 1;
             // function.space_inside_paren: space inside argument-list parens only
-            if (kind_is(L, TK::OpenParenthesis) && L.immutable.topology.starts_argument_list && opts_.function.space_inside_paren) spaces = 1;
-            if (kind_is(t, TK::CloseParenthesis) && t.immutable.topology.ends_argument_list && opts_.function.space_inside_paren) spaces = 1;
+            if (kind_is(L, TK::OpenParenthesis) && L.immutable.topology.starts_argument_list && opts_.function_call.space_inside_paren) spaces = 1;
+            if (kind_is(t, TK::CloseParenthesis) && t.immutable.topology.ends_argument_list && opts_.function_call.space_inside_paren) spaces = 1;
             if ((kind_is(L, TK::OpenBracket) || kind_is(t, TK::CloseBracket)) && opts_.spacing.space_inside_dimension_brackets) spaces = 1;
 
             // } brace: 1 space after (unless followed by ; or ,)
@@ -3121,7 +3121,7 @@ public:
                 spaces = 0;
             if (kind_is(t, TK::CloseParenthesis) &&
                 !opts_.spacing.space_inside_parens &&
-                !(t.immutable.topology.ends_argument_list && opts_.function.space_inside_paren)) {
+                !(t.immutable.topology.ends_argument_list && opts_.function_call.space_inside_paren)) {
                 bool event_control_close = false;
                 if (opts_.spacing.space_inside_event_control_parens &&
                     t.immutable.syntax.matching_token != npos) {

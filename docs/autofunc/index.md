@@ -24,7 +24,12 @@ indent_size = 4
 use_named_arguments = true
 ```
 
+`autofunc.indent_size` is independent of `[format].indent_size`.  The default
+is `4`, while the formatter's default indent size is `2`, so set both explicitly
+if generated AutoFunc calls should match a project-wide two-space or four-space
+style.
+
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `indent_size` | int | `4` | Indentation used for multiline generated argument lists |
+| `indent_size` | int | `4` | Indentation used for multiline generated argument lists; does not inherit `[format].indent_size` |
 | `use_named_arguments` | bool | `true` | Generate `.arg(value)` named style instead of positional |
