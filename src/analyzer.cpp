@@ -46,7 +46,6 @@ void log_perf(std::string_view label, Clock::time_point start) {
 } // namespace
 
 static std::string file_name_to_uri(std::string_view file_name, const std::string& fallback_uri);
-static std::optional<std::string> read_file_text_optional(const std::filesystem::path& path);
 
 static void add_include_dirs(slang::SourceManager& sm, const std::vector<std::string>& dirs) {
     for (const auto& dir : dirs) {
@@ -659,37 +658,6 @@ static bool macro_has_user_source_location(const slang::SourceManager& sm,
     // LSP features.
     return name && name.location().valid() && sm.isFileLoc(name.location());
 }
-
-static std::optional<std::string> read_file_text_optional(const std::filesystem::path& path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in)
-        return std::nullopt;
-
-    // Prefer a single allocation/read for regular files.  The fallback keeps the
-    // helper robust for paths where the size cannot be queried or the stream is
-    // not seekable.  This matters on large RTL sources because the iterator
-    // constructor repeatedly grows the string while pulling one character at a
-    // time through the stream buffer.
-    std::error_code ec;
-    const auto size = std::filesystem::file_size(path, ec);
-    if (!ec) {
-        std::string text(size, '\0');
-        if (size == 0)
-            return text;
-        in.read(text.data(), static_cast<std::streamsize>(text.size()));
-        text.resize(static_cast<size_t>(in.gcount()));
-        return text;
-    }
-
-    std::string text;
-    in.seekg(0, std::ios::end);
-    if (const auto end = in.tellg(); end > 0)
-        text.reserve(static_cast<size_t>(end));
-    in.seekg(0, std::ios::beg);
-    text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-    return text;
-}
-
 
 static std::string render_hover_dimensions(
     const slang::SourceManager& sm,

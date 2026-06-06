@@ -20,14 +20,6 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-static std::string read_file_text(const std::filesystem::path& path) {
-    std::ifstream input(path, std::ios::binary);
-    if (!input)
-        return {};
-    return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
-}
-
-
 static std::string diagnostic_uri(const slang::SourceManager& sm, const std::string& fallback_uri,
                                   slang::SourceLocation location) {
     if (!location.valid())
@@ -327,7 +319,7 @@ BackgroundCompileResult BackgroundCompiler::compile(uint64_t generation,
         if (assigned_paths.contains(normalized_path))
             continue;
 
-        std::string text = file.text ? *file.text : read_file_text(file.path);
+        std::string text = file.text ? *file.text : read_file_text_or_empty(file.path);
         if (text.empty() && !file.text)
             continue;
 

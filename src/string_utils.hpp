@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <fstream>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -16,6 +18,39 @@ inline std::string trim_copy(std::string text) {
     return std::string(first, last);
 }
 
+
+inline std::optional<std::string> read_file_text_optional(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in)
+        return std::nullopt;
+
+    // Prefer a single allocation/read for regular files.  The fallback keeps the
+    // helper robust for paths where the size cannot be queried or the stream is
+    // not seekable.  Large RTL sources are common, so avoiding repeated string
+    // growth keeps project/background parsing from wasting allocator work.
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(path, ec);
+    if (!ec) {
+        std::string text(size, '\0');
+        if (size == 0)
+            return text;
+        in.read(text.data(), static_cast<std::streamsize>(text.size()));
+        text.resize(static_cast<size_t>(in.gcount()));
+        return text;
+    }
+
+    std::string text;
+    in.seekg(0, std::ios::end);
+    if (const auto end = in.tellg(); end > 0)
+        text.reserve(static_cast<size_t>(end));
+    in.seekg(0, std::ios::beg);
+    text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    return text;
+}
+
+inline std::string read_file_text_or_empty(const std::filesystem::path& path) {
+    return read_file_text_optional(path).value_or(std::string{});
+}
 
 inline std::filesystem::path normalize_filesystem_path(const std::filesystem::path& path) {
     std::error_code ec;
