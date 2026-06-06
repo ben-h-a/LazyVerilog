@@ -150,7 +150,8 @@ static std::shared_ptr<DocumentState>
 make_file_state_with_options(const std::filesystem::path& path,
                              const std::vector<std::string>& defines,
                              const std::vector<std::string>& include_dirs,
-                             const std::vector<OpenTextOverlay>& open_overlays = {}) {
+                             const std::vector<OpenTextOverlay>& open_overlays = {},
+                             bool retain_text = false) {
     const auto start = Clock::now();
     const auto norm = normalize_filesystem_path(path);
     const std::string uri = uri_from_path(norm);
@@ -167,17 +168,27 @@ make_file_state_with_options(const std::filesystem::path& path,
     if (!tree_or_error)
         return nullptr;
 
+    // SyntaxTree::fromFile already loaded the file into SourceManager.  Closed
+    // project indexing only needs source text temporarily for syntactic fallback
+    // helpers; retaining a second full copy in DocumentState would keep large
+    // filelist text resident until the background state is discarded.  :LintAll
+    // opts into retention because a few lint rules intentionally inspect raw
+    // text, for example trailing whitespace.
     auto text = read_file_text_optional(norm);
-    auto state = std::make_shared<DocumentState>(uri, text.value_or(std::string{}), nullptr);
+    auto state = std::make_shared<DocumentState>(uri, retain_text ? text.value_or(std::string{})
+                                                                  : std::string{},
+                                                 nullptr);
     state->normalized_path = norm.string();
-    cache_document_end_position(*state);
+    if (retain_text)
+        cache_document_end_position(*state);
     state->source_manager = std::move(sm);
     state->tree = std::move(*tree_or_error);
     state->include_dependencies = collect_include_dependency_uris(*state->source_manager, uri);
     state->include_dependency_set.insert(state->include_dependencies.begin(),
                                          state->include_dependencies.end());
     if (state->tree) {
-        state->index = SyntaxIndex::build(*state->tree, state->text, IndexDepth::Declarations);
+        const std::string_view index_source = text ? std::string_view(*text) : std::string_view{};
+        state->index = SyntaxIndex::build(*state->tree, index_source, IndexDepth::Declarations);
         state->index.include_dependencies = state->include_dependencies;
     }
     collect_parse_diagnostics(*state, uri);
@@ -358,8 +369,7 @@ std::vector<std::string> Analyzer::extra_files() const {
     return extra_files_;
 }
 
-std::vector<std::shared_ptr<const DocumentState>> Analyzer::project_file_states_sync(
-    std::function<void(size_t current, size_t total, const std::string& path)> progress) const {
+std::vector<std::shared_ptr<const DocumentState>> Analyzer::project_file_states_sync() const {
     const auto start = Clock::now();
 
     std::vector<std::string> paths;
@@ -392,12 +402,8 @@ std::vector<std::shared_ptr<const DocumentState>> Analyzer::project_file_states_
     std::unordered_set<std::string> seen_paths;
     seen_paths.reserve(paths.size());
 
-    const size_t total = paths.size();
-    for (size_t i = 0; i < paths.size(); ++i) {
-        const auto& raw_path = paths[i];
+    for (const auto& raw_path : paths) {
         const auto normalized_path = normalize_filesystem_path(raw_path).string();
-        if (progress)
-            progress(i + 1, total, normalized_path);
         if (!seen_paths.insert(normalized_path).second)
             continue;
 
@@ -412,7 +418,7 @@ std::vector<std::shared_ptr<const DocumentState>> Analyzer::project_file_states_
         // extra_cache_ or publish a ProjectIndexSnapshot; :LintAll is a manual
         // diagnostics command, not a hidden reindex operation.
         auto state = make_file_state_with_options(normalized_path, defines, include_dirs,
-                                                  open_overlays);
+                                                  open_overlays, true);
         if (state)
             states.push_back(std::move(state));
     }
@@ -589,39 +595,31 @@ static std::optional<std::string> symbol_id_for_index_location(const SyntaxIndex
         return ref.symbol_id && (allow_name_fallback || !ref.symbol_debug.starts_with("name:"));
     };
 
-    auto best_from_bucket = [&](const ReferenceLocationKey& key, size_t& best_index) {
-        const auto bucket = index.references_by_location.find(key);
-        if (bucket == index.references_by_location.end())
-            return;
-        for (const size_t ref_index : bucket->second) {
-            if (ref_index >= index.references.size())
-                continue;
-            const auto& ref = index.references[ref_index];
-            if (acceptable(ref) && ref_index < best_index)
-                best_index = ref_index;
-        }
-    };
-
-    // ReferenceEntry stores locations as shard-local FileIDs plus 1-based lines.
-    // Convert the requested LSP location to the same compact key and probe both
-    // the exact file bucket and the legacy invalid-file bucket.  Invalid FileID
-    // entries historically meant "owning shard URI" and matched by line/column
-    // only, so keeping that bucket preserves behavior for synthesized/older
-    // occurrences without scanning the entire reference vector.
+    // Keep SyntaxIndex compact for initial project warm-up: the index owns only
+    // the raw reference vector, not auxiliary location / SymbolID maps.  This
+    // lookup is used only to recover the clicked definition's semantic-ish
+    // SymbolID, so a linear scan is acceptable and restores the older memory /
+    // startup-time tradeoff: startup is faster, references can spend more time.
     const int reference_line = loc.line + 1;
+    const auto file_it = index.source_file_ids.find(loc.uri);
+    const SourceFileID requested_file_id =
+        file_it == index.source_file_ids.end() ? kInvalidSourceFileID : file_it->second;
+
     size_t best_index = index.references.size();
-    if (const auto file_it = index.source_file_ids.find(loc.uri); file_it != index.source_file_ids.end()) {
-        best_from_bucket(ReferenceLocationKey{
-            .file_id = file_it->second,
-            .line = reference_line,
-            .col = loc.col,
-        }, best_index);
+    for (size_t i = 0; i < index.references.size(); ++i) {
+        const auto& ref = index.references[i];
+        if (!acceptable(ref) || ref.line != reference_line || ref.col != loc.col)
+            continue;
+
+        // Invalid FileID entries historically meant "owning shard URI" and
+        // matched by line/column only.  Preserve that behavior while preferring
+        // exact file-id matches when a shard contains included headers.
+        if (ref.file_id != kInvalidSourceFileID && ref.file_id != requested_file_id)
+            continue;
+
+        best_index = i;
+        break;
     }
-    best_from_bucket(ReferenceLocationKey{
-        .file_id = kInvalidSourceFileID,
-        .line = reference_line,
-        .col = loc.col,
-    }, best_index);
 
     if (best_index < index.references.size())
         return index.references[best_index].symbol_debug;
@@ -2078,29 +2076,15 @@ std::vector<Location> Analyzer::find_references(const std::string& uri, int line
         if (!target_symbol_id && !fallback_symbol_id)
             continue;
 
-        // P1: closed-file shards can contain hundreds of thousands of compact
-        // ReferenceEntry records in large filelists.  Do not linearly scan the
-        // whole vector on every references/rename request.  Each immutable
-        // SyntaxIndex shard builds SymbolID -> reference positions at index
-        // construction / merge time, so the hot path touches only the buckets
-        // for the target identity plus the optional unresolved-name fallback.
-        auto add_symbol_bucket = [&](SymbolID symbol_id) {
-            if (!symbol_id)
-                return;
-            const auto bucket = extra.index.references_by_symbol.find(symbol_id);
-            if (bucket == extra.index.references_by_symbol.end())
-                return;
-
-            for (size_t ref_index : bucket->second) {
-                if (ref_index >= extra.index.references.size())
-                    continue;
-                add_indexed_reference(extra.uri, extra.index, extra.index.references[ref_index]);
-            }
-        };
-
-        add_symbol_bucket(target_symbol_id);
-        if (fallback_symbol_id && fallback_symbol_id != target_symbol_id)
-            add_symbol_bucket(fallback_symbol_id);
+        // SyntaxIndex intentionally no longer stores SymbolID -> reference
+        // acceleration buckets.  That keeps initial project indexing lighter and
+        // closer to the v1.0.4 model; explicit references / rename requests pay
+        // the linear scan cost over compact ReferenceEntry records instead.
+        for (const auto& ref : extra.index.references) {
+            if (ref.symbol_id == target_symbol_id ||
+                (fallback_symbol_id && ref.symbol_id == fallback_symbol_id))
+                add_indexed_reference(extra.uri, extra.index, ref);
+        }
     }
 
     std::sort(result.begin(), result.end(), [](const Location& a, const Location& b) {
@@ -2966,23 +2950,6 @@ std::function<void()> Analyzer::publish_project_index_snapshot_locked() const {
                 .shard = entry.index,
                 .module_index = i,
             });
-        }
-
-        // Build a project-level SymbolID -> references lookup while publishing
-        // the immutable background snapshot.  This keeps request handlers from
-        // walking all ReferenceEntry records in all shards for every
-        // textDocument/references / rename request.  We iterate the per-shard
-        // lookup rather than the raw reference vector so empty/non-actionable
-        // SymbolIDs stay excluded by the same rule as SyntaxIndex.
-        for (const auto& [symbol_id, refs] : entry.index->references_by_symbol) {
-            auto& bucket = snapshot->references_by_symbol[symbol_id];
-            bucket.reserve(bucket.size() + refs.size());
-            for (size_t reference_index : refs) {
-                bucket.push_back(ProjectIndexReferenceRef{
-                    .shard_index = shard_index,
-                    .reference_index = reference_index,
-                });
-            }
         }
     }
 

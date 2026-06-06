@@ -48,6 +48,32 @@ SourceFileID source_file_id_for_location(SyntaxIndex& index, const slang::Source
 }
 
 
+SourceFileID SourceFileIdResolver::for_token(SyntaxIndex& index, const slang::SourceManager& sm,
+                                             const slang::parsing::Token& token) {
+    if (!token || !token.location().valid())
+        return kInvalidSourceFileID;
+    return for_location(index, sm, token.location());
+}
+
+SourceFileID SourceFileIdResolver::for_location(SyntaxIndex& index, const slang::SourceManager& sm,
+                                                slang::SourceLocation location) {
+    if (!location.valid())
+        return kInvalidSourceFileID;
+
+    const auto buffer_id = location.buffer().getId();
+    if (auto it = by_buffer_.find(buffer_id); it != by_buffer_.end())
+        return it->second;
+
+    auto uri = uri_from_source_location(sm, location);
+    if (uri.empty()) {
+        by_buffer_.emplace(buffer_id, kInvalidSourceFileID);
+        return kInvalidSourceFileID;
+    }
+
+    const auto file_id = index.intern_source_file(std::move(uri));
+    by_buffer_.emplace(buffer_id, file_id);
+    return file_id;
+}
 
 std::string token_value_text(const slang::parsing::Token& token) {
     return token ? std::string(token.valueText()) : std::string{};
@@ -242,6 +268,7 @@ std::vector<std::string> collect_include_dependency_uris(const slang::SourceMana
 void collect_macro_reference_occurrences(const slang::syntax::SyntaxTree& tree,
                                                 SyntaxIndex& index) {
     const auto& sm = tree.sourceManager();
+    SourceFileIdResolver file_ids;
 
     auto add_macro_ref = [&](std::string name, SourceFileID file_id, int line, int col) {
         if (name.empty())
@@ -264,7 +291,7 @@ void collect_macro_reference_occurrences(const slang::syntax::SyntaxTree& tree,
             !sm.isFileLoc(def->name.location()))
             continue;
         const auto [line, col] = token_pos_line1_col0(sm, def->name);
-        add_macro_ref(std::string(def->name.valueText()), source_file_id_for_token(index, sm, def->name),
+        add_macro_ref(std::string(def->name.valueText()), file_ids.for_token(index, sm, def->name),
                       line, col);
     }
 
@@ -272,11 +299,12 @@ void collect_macro_reference_occurrences(const slang::syntax::SyntaxTree& tree,
         SyntaxIndex& index;
         const slang::SourceManager& sm;
         decltype(add_macro_ref)& add_ref;
+        SourceFileIdResolver& file_ids;
         std::unordered_set<std::string> seen_expansions;
 
         Visitor(SyntaxIndex& index, const slang::SourceManager& sm,
-                decltype(add_macro_ref)& add_macro_ref)
-            : index(index), sm(sm), add_ref(add_macro_ref) {}
+                decltype(add_macro_ref)& add_macro_ref, SourceFileIdResolver& file_ids)
+            : index(index), sm(sm), add_ref(add_macro_ref), file_ids(file_ids) {}
 
         void visitToken(slang::parsing::Token token) {
             if (!token || !token.location().valid() || !sm.isMacroLoc(token.location()))
@@ -306,12 +334,12 @@ void collect_macro_reference_occurrences(const slang::syntax::SyntaxTree& tree,
             if (auto text = source_text_for_syntax_range(sm, range); text && text->starts_with('`'))
                 ++col;
 
-            add_ref(std::string(macro_name), source_file_id_for_location(index, sm, range.start()),
+            add_ref(std::string(macro_name), file_ids.for_location(index, sm, range.start()),
                           line, col);
         }
     };
 
-    Visitor visitor(index, sm, add_macro_ref);
+    Visitor visitor(index, sm, add_macro_ref, file_ids);
     tree.root().visit(visitor);
 }
 
@@ -442,6 +470,7 @@ void add_reference_entry(SyntaxIndex& index, std::string name, SourceFileID file
 
 void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
                                    const slang::SourceManager& sm) {
+    SourceFileIdResolver file_ids;
     std::unordered_set<std::string> module_values;
     std::unordered_map<std::string, std::string> module_value_types;
     std::unordered_set<std::string> package_values;
@@ -524,7 +553,7 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
 
         const auto [line, col] = token_pos(sm, token);
         add_reference_entry(index, std::string(token.valueText()),
-                            source_file_id_for_token(index, sm, token),
+                            file_ids.for_token(index, sm, token),
                             std::move(canonical_id), line, col);
     };
 

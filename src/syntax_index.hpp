@@ -219,25 +219,6 @@ struct ImportEntry {
     int end_line{0};
 };
 
-struct ReferenceLocationKey {
-    SourceFileID file_id{kInvalidSourceFileID};
-    int line{0}; // ReferenceEntry::line spelling: 1-based, 0 if unknown.
-    int col{0};
-
-    bool operator==(const ReferenceLocationKey& other) const {
-        return file_id == other.file_id && line == other.line && col == other.col;
-    }
-};
-
-struct ReferenceLocationKeyHash {
-    size_t operator()(const ReferenceLocationKey& key) const {
-        size_t h = static_cast<size_t>(key.file_id);
-        h ^= static_cast<size_t>(key.line) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
-        h ^= static_cast<size_t>(key.col) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
-        return h;
-    }
-};
-
 struct ReferenceEntry {
     std::string name;
     // Actual source file for this occurrence when the token came from another
@@ -356,29 +337,6 @@ struct SyntaxIndex {
     // use this compact occurrence index until a richer resolved-reference index
     // is available.
     std::vector<ReferenceEntry> references;
-    // Location -> reference-vector positions for request-path symbol recovery.
-    // This keeps find-references from repeatedly scanning every occurrence in a
-    // large project shard just to recover the SymbolID at a known definition or
-    // clicked token location.
-    std::unordered_map<ReferenceLocationKey, std::vector<size_t>, ReferenceLocationKeyHash>
-        references_by_location;
-
-    // SymbolID -> reference-vector positions for hot cross-file references and
-    // rename request paths.
-    //
-    // `references` remains the owning storage so existing code can iterate in a
-    // stable, cache-friendly order.  This lookup is only an index of vector
-    // positions and is rebuilt when a shard is built or merged.  Keeping the
-    // lookup with each immutable shard lets callers avoid scanning every
-    // occurrence in that shard when they already know the target SymbolID:
-    //
-    //   target: module::memory
-    //   lookup: references_by_symbol[module::memory] -> declaration + uses
-    //
-    // Empty SymbolIDs are intentionally skipped because they are not actionable
-    // semantic identities and would otherwise create one enormous bucket.
-    std::unordered_map<SymbolID, std::vector<size_t>, SymbolIDHash> references_by_symbol;
-
     /// Build index from a parsed SyntaxTree.
     /// @param source  the source text that produced @p tree (used for line-number lookup).
     static SyntaxIndex build(const slang::syntax::SyntaxTree& tree, std::string_view source = {},
@@ -390,17 +348,11 @@ struct SyntaxIndex {
 
     SourceFileID intern_source_file(std::string uri);
     std::string source_uri(SourceFileID file_id) const;
-    void rebuild_reference_location_lookup();
 };
 
 struct ProjectIndexModuleRef {
     std::shared_ptr<const SyntaxIndex> shard;
     size_t module_index{0};
-};
-
-struct ProjectIndexReferenceRef {
-    size_t shard_index{0};
-    size_t reference_index{0};
 };
 
 struct ProjectIndexSnapshot {
@@ -412,13 +364,4 @@ struct ProjectIndexSnapshot {
 
     std::vector<Shard> shards;
     std::unordered_map<std::string, ProjectIndexModuleRef> module_by_name;
-    // Project-wide SymbolID -> shard/reference positions built at publish time.
-    //
-    // This is the request-path acceleration for large .f designs: references
-    // no longer need to linearly scan every ReferenceEntry in every closed-file
-    // shard.  The lookup stores positions instead of copying ReferenceEntry
-    // objects, so the immutable per-file SyntaxIndex shards remain the single
-    // source of truth for locations, include-file attribution, and debug data.
-    std::unordered_map<SymbolID, std::vector<ProjectIndexReferenceRef>, SymbolIDHash>
-        references_by_symbol;
 };

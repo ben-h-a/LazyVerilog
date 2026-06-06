@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 
 #include <slang/parsing/Token.h>
 #include <slang/syntax/SyntaxNode.h>
@@ -34,6 +35,25 @@ SourceFileID source_file_id_for_token(SyntaxIndex& index, const slang::SourceMan
 SourceFileID source_file_id_for_location(SyntaxIndex& index, const slang::SourceManager& sm,
                                          slang::SourceLocation location);
 
+/// Per-index-build cache for SourceLocation buffer -> SourceFileID.
+///
+/// SourceManager lookups eventually normalize filesystem paths, and reference
+/// indexing can ask for the source file of thousands of identifier tokens in a
+/// single large RTL file.  The buffer id is stable for the lifetime of one
+/// SyntaxTree / SourceManager, so callers that walk many tokens should use this
+/// resolver instead of repeatedly normalizing the same path.  The cache is
+/// intentionally transient: SyntaxIndex stores compact SourceFileIDs, not this
+/// build-only helper.
+class SourceFileIdResolver {
+public:
+    SourceFileID for_token(SyntaxIndex& index, const slang::SourceManager& sm,
+                           const slang::parsing::Token& token);
+    SourceFileID for_location(SyntaxIndex& index, const slang::SourceManager& sm,
+                              slang::SourceLocation location);
+
+private:
+    std::unordered_map<uint32_t, SourceFileID> by_buffer_;
+};
 
 /// Safely return a token's user-facing value text, or an empty string for a
 /// missing token.  Keeping this helper shared prevents each indexer / feature
