@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <memory>
 #include <mutex>
+#include <iostream>
 #include <regex>
 #include <string_view>
 #include <unordered_map>
@@ -52,7 +53,16 @@ inline bool is_format_marker(std::string_view comment,
     if (compiled_re) {
         try {
             return std::regex_search(comment.begin(), comment.end(), *compiled_re);
-        } catch (...) {}
+        } catch (const std::exception& e) {
+            // A malformed pattern is normally rejected and cached by
+            // compile_format_marker_regex_uncached(), so reaching this point is
+            // unexpected.  Do not silently change formatter control behavior:
+            // emit a small stderr breadcrumb and fall through to the historical
+            // literal-substring fallback below.  Non-std exceptions are not
+            // caught here; letting them propagate is safer than hiding a
+            // formatter/runtime invariant violation.
+            std::cerr << "[lazyverilog] formatter marker regex failed: " << e.what() << "\n";
+        }
     }
     if (pattern_fallback.empty()) return false;
     return comment.find(pattern_fallback) != std::string_view::npos;
