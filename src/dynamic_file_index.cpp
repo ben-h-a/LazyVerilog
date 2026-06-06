@@ -18,10 +18,6 @@ using namespace slang::syntax;
 
 namespace {
 
-std::string tok_text(const slang::parsing::Token& token) {
-    return token ? std::string(token.valueText()) : std::string{};
-}
-
 std::string node_text(const SyntaxNode& node) {
     return trim_copy(node.toString());
 }
@@ -95,7 +91,7 @@ ValueEntry* add_value(SyntaxIndex& index, const slang::SourceManager& sm,
     if (!name)
         return nullptr;
     auto [line, col] = token_pos_line1_col0(sm, name);
-    index.values.push_back(ValueEntry{.name = tok_text(name),
+    index.values.push_back(ValueEntry{.name = token_value_text(name),
                                       .type = std::move(type),
                                       .kind = std::move(kind),
                                       .parent_scope = std::move(parent_scope),
@@ -112,7 +108,7 @@ void add_port(ModuleEntry& module, SyntaxIndex& index, const slang::SourceManage
     if (!name)
         return;
     auto [line, col] = token_pos_line1_col0(sm, name);
-    module.ports.push_back(PortEntry{.name = tok_text(name),
+    module.ports.push_back(PortEntry{.name = token_value_text(name),
                                      .file_id = source_file_id_for_token(index, sm, name),
                                      .direction = direction,
                                      .type = type,
@@ -122,7 +118,7 @@ void add_port(ModuleEntry& module, SyntaxIndex& index, const slang::SourceManage
                                      .default_value = std::move(default_value),
                                      .line = line,
                                      .col = col});
-    index.values.push_back(ValueEntry{.name = tok_text(name),
+    index.values.push_back(ValueEntry{.name = token_value_text(name),
                                       .type = std::move(type),
                                       .kind = (direction == "parameter" || direction == "localparam")
                                                   ? direction
@@ -135,9 +131,9 @@ void add_port(ModuleEntry& module, SyntaxIndex& index, const slang::SourceManage
 
 std::string port_direction(const PortHeaderSyntax& header) {
     if (const auto* variable = header.as_if<VariablePortHeaderSyntax>())
-        return tok_text(variable->direction).empty() ? "unknown" : tok_text(variable->direction);
+        return token_value_text(variable->direction).empty() ? "unknown" : token_value_text(variable->direction);
     if (const auto* net = header.as_if<NetPortHeaderSyntax>())
-        return tok_text(net->direction).empty() ? "unknown" : tok_text(net->direction);
+        return token_value_text(net->direction).empty() ? "unknown" : token_value_text(net->direction);
     return "unknown";
 }
 
@@ -153,7 +149,7 @@ std::string port_decl_type(const slang::SourceManager& sm, const PortHeaderSynta
     if (const auto* variable = header.as_if<VariablePortHeaderSyntax>())
         return node_text_raw(sm, *variable->dataType);
     if (const auto* net = header.as_if<NetPortHeaderSyntax>()) {
-        std::string text = tok_text(net->netType);
+        std::string text = token_value_text(net->netType);
         const auto data = node_text_raw(sm, *net->dataType);
         if (!data.empty())
             text += (text.empty() ? "" : " ") + data;
@@ -194,7 +190,7 @@ int node_end_line0(const slang::SourceManager& sm, const SyntaxNode& node, int f
 void process_hierarchy(const HierarchyInstantiationSyntax& hierarchy, SyntaxIndex& index,
                        const slang::SourceManager& sm, const std::vector<std::string_view>& lines,
                        const std::string& parent_module) {
-    const std::string module_name = tok_text(hierarchy.type);
+    const std::string module_name = token_value_text(hierarchy.type);
     for (const auto* inst : hierarchy.instances) {
         if (!inst)
             continue;
@@ -202,7 +198,7 @@ void process_hierarchy(const HierarchyInstantiationSyntax& hierarchy, SyntaxInde
         entry.module_name = module_name;
         entry.parent_module = parent_module;
         if (inst->decl) {
-            entry.instance_name = tok_text(inst->decl->name);
+            entry.instance_name = token_value_text(inst->decl->name);
             entry.file_id = source_file_id_for_token(index, sm, inst->decl->name);
             entry.line = token_pos_line1_col0(sm, inst->decl->name).first;
         }
@@ -218,7 +214,7 @@ void process_hierarchy(const HierarchyInstantiationSyntax& hierarchy, SyntaxInde
             if (const auto* named = conn ? conn->as_if<NamedPortConnectionSyntax>() : nullptr) {
                 auto [line, col] = token_pos_line1_col0(sm, named->name);
                 auto [paren_line, paren_col] = token_pos_line1_col0(sm, named->openParen);
-                entry.connections.push_back(NamedPortConn{.port_name = tok_text(named->name),
+                entry.connections.push_back(NamedPortConn{.port_name = token_value_text(named->name),
                                                           .signal_name =
                                                               simple_identifier_from_expr(named->expr),
                                                           .file_id = source_file_id_for_token(index, sm, named->name),
@@ -236,7 +232,7 @@ void process_hierarchy(const HierarchyInstantiationSyntax& hierarchy, SyntaxInde
 void process_class(const ClassDeclarationSyntax& cls, SyntaxIndex& index,
                    const slang::SourceManager& sm, std::string parent_scope = {}) {
     ClassEntry entry;
-    entry.name = tok_text(cls.name);
+    entry.name = token_value_text(cls.name);
     entry.file_id = source_file_id_for_token(index, sm, cls.name);
     entry.parent_scope = std::move(parent_scope);
     auto [line, col] = token_pos_line1_col0(sm, cls.name);
@@ -255,7 +251,7 @@ void process_class(const ClassDeclarationSyntax& cls, SyntaxIndex& index,
                     if (!decl)
                         continue;
                     auto [fl, fc] = token_pos_line1_col0(sm, decl->name);
-                    entry.fields.push_back(FieldEntry{.name = tok_text(decl->name),
+                    entry.fields.push_back(FieldEntry{.name = token_value_text(decl->name),
                                                       .type = with_dims(sm, type, *decl),
                                                       .file_id = source_file_id_for_token(index, sm, decl->name),
                                                       .line = fl,
@@ -281,7 +277,7 @@ void process_class(const ClassDeclarationSyntax& cls, SyntaxIndex& index,
 void process_typedef(const TypedefDeclarationSyntax& td, SyntaxIndex& index,
                      const slang::SourceManager& sm, std::string parent_scope = {}) {
     TypedefEntry entry;
-    entry.name = tok_text(td.name);
+    entry.name = token_value_text(td.name);
     entry.parent_scope = std::move(parent_scope);
     entry.file_id = source_file_id_for_token(index, sm, td.name);
     auto [line, col] = token_pos_line1_col0(sm, td.name);
@@ -293,7 +289,7 @@ void process_typedef(const TypedefDeclarationSyntax& td, SyntaxIndex& index,
             if (member) {
                 auto [em_line, em_col] = token_pos_line1_col0(sm, member->name);
                 entry.enum_members.push_back(EnumMemberEntry{
-                    .name = tok_text(member->name),
+                    .name = token_value_text(member->name),
                     .file_id = source_file_id_for_token(index, sm, member->name),
                     .line = em_line,
                     .col = em_col,
@@ -310,7 +306,7 @@ void process_typedef(const TypedefDeclarationSyntax& td, SyntaxIndex& index,
                 if (!decl)
                     continue;
                 auto [fl, fc] = token_pos_line1_col0(sm, decl->name);
-                entry.fields.push_back(FieldEntry{.name = tok_text(decl->name),
+                entry.fields.push_back(FieldEntry{.name = token_value_text(decl->name),
                                                   .type = with_dims(sm, type, *decl),
                                                   .file_id = source_file_id_for_token(index, sm, decl->name),
                                                   .line = fl,
@@ -328,7 +324,7 @@ void process_typedef(const TypedefDeclarationSyntax& td, SyntaxIndex& index,
 void process_module(const ModuleDeclarationSyntax& node, SyntaxIndex& index,
                     const slang::SourceManager& sm, std::string_view source) {
     ModuleEntry module;
-    module.name = tok_text(node.header->name);
+    module.name = token_value_text(node.header->name);
     module.file_id = source_file_id_for_token(index, sm, node.header->name);
     auto [line, col] = token_pos_line1_col0(sm, node.header->name);
     module.line = line;
@@ -340,7 +336,7 @@ void process_module(const ModuleDeclarationSyntax& node, SyntaxIndex& index,
             const auto* param = base ? base->as_if<ParameterDeclarationSyntax>() : nullptr;
             if (!param)
                 continue;
-            const std::string direction = tok_text(param->keyword);
+            const std::string direction = token_value_text(param->keyword);
             const std::string type = node_text_raw(sm, *param->type);
             for (const auto* decl : param->declarators) {
                 if (!decl)
@@ -369,7 +365,7 @@ void process_module(const ModuleDeclarationSyntax& node, SyntaxIndex& index,
                              port_direction(*implicit->header), type, decl_type, signal_type);
                 } else if (const auto* explicit_port =
                                item ? item->as_if<ExplicitAnsiPortSyntax>() : nullptr) {
-                    add_port(module, index, sm, explicit_port->name, tok_text(explicit_port->direction),
+                    add_port(module, index, sm, explicit_port->name, token_value_text(explicit_port->direction),
                              {});
                 }
             }
@@ -408,7 +404,7 @@ void process_module(const ModuleDeclarationSyntax& node, SyntaxIndex& index,
                 if (!item)
                     continue;
                 auto [ml, mc] = token_pos_line1_col0(sm, item->name);
-                module.modports.push_back(ModportEntry{.name = tok_text(item->name),
+                module.modports.push_back(ModportEntry{.name = token_value_text(item->name),
                                                        .file_id = source_file_id_for_token(index, sm, item->name),
                                                        .line = ml,
                                                        .col = mc});
@@ -425,7 +421,7 @@ void process_module(const ModuleDeclarationSyntax& node, SyntaxIndex& index,
 void process_package(const ModuleDeclarationSyntax& pkg, SyntaxIndex& index,
                      const slang::SourceManager& sm) {
     ModuleEntry module;
-    module.name = tok_text(pkg.header->name);
+    module.name = token_value_text(pkg.header->name);
     module.file_id = source_file_id_for_token(index, sm, pkg.header->name);
     auto [line, col] = token_pos_line1_col0(sm, pkg.header->name);
     module.line = line;
@@ -441,7 +437,7 @@ void process_package(const ModuleDeclarationSyntax& pkg, SyntaxIndex& index,
                 if (!decl)
                     continue;
                 add_value(index, sm, decl->name, with_dims(sm, type, *decl), "variable", module.name);
-                index.package_symbols[module.name].push_back(tok_text(decl->name));
+                index.package_symbols[module.name].push_back(token_value_text(decl->name));
             }
         } else if (const auto* ps = member->as_if<ParameterDeclarationStatementSyntax>()) {
             if (const auto* param = ps->parameter->as_if<ParameterDeclarationSyntax>()) {
@@ -450,14 +446,14 @@ void process_package(const ModuleDeclarationSyntax& pkg, SyntaxIndex& index,
                     if (!decl)
                         continue;
                     auto [pl, pc] = token_pos_line1_col0(sm, decl->name);
-                    index.values.push_back(ValueEntry{.name = tok_text(decl->name),
+                    index.values.push_back(ValueEntry{.name = token_value_text(decl->name),
                                                       .type = type,
-                                                      .kind = tok_text(param->keyword),
+                                                      .kind = token_value_text(param->keyword),
                                                       .parent_scope = module.name,
                                                       .file_id = source_file_id_for_token(index, sm, decl->name),
                                                       .line = pl,
                                                       .col = pc});
-                    index.package_symbols[module.name].push_back(tok_text(decl->name));
+                    index.package_symbols[module.name].push_back(token_value_text(decl->name));
                 }
             }
         } else if (const auto* fn = member->as_if<FunctionDeclarationSyntax>()) {
@@ -470,10 +466,10 @@ void process_package(const ModuleDeclarationSyntax& pkg, SyntaxIndex& index,
             index.package_symbols[module.name].push_back(name);
         } else if (const auto* cls = member->as_if<ClassDeclarationSyntax>()) {
             process_class(*cls, index, sm, module.name);
-            index.package_symbols[module.name].push_back(tok_text(cls->name));
+            index.package_symbols[module.name].push_back(token_value_text(cls->name));
         } else if (const auto* td = member->as_if<TypedefDeclarationSyntax>()) {
             process_typedef(*td, index, sm, module.name);
-            index.package_symbols[module.name].push_back(tok_text(td->name));
+            index.package_symbols[module.name].push_back(token_value_text(td->name));
         }
     }
 
@@ -492,10 +488,10 @@ void collect_imports(const SyntaxNode& root, SyntaxIndex& index, const slang::So
                 if (!item)
                     continue;
                 ImportEntry entry;
-                entry.package_name = tok_text(item->package);
+                entry.package_name = token_value_text(item->package);
                 entry.wildcard = item->item.kind == slang::parsing::TokenKind::Star;
                 if (!entry.wildcard)
-                    entry.symbol_name = tok_text(item->item);
+                    entry.symbol_name = token_value_text(item->item);
                 entry.file_id = source_file_id_for_token(index, sm, item->package);
                 entry.start_line = line;
                 index.imports.push_back(std::move(entry));
@@ -513,14 +509,14 @@ void collect_macros(const slang::syntax::SyntaxTree& tree, SyntaxIndex& index) {
             continue;
         auto [line, _] = token_pos_line1_col0(sm, def->name);
         MacroEntry mac;
-        mac.name = tok_text(def->name);
+        mac.name = token_value_text(def->name);
         mac.file_id = source_file_id_for_token(index, sm, def->name);
         mac.line = line;
         if (def->formalArguments) {
             mac.is_function_like = true;
             for (const auto* arg : def->formalArguments->args) {
                 if (arg)
-                    mac.params.push_back(tok_text(arg->name));
+                    mac.params.push_back(token_value_text(arg->name));
             }
         }
         index.macros.push_back(std::move(mac));
@@ -542,7 +538,7 @@ SyntaxIndex build_current_ast_structural_index(const DocumentState& state) {
         if (const auto* mod = member.as_if<ModuleDeclarationSyntax>()) {
             if (member.kind == SyntaxKind::InterfaceDeclaration) {
                 process_module(*mod, index, sm, state.text);
-                index.interface_names.insert(tok_text(mod->header->name));
+                index.interface_names.insert(token_value_text(mod->header->name));
             } else if (member.kind == SyntaxKind::PackageDeclaration) {
                 process_package(*mod, index, sm);
             } else {

@@ -34,6 +34,12 @@ SourceFileID source_file_id_for_token(SyntaxIndex& index, const slang::SourceMan
 SourceFileID source_file_id_for_location(SyntaxIndex& index, const slang::SourceManager& sm,
                                          slang::SourceLocation location);
 
+
+/// Safely return a token's user-facing value text, or an empty string for a
+/// missing token.  Keeping this helper shared prevents each indexer / feature
+/// from making slightly different missing-token choices.
+std::string token_value_text(const slang::parsing::Token& token);
+
 bool syntax_fragment_edge_is_wordlike(char c);
 
 /// Return a token position using slang's 1-based line numbers and LSP-style

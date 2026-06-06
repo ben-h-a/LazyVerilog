@@ -48,6 +48,11 @@ SourceFileID source_file_id_for_location(SyntaxIndex& index, const slang::Source
 }
 
 
+
+std::string token_value_text(const slang::parsing::Token& token) {
+    return token ? std::string(token.valueText()) : std::string{};
+}
+
 std::pair<int, int> token_pos_line1_col0(const slang::SourceManager& sm,
                                          const slang::parsing::Token& token) {
     if (!token || !token.location().valid())
