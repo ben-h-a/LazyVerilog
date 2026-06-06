@@ -8,6 +8,37 @@
 #include <iostream>
 #include <vector>
 
+namespace {
+
+FormatOptions port_section_stress_options(bool align_adaptive) {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+    opts.port_declaration.align = true;
+    opts.port_declaration.align_adaptive = align_adaptive;
+    opts.port_declaration.section1_min_width = 10;
+    opts.port_declaration.section2_min_width = 11;
+    opts.port_declaration.section3_min_width = 12;
+    opts.port_declaration.section4_min_width = 13;
+    opts.port_declaration.section5_min_width = 14;
+    return opts;
+}
+
+FormatOptions var_section_stress_options(bool align_adaptive) {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+    opts.var_declaration.align = true;
+    opts.var_declaration.align_adaptive = align_adaptive;
+    opts.var_declaration.section1_min_width = 20;
+    opts.var_declaration.section2_min_width = 20;
+    opts.var_declaration.section3_min_width = 13;
+    opts.var_declaration.section4_min_width = 16;
+    return opts;
+}
+
+} // namespace
+
 TEST_CASE("formatter: function calls support block layout", "[formatter]") {
     FormatOptions opts;
     opts.function_call.break_policy = "always";
@@ -53,6 +84,20 @@ TEST_CASE("formatter: function call pass ignores hidden source whitespace", "[fo
 
     const std::string once = format_source(src, opts);
     CHECK(format_source(once, opts) == once);
+}
+
+TEST_CASE("formatter: safe_mode2 accepts unchanged token streams", "[formatter][safe_mode]") {
+    FormatOptions opts;
+    opts.safe_mode2 = true;
+    opts.port_declaration.align = false;
+    opts.var_declaration.align = false;
+    opts.default_indent_level_inside_outmost_block = 0;
+
+    const std::string src = "module top;\nlogic a;\nendmodule\n";
+    const std::string out = format_source(src, opts);
+    CHECK(out == "module top;\n"
+                 "logic a;\n"
+                 "endmodule\n");
 }
 
 
@@ -428,6 +473,375 @@ TEST_CASE("formatter: ANSI module header after package import is aligned", "[for
                                  "endmodule\n");
 }
 
+TEST_CASE("formatter: ANSI module header reserves packed and trailing port sections",
+          "[formatter][ports]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+    opts.port_declaration.align = true;
+    opts.port_declaration.align_adaptive = true;
+    opts.port_declaration.section1_min_width = 10;
+    opts.port_declaration.section2_min_width = 11;
+    opts.port_declaration.section3_min_width = 12;
+    opts.port_declaration.section4_min_width = 13;
+    opts.port_declaration.section5_min_width = 14;
+
+    const std::string input =
+        "module memory_top(\n"
+        "    input     packet_t   [1:0] i_clk [1:0],\n"
+        "    input     packet_t   [1:0] i_div,\n"
+        "    output    logic      [1:0]       o_mul        [1:0]\n"
+        ");\n";
+
+    const std::string expected =
+        "module memory_top(\n"
+        "    input     packet_t   [1:0]       i_clk        [1:0]         ,\n"
+        "    input     packet_t   [1:0]       i_div                      ,\n"
+        "    output    logic      [1:0]       o_mul        [1:0]\n"
+        ");\n";
+
+    const std::string result = format_source(input, opts);
+    INFO("formatted output:\n" << result);
+    CHECK(result == expected);
+    CHECK(format_source(result, opts) == expected);
+}
+
+TEST_CASE("formatter: non-adaptive ANSI ports align trailing section to longest name",
+          "[formatter][ports]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+    opts.port_declaration.align = true;
+    opts.port_declaration.align_adaptive = false;
+    opts.port_declaration.section1_min_width = 10;
+    opts.port_declaration.section2_min_width = 11;
+    opts.port_declaration.section3_min_width = 12;
+    opts.port_declaration.section4_min_width = 13;
+    opts.port_declaration.section5_min_width = 14;
+
+    const std::string input =
+        "module memory_top(\n"
+        "    input     packet_t   [1:0]       i_clk        [1:0]         ,\n"
+        "    input     packet_t   [1:0]       i_diveeeeeeeee [1:0]       ,\n"
+        "    output    logic      [1:0]       o_mul        [1:0]\n"
+        ");\n";
+
+    const std::string expected =
+        "module memory_top(\n"
+        "    input     packet_t   [1:0]       i_clk          [1:0]         ,\n"
+        "    input     packet_t   [1:0]       i_diveeeeeeeee [1:0]         ,\n"
+        "    output    logic      [1:0]       o_mul          [1:0]\n"
+        ");\n";
+
+    const std::string result = format_source(input, opts);
+    INFO("formatted output:\n" << result);
+    CHECK(result == expected);
+    CHECK(format_source(result, opts) == expected);
+}
+
+TEST_CASE("formatter: non-adaptive ANSI ports align name section to longest packed dimension",
+          "[formatter][ports]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+    opts.port_declaration.align = true;
+    opts.port_declaration.align_adaptive = false;
+    opts.port_declaration.section1_min_width = 10;
+    opts.port_declaration.section2_min_width = 11;
+    opts.port_declaration.section3_min_width = 12;
+    opts.port_declaration.section4_min_width = 13;
+    opts.port_declaration.section5_min_width = 14;
+
+    const std::string input =
+        "module memory_top(\n"
+        "    input     packet_t   [LOOOOOOOOOONG:0] i_clk          [1:0]         ,\n"
+        "    input     packet_t   [1:0]       i_diveeeeeeeee [1:0]         ,\n"
+        "    output    logic      [1:0]       o_mul          [1:0]\n"
+        ");\n";
+
+    const std::string expected =
+        "module memory_top(\n"
+        "    input     packet_t   [LOOOOOOOOOONG:0] i_clk          [1:0]         ,\n"
+        "    input     packet_t   [1:0]             i_diveeeeeeeee [1:0]         ,\n"
+        "    output    logic      [1:0]             o_mul          [1:0]\n"
+        ");\n";
+
+    const std::string result = format_source(input, opts);
+    INFO("formatted output:\n" << result);
+    CHECK(result == expected);
+    CHECK(format_source(result, opts) == expected);
+}
+
+TEST_CASE("formatter: non-adaptive non-ANSI ports align all declaration sections",
+          "[formatter][ports]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+    opts.port_declaration.align = true;
+    opts.port_declaration.align_adaptive = false;
+    opts.port_declaration.section1_min_width = 10;
+    opts.port_declaration.section2_min_width = 11;
+    opts.port_declaration.section3_min_width = 12;
+    opts.port_declaration.section4_min_width = 13;
+    opts.port_declaration.section5_min_width = 14;
+
+    const std::string input =
+        "module memory_top(\n"
+        "    i_clk, i_diveeeeeeeee, o_mul\n"
+        ");\n"
+        "input looooooooong_t [LOOOOOOOOOONG:0] i_clk [1:0];\n"
+        "input packet_t [1:0] i_diveeeeeeeee [1:0];\n"
+        "output logic [1:0] o_mul [1:0];\n"
+        "endmodule\n";
+
+    const std::string expected =
+        "module memory_top(\n"
+        "    i_clk,\n"
+        "    i_diveeeeeeeee,\n"
+        "    o_mul\n"
+        ");\n"
+        "input     looooooooong_t [LOOOOOOOOOONG:0] i_clk          [1:0]         ;\n"
+        "input     packet_t       [1:0]             i_diveeeeeeeee [1:0]         ;\n"
+        "output    logic          [1:0]             o_mul          [1:0]         ;\n"
+        "endmodule\n";
+
+    const std::string result = format_source(input, opts);
+    INFO("formatted output:\n" << result);
+    CHECK(result == expected);
+    CHECK(format_source(result, opts) == expected);
+}
+
+TEST_CASE("formatter: ANSI port declaration sections with align_adaptive true",
+          "[formatter][ports][adaptive]") {
+    const FormatOptions opts = port_section_stress_options(true);
+
+    const std::string input =
+        "module memory_top(\n"
+        "    input looooooooong_t [LOOOOOOOOOONG:0] i_clk [1:0],\n"
+        "    input packet_t [1:0] i_diveeeeeeeee [1:0],\n"
+        "    output logic [1:0] o_mul [1:0]\n"
+        ");\n";
+
+    const std::string expected =
+        "module memory_top(\n"
+        "    input     looooooooong_t [LOOOOOOOOOONG:0] i_clk        [1:0]         ,\n"
+        "    input     packet_t   [1:0]       i_diveeeeeeeee [1:0]         ,\n"
+        "    output    logic      [1:0]       o_mul        [1:0]\n"
+        ");\n";
+
+    const std::string result = format_source(input, opts);
+    INFO("formatted output:\n" << result);
+    CHECK(result == expected);
+    CHECK(format_source(result, opts) == expected);
+}
+
+TEST_CASE("formatter: adaptive ANSI ports keep space before trailing unpacked dimensions",
+          "[formatter][ports][adaptive]") {
+    const FormatOptions opts = port_section_stress_options(true);
+
+    const std::string input =
+        "module memory_top(\n"
+        "    input     looooooooong_t [LOOOOOOOOOONG:0] i_clk        [1:0]         ,\n"
+        "    input     packet_t   [1:0]       i_diveeeeeeeee[1:0][3:0][1:0][3:1],\n"
+        "    output    logic      [1:0]       o_mul        [1:0][3:0][1:0][3:1]\n"
+        ");\n";
+
+    const std::string expected =
+        "module memory_top(\n"
+        "    input     looooooooong_t [LOOOOOOOOOONG:0] i_clk        [1:0]         ,\n"
+        "    input     packet_t   [1:0]       i_diveeeeeeeee [1:0][3:0][1:0][3:1],\n"
+        "    output    logic      [1:0]       o_mul        [1:0][3:0][1:0][3:1]\n"
+        ");\n";
+
+    const std::string result = format_source(input, opts);
+    INFO("formatted output:\n" << result);
+    CHECK(result == expected);
+    CHECK(format_source(result, opts) == expected);
+}
+
+TEST_CASE("formatter: ANSI port declaration sections with align_adaptive false",
+          "[formatter][ports][adaptive]") {
+    const FormatOptions opts = port_section_stress_options(false);
+
+    const std::string input =
+        "module memory_top(\n"
+        "    input looooooooong_t [LOOOOOOOOOONG:0] i_clk [1:0],\n"
+        "    input packet_t [1:0] i_diveeeeeeeee [1:0],\n"
+        "    output logic [1:0] o_mul [1:0]\n"
+        ");\n";
+
+    const std::string expected =
+        "module memory_top(\n"
+        "    input     looooooooong_t [LOOOOOOOOOONG:0] i_clk          [1:0]         ,\n"
+        "    input     packet_t       [1:0]             i_diveeeeeeeee [1:0]         ,\n"
+        "    output    logic          [1:0]             o_mul          [1:0]\n"
+        ");\n";
+
+    const std::string result = format_source(input, opts);
+    INFO("formatted output:\n" << result);
+    CHECK(result == expected);
+    CHECK(format_source(result, opts) == expected);
+}
+
+TEST_CASE("formatter: non-ANSI port declaration sections with align_adaptive true",
+          "[formatter][ports][adaptive]") {
+    const FormatOptions opts = port_section_stress_options(true);
+
+    const std::string input =
+        "module memory_top(\n"
+        "    i_clk, i_diveeeeeeeee, o_mul\n"
+        ");\n"
+        "input looooooooong_t [LOOOOOOOOOONG:0] i_clk [1:0];\n"
+        "input packet_t [1:0] i_diveeeeeeeee [1:0];\n"
+        "output logic [1:0] o_mul [1:0];\n"
+        "endmodule\n";
+
+    const std::string expected =
+        "module memory_top(\n"
+        "    i_clk,\n"
+        "    i_diveeeeeeeee,\n"
+        "    o_mul\n"
+        ");\n"
+        "input     looooooooong_t [LOOOOOOOOOONG:0] i_clk   [1:0]         ;\n"
+        "input     packet_t   [1:0]       i_diveeeeeeeee    [1:0]         ;\n"
+        "output    logic      [1:0]       o_mul             [1:0]         ;\n"
+        "endmodule\n";
+
+    const std::string result = format_source(input, opts);
+    INFO("formatted output:\n" << result);
+    CHECK(result == expected);
+    CHECK(format_source(result, opts) == expected);
+}
+
+TEST_CASE("formatter: non-ANSI port declaration sections with align_adaptive false",
+          "[formatter][ports][adaptive]") {
+    const FormatOptions opts = port_section_stress_options(false);
+
+    const std::string input =
+        "module memory_top(\n"
+        "    i_clk, i_diveeeeeeeee, o_mul\n"
+        ");\n"
+        "input looooooooong_t [LOOOOOOOOOONG:0] i_clk [1:0];\n"
+        "input packet_t [1:0] i_diveeeeeeeee [1:0];\n"
+        "output logic [1:0] o_mul [1:0];\n"
+        "endmodule\n";
+
+    const std::string expected =
+        "module memory_top(\n"
+        "    i_clk,\n"
+        "    i_diveeeeeeeee,\n"
+        "    o_mul\n"
+        ");\n"
+        "input     looooooooong_t [LOOOOOOOOOONG:0] i_clk          [1:0]         ;\n"
+        "input     packet_t       [1:0]             i_diveeeeeeeee [1:0]         ;\n"
+        "output    logic          [1:0]             o_mul          [1:0]         ;\n"
+        "endmodule\n";
+
+    const std::string result = format_source(input, opts);
+    INFO("formatted output:\n" << result);
+    CHECK(result == expected);
+    CHECK(format_source(result, opts) == expected);
+}
+
+TEST_CASE("formatter: var declaration sections with align_adaptive true",
+          "[formatter][vars][adaptive]") {
+    const FormatOptions opts = var_section_stress_options(true);
+
+    const std::string input =
+        "module top;\n"
+        "looooooooong_t [LOOOOOOOOOONG:0] i_clk [1:0];\n"
+        "packet_t [1:0] i_diveeeeeeeee [1:0];\n"
+        "logic [1:0] o_mul [1:0];\n"
+        "endmodule\n";
+
+    const std::string expected =
+        "module top;\n"
+        "looooooooong_t      [LOOOOOOOOOONG:0]   i_clk        [1:0]           ;\n"
+        "packet_t            [1:0]               i_diveeeeeeeee [1:0]         ;\n"
+        "logic               [1:0]               o_mul        [1:0]           ;\n"
+        "endmodule\n";
+
+    const std::string result = format_source(input, opts);
+    INFO("formatted output:\n" << result);
+    CHECK(result == expected);
+    CHECK(format_source(result, opts) == expected);
+}
+
+TEST_CASE("formatter: var declaration sections with align_adaptive false",
+          "[formatter][vars][adaptive]") {
+    const FormatOptions opts = var_section_stress_options(false);
+
+    const std::string input =
+        "module top;\n"
+        "looooooooooooog_packet_t [LOOOOOOOOOOOOOOOOONG:0] i_clk [1:0];\n"
+        "packet_t [1:0] i_diveeeeeeeee [1:0];\n"
+        "logic [1:0] o_mul [1:0];\n"
+        "endmodule\n";
+
+    const std::string expected =
+        "module top;\n"
+        "looooooooooooog_packet_t [LOOOOOOOOOOOOOOOOONG:0] i_clk          [1:0]           ;\n"
+        "packet_t                 [1:0]                    i_diveeeeeeeee [1:0]           ;\n"
+        "logic                    [1:0]                    o_mul          [1:0]           ;\n"
+        "endmodule\n";
+
+    const std::string result = format_source(input, opts);
+    INFO("formatted output:\n" << result);
+    CHECK(result == expected);
+    CHECK(format_source(result, opts) == expected);
+}
+
+TEST_CASE("formatter: non-adaptive var declarations align packed section to longest type",
+          "[formatter][vars][adaptive]") {
+    FormatOptions opts = var_section_stress_options(false);
+    opts.var_declaration.section3_min_width = 20;
+
+    const std::string input =
+        "module top;\n"
+        "logic [`BB-1:0] mem2_to_mem3;\n"
+        "looooooooooooog_packet_t [`BB-1:0] mem3_to_mem4 [1:0] = 3;\n"
+        "logic [`BB-1:0] mem4_to_mem5;\n"
+        "endmodule\n";
+
+    const std::string expected =
+        "module top;\n"
+        "logic                    [`BB-1:0]           mem2_to_mem3                        ;\n"
+        "looooooooooooog_packet_t [`BB-1:0]           mem3_to_mem4        [1:0] = 3       ;\n"
+        "logic                    [`BB-1:0]           mem4_to_mem5                        ;\n"
+        "endmodule\n";
+
+    const std::string result = format_source(input, opts);
+    INFO("formatted output:\n" << result);
+    CHECK(result == expected);
+    CHECK(format_source(result, opts) == expected);
+}
+
+TEST_CASE("formatter: non-adaptive var declarations align semicolon to longest trailing initializer",
+          "[formatter][vars][adaptive]") {
+    FormatOptions opts = var_section_stress_options(false);
+    opts.var_declaration.section3_min_width = 20;
+    opts.var_declaration.section4_min_width = 16;
+
+    const std::string input =
+        "module top;\n"
+        "logic [`BB-1:0] mem2_to_mem3;\n"
+        "looooooooooooog_packet_t [`BB-1:0] mem3_to_mem4 [1:0] = 33333333333333;\n"
+        "logic [`BB-1:0] mem4_to_mem5;\n"
+        "endmodule\n";
+
+    const std::string expected =
+        "module top;\n"
+        "logic                    [`BB-1:0]           mem2_to_mem3                              ;\n"
+        "looooooooooooog_packet_t [`BB-1:0]           mem3_to_mem4        [1:0] = 33333333333333;\n"
+        "logic                    [`BB-1:0]           mem4_to_mem5                              ;\n"
+        "endmodule\n";
+
+    const std::string result = format_source(input, opts);
+    INFO("formatted output:\n" << result);
+    CHECK(result == expected);
+    CHECK(format_source(result, opts) == expected);
+}
+
 TEST_CASE("formatter: module header closing line comment is preserved", "[formatter]") {
     FormatOptions opts;
     opts.safe_mode = true;
@@ -567,6 +981,21 @@ TEST_CASE("formatter: var declaration initializers not aligned by statement pass
                         "logic [8:0] douteeeeeeeeeeeeeeeeeee = 8'hFF;\n",
                         opts) == "logic [7:0] dout = 8'hFF;\n"
                                  "logic [8:0] douteeeeeeeeeeeeeeeeeee = 8'hFF;\n");
+}
+
+TEST_CASE("formatter: unpacked var dimensions keep a space before bracket when not aligned",
+          "[formatter]") {
+    FormatOptions opts;
+    opts.var_declaration.align = false;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+
+    CHECK(format_source("module top;\n"
+                        "logic bridge_wir[3:0];\n"
+                        "endmodule\n",
+                        opts) == "module top;\n"
+                                 "logic bridge_wir [3:0];\n"
+                                 "endmodule\n");
 }
 
 TEST_CASE("formatter: user-defined type var decl not aligned by statement pass", "[formatter]") {
@@ -1375,6 +1804,101 @@ TEST_CASE("formatter: var decl with backtick macro dim is idempotent", "[formatt
     CHECK(result.find("`WIDTH") != std::string::npos);
     // Idempotent
     CHECK(format_source(result, opts) == result);
+}
+
+TEST_CASE("formatter: unpacked variable dimensions align as trailing section", "[formatter]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+    opts.var_declaration.align = true;
+    opts.var_declaration.align_adaptive = true;
+    opts.var_declaration.section1_min_width = 20;
+    opts.var_declaration.section2_min_width = 20;
+    opts.var_declaration.section3_min_width = 20;
+    opts.var_declaration.section4_min_width = 16;
+
+    const std::string input =
+        "module top;\n"
+        "logic a[3:0];\n"
+        "logic [7:0] b;\n"
+        "endmodule\n";
+
+    const std::string expected =
+        "module top;\n"
+        "logic                                   a                   [3:0]           ;\n"
+        "logic               [7:0]               b                                   ;\n"
+        "endmodule\n";
+
+    const std::string result = format_source(input, opts);
+    INFO("formatted output:\n" << result);
+    CHECK(result == expected);
+    CHECK(format_source(result, opts) == expected);
+}
+
+TEST_CASE("formatter: unpacked memory_top-style vars keep trailing dimensions aligned",
+          "[formatter][memory_top]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+    opts.var_declaration.align = true;
+    opts.var_declaration.align_adaptive = true;
+    opts.var_declaration.section1_min_width = 20;
+    opts.var_declaration.section2_min_width = 20;
+    opts.var_declaration.section3_min_width = 20;
+    opts.var_declaration.section4_min_width = 16;
+
+    const std::string input =
+        "`include \"params.svh\"\n"
+        "\n"
+        "module memory_top();\n"
+        "logic                                   bridge_wir[3:0]                     ;\n"
+        "logic               [`BB-1:0]           mem2_to_mem3                        ;\n"
+        "endmodule\n";
+
+    const std::string expected =
+        "`include \"params.svh\"\n"
+        "\n"
+        "module memory_top();\n"
+        "logic                                   bridge_wir          [3:0]           ;\n"
+        "logic               [`BB-1:0]           mem2_to_mem3                        ;\n"
+        "endmodule\n";
+
+    const std::string result = format_source(input, opts);
+    INFO("formatted output:\n" << result);
+    CHECK(result == expected);
+    CHECK(format_source(result, opts) == expected);
+}
+
+TEST_CASE("formatter: non-adaptive var declarations align trailing section to longest name",
+          "[formatter][vars]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+    opts.var_declaration.align = true;
+    opts.var_declaration.align_adaptive = false;
+    opts.var_declaration.section1_min_width = 20;
+    opts.var_declaration.section2_min_width = 20;
+    opts.var_declaration.section3_min_width = 13;
+    opts.var_declaration.section4_min_width = 16;
+
+    const std::string input =
+        "module top;\n"
+        "logic [1:0] i_clk [1:0];\n"
+        "logic [1:0] i_diveeeeeeeee [1:0];\n"
+        "logic [1:0] o_mul [1:0];\n"
+        "endmodule\n";
+
+    const std::string expected =
+        "module top;\n"
+        "logic               [1:0]               i_clk          [1:0]           ;\n"
+        "logic               [1:0]               i_diveeeeeeeee [1:0]           ;\n"
+        "logic               [1:0]               o_mul          [1:0]           ;\n"
+        "endmodule\n";
+
+    const std::string result = format_source(input, opts);
+    INFO("formatted output:\n" << result);
+    CHECK(result == expected);
+    CHECK(format_source(result, opts) == expected);
 }
 
 TEST_CASE("formatter: user-defined output port type stays in type section", "[formatter]") {
@@ -3291,6 +3815,72 @@ TEST_CASE("formatter: memory_top regression inv ports and assigns", "[formatter]
     CHECK(fmt.find("input     fifo_entry_t [3:0]     i_a") != std::string::npos);
     CHECK(fmt.find("assign i_d        = ~i_a;") != std::string::npos);
     CHECK(fmt.find("assign i_e        = i_a;") != std::string::npos);
+}
+
+TEST_CASE("formatter: packed port declarations reserve section 5 like scalar ones",
+          "[formatter][ports]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+    opts.port_declaration.align = true;
+    opts.port_declaration.align_adaptive = true;
+    opts.port_declaration.section1_min_width = 10;
+    opts.port_declaration.section2_min_width = 11;
+    opts.port_declaration.section3_min_width = 12;
+    opts.port_declaration.section4_min_width = 13;
+    opts.port_declaration.section5_min_width = 14;
+
+    const std::string src =
+        "module top;\n"
+        "input     logic                  i_clk                           ;\n"
+        "input     wire       [5:0]       address                    ;\n"
+        "input     wire       [WIDTH-1:0] i_data            [1:0]         ;\n"
+        "output    wire       [WIDTH-1:0] o_data            [2:0]         ;\n"
+        "endmodule\n";
+
+    const std::string expected =
+        "module top;\n"
+        "input     logic                  i_clk                           ;\n"
+        "input     wire       [5:0]       address                         ;\n"
+        "input     wire       [WIDTH-1:0] i_data            [1:0]         ;\n"
+        "output    wire       [WIDTH-1:0] o_data            [2:0]         ;\n"
+        "endmodule\n";
+
+    const std::string result = format_source(src, opts);
+    INFO("formatted output:\n" << result);
+    CHECK(result == expected);
+    CHECK(format_source(result, opts) == expected);
+}
+
+TEST_CASE("formatter: ANSI port declarations reserve trailing dimensions for section 5",
+          "[formatter][ports]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+    opts.port_declaration.align = true;
+    opts.port_declaration.align_adaptive = true;
+    opts.port_declaration.section1_min_width = 10;
+    opts.port_declaration.section2_min_width = 11;
+    opts.port_declaration.section3_min_width = 12;
+    opts.port_declaration.section4_min_width = 13;
+    opts.port_declaration.section5_min_width = 14;
+
+    const std::string input =
+        "module memory_top(\n"
+        "    input     packet_t [1:0]    i_clk        [1:0],\n"
+        "    output    logic [1:0]       o_mul        [1:0]\n"
+        ");\n";
+
+    const std::string expected =
+        "module memory_top(\n"
+        "    input     packet_t   [1:0]       i_clk        [1:0]         ,\n"
+        "    output    logic      [1:0]       o_mul        [1:0]\n"
+        ");\n";
+
+    const std::string result = format_source(input, opts);
+    INFO("formatted output:\n" << result);
+    CHECK(result == expected);
+    CHECK(format_source(result, opts) == expected);
 }
 
 TEST_CASE("formatter: forever statement bodies wrap and align like other controls", "[formatter][options]") {

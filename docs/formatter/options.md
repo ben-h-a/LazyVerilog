@@ -129,6 +129,17 @@ safe_mode = true
 
 ---
 
+### `safe_mode2`
+
+When `true`, the formatter re-lexes the formatted output and compares the token stream against the original input token stream. This is stricter than `safe_mode` because it catches tokenization changes, not just text changes.
+
+```toml
+[format]
+safe_mode2 = true
+```
+
+---
+
 ### `log_path`
 
 Directory path for formatter diagnostic log files. When non-empty, the formatter writes per-pass token dumps into this directory after each format operation. Useful for debugging unexpected formatting output.

@@ -1120,6 +1120,9 @@ void LazyVerilogServer::register_handlers() {
             auto state = analyzer_.get_state(uri);
             if (state) {
                 std::string text = state->text;
+                FormatOptions save_format = config_.format;
+                if (config_.autoarg.autoarg_on_save)
+                    save_format.safe_mode = true;
 
                 if (config_.autoarg.autoarg_on_save && state->tree) {
                     auto results = autoarg_all_modules(*state);
@@ -1138,16 +1141,16 @@ void LazyVerilogServer::register_handlers() {
                         // source.  Formatting each fragment first is wasted work on save because
                         // the full pass immediately reformats the same text again.
                         std::string replacement =
-                            line_prefix + format_autoarg(result, config_.autoarg, config_.format);
-                        if (!config_.format.enable_format_on_save)
-                            replacement = format_emit_text(replacement, config_.format);
+                            line_prefix + format_autoarg(result, config_.autoarg, save_format);
+                        if (!save_format.enable_format_on_save)
+                            replacement = format_emit_text(replacement, save_format);
                         size_t end = lsp_offset(text, result.end_line, result.end_col);
                         text.replace(line_start, end - line_start, replacement);
                     }
                 }
 
-                if (config_.format.enable_format_on_save)
-                    text = format_source(text, config_.format);
+                if (save_format.enable_format_on_save)
+                    text = format_source(text, save_format);
 
                 if (text != state->text)
                     rsp.result.push_back(whole_document_edit(*state, text));
