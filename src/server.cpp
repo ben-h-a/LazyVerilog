@@ -119,6 +119,85 @@ static size_t advance_utf16_cols(const std::string& text, size_t pos, int col) {
     return pos;
 }
 
+// Convert (line, col) LSP position to byte offset in text.
+static size_t lsp_offset(const std::string& text, int line, int col) {
+    int cur = 0;
+    size_t pos = 0;
+    while (pos < text.size() && cur < line) {
+        if (text[pos] == '\n')
+            ++cur;
+        ++pos;
+    }
+    return advance_utf16_cols(text, pos, col);
+}
+
+// Compute two byte offsets in a single scan. Positions must be in document order
+// (start before end); if not they are swapped and the result pair is returned
+// in swapped order so callers always get (start_offset, end_offset).
+static std::pair<size_t, size_t> lsp_offset_pair(const std::string& text,
+                                                 int line1, int col1,
+                                                 int line2, int col2) {
+    // Ensure we scan in document order while preserving the caller-visible
+    // ordering at the end.  LSP ranges are normally ordered, but the helper is
+    // used by generic range utilities, so accepting reversed positions makes
+    // the function defensive.
+    bool swapped = (line1 > line2 || (line1 == line2 && col1 > col2));
+    if (swapped) {
+        std::swap(line1, line2);
+        std::swap(col1, col2);
+    }
+
+    // Walk to the start of the first requested line once.
+    int cur = 0;
+    size_t pos = 0;
+    while (pos < text.size() && cur < line1) {
+        if (text[pos] == '\n')
+            ++cur;
+        ++pos;
+    }
+    const size_t line1_start = pos;
+
+    // Important: compute both same-line offsets from the original line start.
+    // A previous implementation set the second line start to the already
+    // advanced first offset.  For a zero-width same-line insertion at column C,
+    // that turned (C, C) into offsets (C, 2*C), causing didChange to delete
+    // existing text after the cursor.
+    size_t off1 = advance_utf16_cols(text, line1_start, col1);
+
+    if (line1 == line2) {
+        size_t off2 = advance_utf16_cols(text, line1_start, col2);
+        if (swapped)
+            std::swap(off1, off2);
+        return {off1, off2};
+    }
+
+    // Different-line case: continue scanning from line1 start to line2 start,
+    // then compute col2 relative to that true second-line start.
+    pos = line1_start;
+    while (pos < text.size() && cur < line2) {
+        if (text[pos] == '\n')
+            ++cur;
+        ++pos;
+    }
+    const size_t line2_start = pos;
+    size_t off2 = advance_utf16_cols(text, line2_start, col2);
+
+    if (swapped)
+        std::swap(off1, off2);
+    return {off1, off2};
+}
+
+// Format a generated replacement fragment and strip final newlines so it can be
+// used as an LSP TextEdit.newText value for a bounded range.  `format_source()`
+// renders complete files with a trailing newline, but range replacements such as
+// AutoArg's module-header edit should not accidentally insert an extra blank line
+// before the untouched body that follows the edited range.
+static std::string format_emit_text(const std::string& text, const FormatOptions& options) {
+    std::string formatted = format_source(text, options);
+    while (!formatted.empty() && formatted.back() == '\n')
+        formatted.pop_back();
+    return formatted;
+}
 
 static std::string json_string(std::string_view text) {
     std::string out;
