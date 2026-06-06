@@ -404,6 +404,74 @@ static void collect_ast_declaration_folds(const SourceManager& sm,
     flush();
 }
 
+// AST-backed instance folds.
+//
+// Instantiations are intentionally detected from the parsed syntax tree rather
+// than with token guesses.  A token-only pattern such as
+//
+//     identifier identifier #? ( ... ) ;
+//
+// is ambiguous with declarations, function calls in procedural code, and
+// partially edited source.  Slang has already disambiguated real module,
+// interface, primitive, and checker instantiations into dedicated syntax nodes,
+// so folding can safely use those node extents.
+//
+// Parameterized instances are handled by folding the whole instantiation
+// statement, not only the final connection list:
+//
+//     memory #(
+//         .WIDTH(DATA_W)
+//     ) u_mem (
+//         .clk_i(clk)
+//     );
+//
+// The resulting "instance" fold spans from the type line through the semicolon,
+// so the #(...) parameter override block and the (...) port connection block are
+// hidden together.
+struct InstanceFoldVisitor : public SyntaxVisitor<InstanceFoldVisitor> {
+    const SourceManager&       sm;
+    BufferID                   current_buffer;
+    std::vector<FoldingRange>& out;
+
+    InstanceFoldVisitor(const SourceManager& sm, BufferID current_buffer,
+                        std::vector<FoldingRange>& out)
+        : sm(sm), current_buffer(current_buffer), out(out) {}
+
+    void record(const SyntaxNode& node) {
+        Token first = node.getFirstToken();
+        Token last  = node.getLastToken();
+        if (!first || !last || !first.location().valid() ||
+            !last.location().valid())
+            return;
+        if (first.location().buffer() != current_buffer ||
+            last.location().buffer() != current_buffer)
+            return;
+        emit(out, sm, current_buffer, token_line(sm, first),
+             token_line(sm, last), "instance");
+    }
+
+    void handle(const HierarchyInstantiationSyntax& node) {
+        // Module and interface instances:
+        //     child #(...) u_child (...);
+        record(node);
+        visitDefault(node);
+    }
+
+    void handle(const PrimitiveInstantiationSyntax& node) {
+        // Gate / UDP primitive instances use the same hierarchical-instance
+        // child shape and should fold like module instances.
+        record(node);
+        visitDefault(node);
+    }
+
+    void handle(const CheckerInstantiationSyntax& node) {
+        // Checker instances can also have parameter assignments and connection
+        // lists, so use the same whole-statement folding policy.
+        record(node);
+        visitDefault(node);
+    }
+};
+
 // ── token path helpers ────────────────────────────────────────────────────
 
 // Emit a fold using the LineTable for character-column computation.
@@ -1328,6 +1396,9 @@ std::vector<FoldingRange> provide_folding_range(const Analyzer& analyzer,
 
             HeaderListVisitor h{*state->source_manager, *current_buffer, out};
             state->tree->root().visit(h);
+
+            InstanceFoldVisitor inst{*state->source_manager, *current_buffer, out};
+            state->tree->root().visit(inst);
 
             // ConditionalStatementSyntax and IfGenerateSyntax require AST
             // precision to link chained branches; token-only detection cannot

@@ -1070,6 +1070,30 @@ endmodule
     CHECK(has_fold_kind(folds, 13, 15, "declarations"));
 }
 
+TEST_CASE("foldingRange: parameterized module instances fold as instance regions",
+          "[folding]") {
+    Analyzer    analyzer;
+    std::string uri = "file:///tmp/fold_parameterized_instance.sv";
+    analyzer.open(uri, R"(module top;
+    memory #(
+        .WIDTH(DATA_W),
+        .DEPTH(16)
+    ) u_mem (
+        .clk_i(clk),
+        .rst_ni(rst_n),
+        .data_o(data)
+    );
+endmodule
+)");
+    auto folds = provide_folding_range(analyzer, make_params(uri));
+
+    // The instance fold should cover the complete instantiation statement, not
+    // only the connection list.  This is important for parameterized instances:
+    // folding from the instance line should hide the #(...) parameter override
+    // block and the (...) port connection block together.
+    CHECK(has_fold_kind(folds, 1, 8, "instance"));
+}
+
 TEST_CASE("foldingRange: AST folds from included files are not emitted for current document",
           "[folding]") {
     const std::string include_path = "/tmp/lazyverilog_folding_include.svh";
