@@ -236,6 +236,13 @@ struct RtltreeOptions {
     bool show_file{true};
 };
 
+/// Formatting options reserved for synthesized AutoInst text.
+///
+/// This is intentionally empty today: AutoInst currently inherits its concrete
+/// text layout from the main formatter after generating the replacement block.
+/// Keep the named option object in the public config shape so call sites remain
+/// explicit about where future AutoInst-only knobs would flow, instead of
+/// passing an anonymous placeholder or overloading unrelated formatter config.
 struct AutoinstOptions {};
 
 struct AutoargOptions {
