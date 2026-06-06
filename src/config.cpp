@@ -492,6 +492,7 @@ Config load_config(const std::filesystem::path& root, std::string* warning,
                 warning_detail->line = 0;
                 warning_detail->column = 0;
                 warning_detail->message = msg;
+                warning_detail->validation_errors = val_errors;
             }
         }
     }

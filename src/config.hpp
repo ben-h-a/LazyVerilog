@@ -269,6 +269,11 @@ struct ConfigWarning {
     uint32_t line{0};   // 1-based; 0 when unavailable
     uint32_t column{0}; // 1-based; 0 when unavailable
     std::string message;
+    // Individual validation failures for callers that want structured config
+    // feedback instead of parsing the human-readable aggregate message above.
+    // Parse errors keep this empty because toml++ currently reports them as one
+    // diagnostic with source location information.
+    std::vector<std::string> validation_errors;
 };
 
 struct Config {
