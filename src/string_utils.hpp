@@ -18,6 +18,45 @@ inline std::string trim_copy(std::string text) {
     return std::string(first, last);
 }
 
+/// Count UTF-16 code units from byte offset `pos` until a newline or end of
+/// string.  LSP positions use UTF-16 columns, while lazyverilog stores document
+/// text as UTF-8, so this helper advances over one UTF-8 scalar at a time and
+/// counts supplementary-plane scalars as two UTF-16 units.  Malformed UTF-8 is
+/// deliberately treated as one byte / one UTF-16 unit to keep offset math
+/// monotonic for partially-edited documents.
+inline size_t utf16_units_until_newline(std::string_view text, size_t pos) {
+    size_t units = 0;
+    while (pos < text.size() && text[pos] != '\n') {
+        unsigned char c = static_cast<unsigned char>(text[pos]);
+        int bytes = 1;
+        int width = 1;
+        if (c < 0x80) {
+            bytes = 1;
+        } else if ((c & 0xE0) == 0xC0) {
+            bytes = 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            bytes = 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            bytes = 4;
+            width = 2;
+        }
+
+        bool valid_sequence = pos + static_cast<size_t>(bytes) <= text.size();
+        for (int i = 1; valid_sequence && i < bytes; ++i) {
+            unsigned char cc = static_cast<unsigned char>(text[pos + static_cast<size_t>(i)]);
+            valid_sequence = (cc & 0xC0) == 0x80;
+        }
+        if (!valid_sequence) {
+            bytes = 1;
+            width = 1;
+        }
+
+        units += static_cast<size_t>(width);
+        pos += static_cast<size_t>(bytes);
+    }
+    return units;
+}
+
 
 inline std::optional<std::string> read_file_text_optional(const std::filesystem::path& path) {
     std::ifstream in(path, std::ios::binary);

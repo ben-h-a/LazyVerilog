@@ -53,38 +53,6 @@ static int saturating_lsp_int(size_t value) {
     return value > max_int ? std::numeric_limits<int>::max() : static_cast<int>(value);
 }
 
-static size_t utf16_units_until_newline(std::string_view text, size_t pos) {
-    size_t units = 0;
-    while (pos < text.size() && text[pos] != '\n') {
-        unsigned char c = static_cast<unsigned char>(text[pos]);
-        int bytes = 1;
-        int width = 1;
-        if (c < 0x80) {
-            bytes = 1;
-        } else if ((c & 0xE0) == 0xC0) {
-            bytes = 2;
-        } else if ((c & 0xF0) == 0xE0) {
-            bytes = 3;
-        } else if ((c & 0xF8) == 0xF0) {
-            bytes = 4;
-            width = 2;
-        }
-
-        bool valid_sequence = pos + static_cast<size_t>(bytes) <= text.size();
-        for (int i = 1; valid_sequence && i < bytes; ++i) {
-            unsigned char cc = static_cast<unsigned char>(text[pos + static_cast<size_t>(i)]);
-            valid_sequence = (cc & 0xC0) == 0x80;
-        }
-        if (!valid_sequence) {
-            bytes = 1;
-            width = 1;
-        }
-
-        units += static_cast<size_t>(width);
-        pos += static_cast<size_t>(bytes);
-    }
-    return units;
-}
 
 static void cache_document_end_position(DocumentState& state) {
     size_t line = 0;
