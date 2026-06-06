@@ -64,7 +64,6 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <limits>
 #include <map>
 #include <memory>
 #include <string_view>
@@ -273,39 +272,22 @@ static std::string json_string(std::string_view text) {
     return out;
 }
 
-static int saturating_lsp_int(size_t value) {
-    // LspCpp stores positions as int.  Keep scanning with size_t so very large
-    // documents cannot overflow the loop counter, then saturate at the protocol
-    // representation boundary instead of truncating through an unchecked cast.
-    constexpr auto max_int = static_cast<size_t>(std::numeric_limits<int>::max());
-    return value > max_int ? std::numeric_limits<int>::max() : static_cast<int>(value);
+static lsPosition document_end_position(const DocumentState& state) {
+    return lsPosition(state.end_line, state.end_character);
 }
 
-static lsPosition document_end_position(const std::string& text) {
-    size_t line = 0;
-    size_t line_start = 0;
-    for (size_t i = 0; i < text.size(); ++i) {
-        if (text[i] == '\n') {
-            ++line;
-            line_start = i + 1;
-        }
-    }
-    const size_t col = utf16_units_until_newline(text, line_start);
-    return lsPosition(saturating_lsp_int(line), saturating_lsp_int(col));
-}
-
-static lsTextEdit whole_document_edit(const std::string& old_text, const std::string& new_text) {
+static lsTextEdit whole_document_edit(const DocumentState& state, const std::string& new_text) {
     lsTextEdit edit;
     edit.range.start = lsPosition(0, 0);
-    edit.range.end = document_end_position(old_text);
+    edit.range.end = document_end_position(state);
     edit.newText = new_text;
     return edit;
 }
 
 static std::string whole_document_workspace_edit_json(const std::string& uri,
-                                                      const std::string& old_text,
+                                                      const DocumentState& state,
                                                       const std::string& new_text) {
-    const auto end = document_end_position(old_text);
+    const auto end = document_end_position(state);
     const auto escaped_uri = json_string(uri);
     const auto escaped_text = json_string(new_text);
     const auto end_line = std::to_string(end.line);
@@ -1164,7 +1146,7 @@ void LazyVerilogServer::register_handlers() {
                     text = format_source(text, config_.format);
 
                 if (text != state->text)
-                    rsp.result.push_back(whole_document_edit(state->text, text));
+                    rsp.result.push_back(whole_document_edit(*state, text));
             }
         } catch (const SafeModeError& e) {
             show_warning(e.what());
@@ -1520,12 +1502,12 @@ void LazyVerilogServer::register_handlers() {
 
                 // Build workspace edit JSON and set as result
                 lsWorkspaceEdit we;
-                lsTextEdit text_edit = whole_document_edit(state->text, new_text);
+                lsTextEdit text_edit = whole_document_edit(*state, new_text);
                 we.changes = std::map<std::string, std::vector<lsTextEdit>>{};
                 (*we.changes)[uri] = {text_edit};
 
                 rsp.result.SetJsonString(
-                    whole_document_workspace_edit_json(uri, state->text, new_text),
+                    whole_document_workspace_edit_json(uri, *state, new_text),
                     lsp::Any::kObjectType);
             };
 
@@ -1544,7 +1526,7 @@ void LazyVerilogServer::register_handlers() {
                         if (range_edit.newText != slice_lsp_range(state->text, range_edit.range))
                             edit = std::move(range_edit);
                     } else if (formatted != state->text) {
-                        edit = whole_document_edit(state->text, formatted);
+                        edit = whole_document_edit(*state, formatted);
                     }
                     if (edit)
                         rsp.result.SetJsonString(workspace_edit_json(uri, *edit),
@@ -1629,11 +1611,11 @@ void LazyVerilogServer::register_handlers() {
                             new_source = format_source(new_source, config_.format);
                         if (new_source != state->text) {
                             lsWorkspaceEdit we;
-                            lsTextEdit text_edit = whole_document_edit(state->text, new_source);
+                            lsTextEdit text_edit = whole_document_edit(*state, new_source);
                             we.changes = std::map<std::string, std::vector<lsTextEdit>>{};
                             (*we.changes)[uri] = {text_edit};
                             rsp.result.SetJsonString(
-                                whole_document_workspace_edit_json(uri, state->text, new_source),
+                                whole_document_workspace_edit_json(uri, *state, new_source),
                                 lsp::Any::kObjectType);
                         }
                     }

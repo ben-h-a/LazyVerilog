@@ -33,6 +33,11 @@ struct DocumentState {
     // snapshot so request/change paths do not repeatedly call filesystem
     // normalization while holding Analyzer::map_mutex_.
     std::string normalized_path;
+    // Cached LSP end position for whole-document text edits.  The snapshot text
+    // is immutable, so computing this once during parse avoids a full file scan
+    // every time a save/code-action response replaces the complete document.
+    int end_line{0};
+    int end_character{0};
     // source_manager must outlive tree (SyntaxTree holds SourceManager&).
     std::unique_ptr<slang::SourceManager> source_manager;
     std::shared_ptr<slang::syntax::SyntaxTree> tree;

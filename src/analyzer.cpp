@@ -10,6 +10,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <set>
 #include <slang/diagnostics/DiagnosticEngine.h>
@@ -46,6 +47,59 @@ void log_perf(std::string_view label, Clock::time_point start) {
 } // namespace
 
 static std::string file_name_to_uri(std::string_view file_name, const std::string& fallback_uri);
+
+
+static int saturating_lsp_int(size_t value) {
+    constexpr auto max_int = static_cast<size_t>(std::numeric_limits<int>::max());
+    return value > max_int ? std::numeric_limits<int>::max() : static_cast<int>(value);
+}
+
+static size_t utf16_units_until_newline(std::string_view text, size_t pos) {
+    size_t units = 0;
+    while (pos < text.size() && text[pos] != '\n') {
+        unsigned char c = static_cast<unsigned char>(text[pos]);
+        int bytes = 1;
+        int width = 1;
+        if (c < 0x80) {
+            bytes = 1;
+        } else if ((c & 0xE0) == 0xC0) {
+            bytes = 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            bytes = 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            bytes = 4;
+            width = 2;
+        }
+
+        bool valid_sequence = pos + static_cast<size_t>(bytes) <= text.size();
+        for (int i = 1; valid_sequence && i < bytes; ++i) {
+            unsigned char cc = static_cast<unsigned char>(text[pos + static_cast<size_t>(i)]);
+            valid_sequence = (cc & 0xC0) == 0x80;
+        }
+        if (!valid_sequence) {
+            bytes = 1;
+            width = 1;
+        }
+
+        units += static_cast<size_t>(width);
+        pos += static_cast<size_t>(bytes);
+    }
+    return units;
+}
+
+static void cache_document_end_position(DocumentState& state) {
+    size_t line = 0;
+    size_t line_start = 0;
+    for (size_t i = 0; i < state.text.size(); ++i) {
+        if (state.text[i] == '\n') {
+            ++line;
+            line_start = i + 1;
+        }
+    }
+    const size_t col = utf16_units_until_newline(state.text, line_start);
+    state.end_line = saturating_lsp_int(line);
+    state.end_character = saturating_lsp_int(col);
+}
 
 static void add_include_dirs(slang::SourceManager& sm, const std::vector<std::string>& dirs) {
     for (const auto& dir : dirs) {
@@ -149,6 +203,7 @@ make_file_state_with_options(const std::filesystem::path& path,
     auto text = read_file_text_optional(norm);
     auto state = std::make_shared<DocumentState>(uri, text.value_or(std::string{}), nullptr);
     state->normalized_path = norm.string();
+    cache_document_end_position(*state);
     state->source_manager = std::move(sm);
     state->tree = std::move(*tree_or_error);
     state->include_dependencies = collect_include_dependency_uris(*state->source_manager, uri);
@@ -215,6 +270,7 @@ std::shared_ptr<DocumentState> Analyzer::make_state(const std::string& uri,
         std::string_view(text), *sm, std::string_view(uri), std::string_view(path), bag);
     auto state = std::make_shared<DocumentState>(uri, text, nullptr);
     state->normalized_path = normalized_current_path;
+    cache_document_end_position(*state);
     state->source_manager = std::move(sm);
     state->tree = std::move(tree);
     state->include_dependencies = collect_include_dependency_uris(*state->source_manager, uri);
