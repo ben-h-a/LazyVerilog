@@ -657,27 +657,18 @@ void LazyVerilogServer::publish_diagnostics(const std::string& uri) {
             for (auto diag : state->parse_diagnostics)
                 add_diag(std::move(diag));
 
-            // Most lint rules only need the current file's SyntaxIndex.  The stale
-            // AutoInst check is different: it validates each instance's named
-            // port connections against the instantiated module's declaration,
-            // and that module is commonly defined in a design-filelist file
-            // rather than in the current buffer (for example demo/memory_top.sv
-            // instantiates memory from demo/memory.sv).
-            //
-            // Build only the current-buffer structural index when that rule is
-            // enabled.  The project portion comes from the latest immutable
-            // background-published index snapshot and is queried separately, so
-            // diagnostics do not synchronously parse, copy, or merge the full
-            // design filelist on every edit.
-            const SyntaxIndex* lint_index_ptr = nullptr;
+            // Most lint rules need only the current file's live SyntaxTree.
+            // The stale AutoInst check also needs module declarations from
+            // closed/project files.  Current/open-file facts are derived from
+            // the AST inside run_lint(); closed/project facts come from the
+            // latest immutable background-published index snapshot.  Do not
+            // synchronously parse, copy, or merge the full design filelist on
+            // every edit.
             std::shared_ptr<const SyntaxIndex> project_lint_index;
-            if (config_.lint.module.stale_autoinst_diagnostic) {
-                lint_index_ptr = &get_structural_index(*state);
+            if (config_.lint.module.stale_autoinst_diagnostic)
                 project_lint_index = analyzer_.extra_project_index();
-            }
 
-            auto lint_diags = run_lint(*state, config_.lint, lint_index_ptr,
-                                       project_lint_index.get());
+            auto lint_diags = run_lint(*state, config_.lint, project_lint_index.get());
             for (auto diag : lint_diags)
                 add_diag(std::move(diag));
         }

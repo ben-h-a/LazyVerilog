@@ -11,6 +11,7 @@
 #include <regex>
 #include <optional>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 
 using namespace slang;
@@ -153,9 +154,72 @@ static bool has_latch_risk(const SyntaxNode& node) {
     return false;
 }
 
+struct CurrentModulePorts {
+    std::vector<std::string> ports;
+    std::unordered_set<std::string> port_by_name;
+
+    void add(std::string name) {
+        if (name.empty() || !port_by_name.insert(name).second)
+            return;
+        ports.push_back(std::move(name));
+    }
+};
+
+using CurrentModulePortMap = std::unordered_map<std::string, CurrentModulePorts>;
+
+struct CurrentModulePortCollector : public SyntaxVisitor<CurrentModulePortCollector> {
+    CurrentModulePortMap modules;
+
+    void add_ansi_ports(const AnsiPortListSyntax* port_list, CurrentModulePorts& out) {
+        if (!port_list)
+            return;
+        for (const auto* member : port_list->ports) {
+            if (!member)
+                continue;
+            if (const auto* implicit = member->as_if<ImplicitAnsiPortSyntax>()) {
+                if (implicit->declarator && implicit->declarator->name)
+                    out.add(std::string(implicit->declarator->name.valueText()));
+            } else if (const auto* explicit_port = member->as_if<ExplicitAnsiPortSyntax>()) {
+                if (explicit_port->name)
+                    out.add(std::string(explicit_port->name.valueText()));
+            }
+        }
+    }
+
+    void add_port_declarations(const SyntaxList<MemberSyntax>& members, CurrentModulePorts& out) {
+        for (const auto* member : members) {
+            if (!member)
+                continue;
+            const auto* declaration = member->as_if<PortDeclarationSyntax>();
+            if (!declaration)
+                continue;
+            for (const auto* declarator : declaration->declarators) {
+                if (declarator && declarator->name)
+                    out.add(std::string(declarator->name.valueText()));
+            }
+        }
+    }
+
+    void handle(const ModuleDeclarationSyntax& node) {
+        if (!node.header || !node.header->name)
+            return;
+
+        CurrentModulePorts ports;
+        if (node.header->ports && node.header->ports->kind == SyntaxKind::AnsiPortList)
+            add_ansi_ports(node.header->ports->as_if<AnsiPortListSyntax>(), ports);
+        add_port_declarations(node.members, ports);
+        modules[std::string(node.header->name.valueText())] = std::move(ports);
+
+        // Do not call visitDefault(node): SystemVerilog modules are not nested,
+        // and this prepass only needs top-level module declarations from the
+        // current live AST snapshot.  Keeping it shallow avoids extra work on
+        // every diagnostics refresh.
+    }
+};
+
 struct LintVisitor : public SyntaxVisitor<LintVisitor> {
     const LintConfig&          cfg;
-    const SyntaxIndex*         current_index;
+    const CurrentModulePortMap& current_modules;
     const SyntaxIndex*         project_index;
     SourceManager&             sm;
     std::vector<ParseDiagInfo> diags;
@@ -177,9 +241,9 @@ struct LintVisitor : public SyntaxVisitor<LintVisitor> {
     std::optional<std::regex> parameter_re_;
     std::optional<std::regex> localparam_re_;
 
-    LintVisitor(const LintConfig& c, const SyntaxIndex* current, const SyntaxIndex* project,
-                SourceManager& s, std::string file_stem)
-        : cfg(c), current_index(current), project_index(project), sm(s),
+    LintVisitor(const LintConfig& c, const CurrentModulePortMap& current,
+                const SyntaxIndex* project, SourceManager& s, std::string file_stem)
+        : cfg(c), current_modules(current), project_index(project), sm(s),
           file_stem_(std::move(file_stem)) {
         if (cfg.naming.enable) {
             module_re_      = compile_re(cfg.naming.module_pattern);
@@ -283,22 +347,49 @@ struct LintVisitor : public SyntaxVisitor<LintVisitor> {
         visitDefault(node);
     }
 
-    const ModuleEntry* find_module_entry(std::string_view module_name) const {
-        // Prefer the current buffer's index so unsaved edits to a module
-        // declaration immediately affect stale-autoinst diagnostics.  Fall
-        // back to the immutable background-published project snapshot for
-        // modules declared in closed filelist files.
-        auto lookup = [&](const SyntaxIndex* idx) -> const ModuleEntry* {
-            if (!idx)
-                return nullptr;
-            auto it = idx->module_by_name.find(std::string(module_name));
-            if (it == idx->module_by_name.end() || it->second >= idx->modules.size())
-                return nullptr;
-            return &idx->modules[it->second];
-        };
-        if (const auto* module = lookup(current_index))
-            return module;
-        return lookup(project_index);
+    const CurrentModulePorts* find_current_module_ports(std::string_view module_name) const {
+        const auto it = current_modules.find(std::string(module_name));
+        return it == current_modules.end() ? nullptr : &it->second;
+    }
+
+    const ModuleEntry* find_project_module_entry(std::string_view module_name) const {
+        if (!project_index)
+            return nullptr;
+        const auto it = project_index->module_by_name.find(std::string(module_name));
+        if (it == project_index->module_by_name.end() || it->second >= project_index->modules.size())
+            return nullptr;
+        return &project_index->modules[it->second];
+    }
+
+    template <typename HasPort, typename ForEachPort>
+    void check_stale_autoinst_connections(const HierarchyInstantiationSyntax& node,
+                                          HasPort&& has_port,
+                                          ForEachPort&& for_each_port) {
+        for (uint32_t i = 0; i < node.instances.size(); ++i) {
+            const auto* inst = node.instances[i];
+            if (!inst)
+                continue;
+            std::unordered_set<std::string> seen;
+            for (uint32_t j = 0; j < inst->connections.size(); ++j) {
+                const auto* named = inst->connections[j]
+                                        ? inst->connections[j]->as_if<NamedPortConnectionSyntax>()
+                                        : nullptr;
+                if (!named)
+                    continue;
+                std::string port = std::string(named->name.valueText());
+                if (!seen.insert(port).second)
+                    diags.push_back(make_diag(sm, named->name.location(), module_sev(),
+                        "[module] duplicate autoinst connection for port '" + port + "'"));
+                else if (!has_port(port))
+                    diags.push_back(make_diag(sm, named->name.location(), module_sev(),
+                        "[module] stale autoinst connection for unknown port '" + port + "'"));
+            }
+            for_each_port([&](const std::string& port_name) {
+                if (!seen.count(port_name) && inst->decl)
+                    diags.push_back(make_diag(sm, inst->decl->name.location(), module_sev(),
+                        "[module] autoinst connection missing port '" + port_name + "'"));
+            });
+        }
     }
 
     // ── module_instantiation_style: "named" | "positional" | "both" ─────────
@@ -329,30 +420,28 @@ struct LintVisitor : public SyntaxVisitor<LintVisitor> {
             }
         }
         if (cfg.module.stale_autoinst_diagnostic) {
-            if (const auto* module = find_module_entry(std::string_view(node.type.valueText()))) {
-                for (uint32_t i = 0; i < node.instances.size(); ++i) {
-                    const auto* inst = node.instances[i];
-                    if (!inst) continue;
-                    std::unordered_set<std::string> seen;
-                    for (uint32_t j = 0; j < inst->connections.size(); ++j) {
-                        const auto* named = inst->connections[j]
-                                                ? inst->connections[j]->as_if<NamedPortConnectionSyntax>()
-                                                : nullptr;
-                        if (!named) continue;
-                        std::string port = std::string(named->name.valueText());
-                        if (!seen.insert(port).second)
-                            diags.push_back(make_diag(sm, named->name.location(), module_sev(),
-                                "[module] duplicate autoinst connection for port '" + port + "'"));
-                        else if (!module->port_by_name.count(port))
-                            diags.push_back(make_diag(sm, named->name.location(), module_sev(),
-                                "[module] stale autoinst connection for unknown port '" + port + "'"));
-                    }
-                    for (const auto& port : module->ports) {
-                        if (!seen.count(port.name) && inst->decl)
-                            diags.push_back(make_diag(sm, inst->decl->name.location(), module_sev(),
-                                "[module] autoinst connection missing port '" + port.name + "'"));
-                    }
-                }
+            const auto module_name = std::string_view(node.type.valueText());
+            if (const auto* current = find_current_module_ports(module_name)) {
+                // Current/open-file facts come from the live AST.  They win over
+                // the project index so unsaved edits are reflected immediately.
+                check_stale_autoinst_connections(
+                    node,
+                    [&](const std::string& port) { return current->port_by_name.count(port) != 0; },
+                    [&](auto&& fn) {
+                        for (const auto& port : current->ports)
+                            fn(port);
+                    });
+            } else if (const auto* project = find_project_module_entry(module_name)) {
+                // Closed/project-file facts come from the immutable background
+                // index snapshot.  Request-time diagnostics do not build or
+                // merge project-wide indexes.
+                check_stale_autoinst_connections(
+                    node,
+                    [&](const std::string& port) { return project->port_by_name.count(port) != 0; },
+                    [&](auto&& fn) {
+                        for (const auto& port : project->ports)
+                            fn(port.name);
+                    });
             }
         }
         visitDefault(node);
@@ -560,7 +649,6 @@ struct LintVisitor : public SyntaxVisitor<LintVisitor> {
 };
 
 std::vector<ParseDiagInfo> run_lint(const DocumentState& state, const LintConfig& config,
-                                    const SyntaxIndex* current_index,
                                     const SyntaxIndex* project_index) {
     std::vector<ParseDiagInfo> diags;
     if (!config.enable)
@@ -598,20 +686,16 @@ std::vector<ParseDiagInfo> run_lint(const DocumentState& state, const LintConfig
     auto& sm = state.tree->sourceManager();
     // Most lint rules are pure SyntaxTree walks.  Do not synthesize a broad
     // file index just because lint is running on didChange; that puts indexing
-    // back on the editing hot path.  The only current rule that needs indexes
-    // is stale_autoinst_diagnostic.  It can query the current-file index and
-    // the background-published project index separately, avoiding a per-edit
-    // copy/merge of the full project index.
-    SyntaxIndex local_stale_index;
-    if (!current_index && config.module.stale_autoinst_diagnostic) {
-        // Standalone/unit-test path: no Analyzer is available to provide the
-        // current-file structural index, but the stale-autoinst rule still
-        // needs at least same-file module declarations.  Build this only for
-        // that rule, never for ordinary didChange lint.
-        local_stale_index = get_structural_index(state);
-        current_index = &local_stale_index;
+    // back on the editing hot path.  The stale-autoinst rule needs module port
+    // declarations, but current/open-file facts are derived from the live AST
+    // below while closed/project facts are read from project_index.
+    CurrentModulePortMap current_modules;
+    if (config.module.stale_autoinst_diagnostic) {
+        CurrentModulePortCollector collector;
+        state.tree->root().visit(collector);
+        current_modules = std::move(collector.modules);
     }
-    LintVisitor v(config, current_index, project_index, sm, file_stem_from_uri(state.uri));
+    LintVisitor v(config, current_modules, project_index, sm, file_stem_from_uri(state.uri));
     state.tree->root().visit(v);
     v.diags.erase(std::remove_if(v.diags.begin(), v.diags.end(), [&](const auto& diag) {
         return !diag.uri.empty() && diag.uri != state.uri;
