@@ -2658,7 +2658,9 @@ CompletionList CompletionEngine::complete(const lsTextDocumentPositionParams& pa
     // The expensive/background layer is still context-gated.  Generic typing
     // should not pull the whole .f project into the completion menu, but it is
     // safe to merge the small dynamic/opened-file layer because those files
-    // have already paid the parse cost through didOpen/didChange.
+    // have already paid the parse cost through didOpen/didChange.  The merged
+    // opened-file layer is cached per current URI, so repeated completion /
+    // code-action requests do not rebuild the same dynamic merge.
     SyntaxIndex completion_index = std::move(current_index);
     if (auto opened_index = analyzer.opened_files_index(params.textDocument.uri.raw_uri_))
         completion_index.merge(*opened_index);

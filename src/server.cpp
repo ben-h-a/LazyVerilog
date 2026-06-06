@@ -1559,7 +1559,7 @@ void LazyVerilogServer::register_handlers() {
                 if (state && state->tree) {
                     SyntaxIndex idx;
                     if (auto opened = analyzer_.opened_files_index(uri))
-                        idx.merge(*opened);
+                        idx = *opened;
                     if (auto project = analyzer_.extra_project_index())
                         idx.merge(*project);
                     if (cmd == "lazyverilog.autowirepreview") {

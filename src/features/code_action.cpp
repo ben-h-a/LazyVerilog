@@ -137,7 +137,7 @@ std::vector<CodeAction> provide_code_actions(const Analyzer& analyzer, const Con
     SyntaxIndex project_idx;
     if (state->tree) {
         if (auto opened = analyzer.opened_files_index(uri))
-            project_idx.merge(*opened);
+            project_idx = *opened;
         if (auto project = analyzer.extra_project_index())
             project_idx.merge(*project);
     }
