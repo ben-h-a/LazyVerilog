@@ -441,10 +441,10 @@ static bool is_own_line_at_offset(std::string_view text, size_t offset) {
 // preprocessing: every token in the source — whether inside an active or
 // inactive #ifdef branch — appears in the TokenStream with its real TokenKind.
 //
-// Preprocessor directive subtype classification uses lower_text prefix
-// matching.  This is a justified CLAUDE.md exception: formatter_lexer.hpp
-// collapses all preprocessor directives to TokenKind::Directive, so
-// TokenKind cannot distinguish `ifdef from `endif from `celldefine.
+// Preprocessor directives all share TokenKind::Directive, but the formatter
+// lexer preserves slang's precise Token::directiveKind() as an immutable fact.
+// Folding uses that subtype so directive-specific behavior does not depend on
+// raw spelling/string matching.
 
 static void collect_token_folds(const svfmt::TokenStream& tokens,
                                 const LineTable& lt,
@@ -474,7 +474,18 @@ static void collect_token_folds(const svfmt::TokenStream& tokens,
     std::vector<int>         keyword_region_stack;
     std::vector<BraceRegion> brace_region_stack;
     std::vector<ParenRegion> paren_region_stack;
-    std::vector<int>         pp_stack;
+    struct PreprocessorFrame {
+        int    branch_start_line{-1};
+        size_t block_stack_size{0};
+        size_t case_stack_size{0};
+        size_t keyword_region_stack_size{0};
+        size_t brace_region_stack_size{0};
+        size_t paren_region_stack_size{0};
+        int    brace_depth{0};
+        int    paren_depth{0};
+    };
+
+    std::vector<PreprocessorFrame> pp_stack;
     std::vector<int>         cell_stack;
 
     int  pending_control_start{-1};
@@ -501,6 +512,56 @@ static void collect_token_folds(const svfmt::TokenStream& tokens,
     // declarations while still working in active and inactive preprocessor
     // branches where AST nodes may be unavailable.
     bool at_statement_start{true};
+
+    auto make_pp_frame = [&](int branch_start_line) {
+        return PreprocessorFrame{
+            .branch_start_line = branch_start_line,
+            .block_stack_size = block_stack.size(),
+            .case_stack_size = case_stack.size(),
+            .keyword_region_stack_size = keyword_region_stack.size(),
+            .brace_region_stack_size = brace_region_stack.size(),
+            .paren_region_stack_size = paren_region_stack.size(),
+            .brace_depth = brace_depth,
+            .paren_depth = paren_depth,
+        };
+    };
+
+    auto restore_to_pp_frame = [&](const PreprocessorFrame& frame) {
+        // A structural region opened inside one preprocessor branch must not be
+        // matched by a close token from a sibling branch.  Example:
+        //
+        //   `ifdef FOO
+        //     task req_data();
+        //   `elsif BAR
+        //     endtask
+        //   `endif
+        //
+        // The task header and endtask are mutually exclusive after
+        // preprocessing.  On every branch boundary, discard only the structural
+        // state created since the matching `ifdef/`ifndef.  Outer regions that
+        // existed before the conditional, such as a surrounding module or task,
+        // remain on their stacks so they can still fold across the whole
+        // conditional.
+        block_stack.resize(std::min(block_stack.size(), frame.block_stack_size));
+        case_stack.resize(std::min(case_stack.size(), frame.case_stack_size));
+        keyword_region_stack.resize(std::min(keyword_region_stack.size(),
+                                             frame.keyword_region_stack_size));
+        brace_region_stack.resize(std::min(brace_region_stack.size(),
+                                           frame.brace_region_stack_size));
+        paren_region_stack.resize(std::min(paren_region_stack.size(),
+                                           frame.paren_region_stack_size));
+        brace_depth = frame.brace_depth;
+        paren_depth = frame.paren_depth;
+
+        pending_control_start = -1;
+        pending_brace_region_start = -1;
+        pending_bins_start = -1;
+        pending_bins_equals = false;
+        pending_paren_region = false;
+        pending_hash_paren_from_header = false;
+        active_decl_start = -1;
+        at_statement_start = true;
+    };
 
     auto is_decl_start_keyword = [](TK kind) {
         switch (kind) {
@@ -643,8 +704,6 @@ static void collect_token_folds(const svfmt::TokenStream& tokens,
         }
 
         // ── preprocessor directives ────────────────────────────────────────
-        // All directives share TokenKind::Directive in the formatter token
-        // stream.  Subtype is classified via lower_text prefix matching.
         if (t.lex.is_directive) {
             if (active_decl_start < 0)
                 flush_decl_run();
@@ -652,33 +711,32 @@ static void collect_token_folds(const svfmt::TokenStream& tokens,
             // Directives between import statements do not break an import run
             // (mirrors the AST path where directives are trivia, not members).
 
-            const std::string& ltext     = t.lex.lower_text;
             int                dir_line = lt.line_of(t.lex.range.start().offset());
 
-            auto sw = [&](const char* prefix) {
-                return ltext.rfind(prefix, 0) == 0;
-            };
-
-            if (sw("`ifdef") || sw("`ifndef")) {
-                pp_stack.push_back(dir_line);
-            } else if (sw("`elsif")) {
+            if (t.lex.directive_kind == slang::syntax::SyntaxKind::IfDefDirective ||
+                t.lex.directive_kind == slang::syntax::SyntaxKind::IfNDefDirective) {
+                pp_stack.push_back(make_pp_frame(dir_line));
+            } else if (t.lex.directive_kind == slang::syntax::SyntaxKind::ElsIfDirective) {
                 if (!pp_stack.empty()) {
-                    emit_token_fold(out, lt, pp_stack.back(), dir_line - 1);
-                    pp_stack.back() = dir_line;
+                    emit_token_fold(out, lt, pp_stack.back().branch_start_line, dir_line - 1);
+                    restore_to_pp_frame(pp_stack.back());
+                    pp_stack.back().branch_start_line = dir_line;
                 }
-            } else if (sw("`else") && !sw("`elsif")) {
+            } else if (t.lex.directive_kind == slang::syntax::SyntaxKind::ElseDirective) {
                 if (!pp_stack.empty()) {
-                    emit_token_fold(out, lt, pp_stack.back(), dir_line - 1);
-                    pp_stack.back() = dir_line;
+                    emit_token_fold(out, lt, pp_stack.back().branch_start_line, dir_line - 1);
+                    restore_to_pp_frame(pp_stack.back());
+                    pp_stack.back().branch_start_line = dir_line;
                 }
-            } else if (sw("`endif")) {
+            } else if (t.lex.directive_kind == slang::syntax::SyntaxKind::EndIfDirective) {
                 if (!pp_stack.empty()) {
-                    emit_token_fold(out, lt, pp_stack.back(), dir_line);
+                    emit_token_fold(out, lt, pp_stack.back().branch_start_line, dir_line);
+                    restore_to_pp_frame(pp_stack.back());
                     pp_stack.pop_back();
                 }
-            } else if (sw("`celldefine")) {
+            } else if (t.lex.directive_kind == slang::syntax::SyntaxKind::CellDefineDirective) {
                 cell_stack.push_back(dir_line);
-            } else if (sw("`endcelldefine")) {
+            } else if (t.lex.directive_kind == slang::syntax::SyntaxKind::EndCellDefineDirective) {
                 if (!cell_stack.empty()) {
                     emit_token_fold(out, lt, cell_stack.back(), dir_line);
                     cell_stack.pop_back();

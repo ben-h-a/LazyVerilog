@@ -289,6 +289,38 @@ endmodule
     CHECK(has_fold(folds, 10, 12));
 }
 
+TEST_CASE("foldingRange: keyword regions do not cross preprocessor branch boundaries",
+          "[folding]") {
+    Analyzer    analyzer;
+    std::string uri = "file:///tmp/fold_no_cross_branch_task.sv";
+    analyzer.open(uri, R"(`ifdef FOO
+    task print_data();
+        $display("%0d", data);
+    endtask
+    task req_data();
+`elsif BAR
+        $display("%0d", data);
+    endtask
+`endif
+)");
+    auto folds = provide_folding_range(analyzer, make_params(uri));
+
+    // Expected fold map:
+    //   region [0,4]  `ifdef FOO branch, ending before `elsif
+    //   region [1,3]  complete task print_data inside the FOO branch
+    //   region [5,8]  `elsif BAR branch, including closing `endif
+    //
+    // Important regression:
+    //   Do not fold task req_data from [4,7].  Its task header is in the FOO
+    //   branch, but the endtask is in the BAR branch.  Those tokens are never
+    //   simultaneously active after preprocessing, so pairing them would expose
+    //   a misleading structural fold across mutually exclusive branches.
+    CHECK(has_fold(folds, 0, 4));
+    CHECK(has_fold(folds, 1, 3));
+    CHECK(has_fold(folds, 5, 8));
+    CHECK_FALSE(has_fold(folds, 4, 7));
+}
+
 TEST_CASE("foldingRange: nested preprocessor conditionals fold independently", "[folding]") {
     Analyzer    analyzer;
     std::string uri = "file:///tmp/fold_nested_ifdef.sv";
