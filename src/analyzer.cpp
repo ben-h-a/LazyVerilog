@@ -2410,10 +2410,15 @@ CompilationSnapshot Analyzer::compilation_snapshot() const {
         seen_paths.insert(state->normalized_path);
     }
 
-    for (const auto& configured_path : extra_files_) {
-        const auto path = normalize_filesystem_path(configured_path);
-        const auto path_string = path.string();
-        const auto uri = uri_from_path(path);
+    for (const auto& path_string : extra_files_) {
+        // extra_files_ is normalized at the configuration boundary by
+        // set_extra_files() / set_project_config().  compilation_snapshot() is
+        // called by the background compiler while holding map_mutex_, so avoid
+        // repeating filesystem path normalization for every filelist entry here.
+        // Keeping this path-to-URI conversion allocation-only prevents large
+        // project snapshots from extending the analyzer critical section with
+        // redundant per-file path work.
+        const auto uri = "file://" + path_string;
         if (seen_uris.contains(uri) || seen_paths.contains(path_string))
             continue;
 

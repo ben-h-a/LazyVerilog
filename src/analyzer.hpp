@@ -315,6 +315,9 @@ class Analyzer {
     mutable std::unordered_map<std::string, std::shared_ptr<const DocumentState>> docs_;
     std::vector<std::string> defines_;
     std::vector<std::string> include_dirs_;
+    // Normalized absolute lexical filesystem paths.  Writers normalize before
+    // storing so hot snapshot/request paths can trust the invariant instead of
+    // repeating path normalization under map_mutex_ for large filelists.
     mutable std::vector<std::string> extra_files_;
     // Membership mirror for extra_files_.  The vector remains the ordered
     // source for iteration/background scheduling, while this set keeps the
