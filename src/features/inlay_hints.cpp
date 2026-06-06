@@ -53,6 +53,27 @@ static std::string padded(std::string text, size_t width) {
     return text;
 }
 
+static std::string display_port_direction(const std::string& direction) {
+    // Keep the semantic direction stored in SyntaxIndex unchanged
+    // (`input`/`output`/`inout`/`unknown`) and translate only the inlay-hint
+    // presentation label here.  The short bracketed labels reduce visual noise
+    // at instance connections:
+    //
+    //   .req(req)  ◀ logic
+    //   .ack(ack)  ▶ logic
+    //
+    // The user request only called out input and output, so `inout` remains
+    // spelled out for now rather than silently choosing an abbreviation such as
+    // `[IO]` that may not match user expectations.
+    if (direction == "input")
+        return "◀";
+    if (direction == "output")
+        return "▶";
+    if (direction == "unknown")
+        return {};
+    return direction;
+}
+
 } // namespace
 
 std::vector<lsInlayHint> provide_inlay_hints(const Analyzer& analyzer, const std::string& uri,
@@ -98,12 +119,10 @@ std::vector<lsInlayHint> provide_inlay_hints(const Analyzer& analyzer, const std
             if (port_it == port_map.end())
                 continue;
 
-            auto direction =
-                port_it->second.direction == "unknown" ? std::string{} : port_it->second.direction;
             candidates.push_back(Candidate{
                 .line = line,
                 .col = conn.hint_col,
-                .direction = std::move(direction),
+                .direction = display_port_direction(port_it->second.direction),
                 .type = port_it->second.type,
             });
         }

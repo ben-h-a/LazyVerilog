@@ -39,7 +39,7 @@ TEST_CASE("inlay hints: instance coverage and aligned port metadata", "[inlay]")
 
     CHECK(hints[1].position.line == 9);
     CHECK(hints[1].position.character == 11);
-    CHECK(hints[1].label == "input  logic [7:0]");
+    CHECK(hints[1].label == "◀ logic [7:0]");
     REQUIRE(hints[1].kind.has_value());
     CHECK(*hints[1].kind == lsInlayHintKind::Type);
     REQUIRE(hints[1].paddingLeft.has_value());
@@ -49,7 +49,7 @@ TEST_CASE("inlay hints: instance coverage and aligned port metadata", "[inlay]")
 
     CHECK(hints[2].position.line == 10);
     CHECK(hints[2].position.character == 11);
-    CHECK(hints[2].label == "output logic [3:0]");
+    CHECK(hints[2].label == "▶ logic [3:0]");
 }
 
 TEST_CASE("inlay hints: respects requested visible range", "[inlay]") {
@@ -61,7 +61,7 @@ TEST_CASE("inlay hints: respects requested visible range", "[inlay]") {
 
     REQUIRE(hints.size() == 1);
     CHECK(hints[0].position.line == 10);
-    CHECK(hints[0].label == "output logic [3:0]");
+    CHECK(hints[0].label == "▶ logic [3:0]");
 }
 
 TEST_CASE("inlay hints: resolves module ports from extra files", "[inlay]") {
@@ -94,8 +94,8 @@ endmodule
 
     REQUIRE(hints.size() == 3);
     CHECK(hints[0].label == "2/2 ports");
-    CHECK(hints[1].label == "input  logic");
-    CHECK(hints[2].label == "output logic");
+    CHECK(hints[1].label == "◀ logic");
+    CHECK(hints[2].label == "▶ logic");
 
     std::filesystem::remove(extra_path);
 }
@@ -138,9 +138,9 @@ endmodule
 
     REQUIRE(hints.size() == 7);
     CHECK(hints[0].label == "6/6 ports");
-    CHECK(hints[1].label == "input             ");
-    CHECK(hints[2].label == "input  [5:0]      ");
-    CHECK(hints[4].label == "output logic [7:0]");
+    CHECK(hints[1].label == "◀            ");
+    CHECK(hints[2].label == "◀ [5:0]      ");
+    CHECK(hints[4].label == "▶ logic [7:0]");
 
     std::filesystem::remove(extra_path);
 }
@@ -175,10 +175,10 @@ endmodule
     REQUIRE(hints.size() == 3);
     CHECK(hints[1].position.line == 2);
     CHECK(hints[1].position.character == 13);
-    CHECK(hints[1].label == "input [5:0]");
+    CHECK(hints[1].label == "◀ [5:0]");
     CHECK(hints[2].position.line == 3);
     CHECK(hints[2].position.character == 16);
-    CHECK(hints[2].label == "input      ");
+    CHECK(hints[2].label == "◀      ");
 
     std::filesystem::remove(extra_path);
 }
