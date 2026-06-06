@@ -73,6 +73,10 @@ ctest --test-dir build                          # all tests
   request paths.  Background indexing should publish reusable index snapshots,
   and request handlers should consume those snapshots without reparsing or
   rebuilding project-wide state.
+- Other-open-buffer dynamic indexes are also request-path data.  They may be
+  merged into a reusable cache keyed by the current URI, but handlers should not
+  rebuild the same all-open-buffer merge for every completion/code-action edit
+  cycle.
 
 ### Formatter Pass Ownership and Idempotency
 - Formatter flow is: lexer lexes source into Tokenflow, then `SyntaxPass`,
