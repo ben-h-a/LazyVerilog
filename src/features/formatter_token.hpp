@@ -107,7 +107,19 @@ struct TopologyFacts {
     bool inside_argument_list{false};
 };
 
-// 4. CommentFacts: frozen comment classification.  Comments are classified once
+// 4. InputTriviaFacts: observation of original whitespace.  These are facts
+// about the input, useful as heuristics.  Correctness should not depend on them
+// as rendered columns or indentation policy.
+struct InputTriviaFacts {
+    int original_spaces_before{0};
+    int original_newlines_before{0};
+    int original_indent{0};
+    bool starts_original_line{false};
+    int original_column{0};
+};
+
+
+// 5. CommentFacts: frozen comment classification.  Comments are classified once
 // before formatting decisions.  That prevents comment layout from oscillating
 // when a later pass moves surrounding code.
 enum class CommentRole {
@@ -126,17 +138,6 @@ struct CommentFacts {
     size_t anchor_token{npos};
     bool inside_expression{false};
     bool inside_arg_list{false};
-};
-
-// 5. InputTriviaFacts: observation of original whitespace.  These are facts
-// about the input, useful as heuristics.  Correctness should not depend on them
-// as rendered columns or indentation policy.
-struct InputTriviaFacts {
-    int original_spaces_before{0};
-    int original_newlines_before{0};
-    int original_indent{0};
-    bool starts_original_line{false};
-    int original_column{0};
 };
 
 // -----------------------------------------------------------------------------
@@ -194,8 +195,8 @@ struct MutableData {
 struct ImmutableData {
     SyntaxFacts syntax;
     TopologyFacts topology;
-    CommentFacts comment;
     InputTriviaFacts input_trivia;
+    CommentFacts comment;
 };
 
 struct Tok {
