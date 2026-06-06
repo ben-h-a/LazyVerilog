@@ -101,6 +101,48 @@ TEST_CASE("formatter: safety accepts unchanged token streams", "[formatter][safe
 
 
 
+TEST_CASE("formatter: safety ignores trailing whitespace in comment token text", "[formatter][safety]") {
+    FormatOptions opts;
+    opts.port_declaration.align = false;
+    opts.var_declaration.align = false;
+    opts.default_indent_level_inside_outmost_block = 0;
+
+    // Slang lexes the space before the newline as part of the `//` comment
+    // token. The renderer removes trailing spaces at line boundaries, so the
+    // safety check must compare token text after trimming trailing whitespace.
+    const std::string src = "module top;\n"
+                            "// padded comment   \n"
+                            "logic a;\n"
+                            "endmodule\n";
+    const std::string out = format_source(src, opts);
+    CHECK(out.find("// padded comment   ") == std::string::npos);
+    CHECK(out.find("// padded comment\n") != std::string::npos);
+    CHECK(format_source(out, opts) == out);
+}
+
+
+
+TEST_CASE("formatter: safety ignores trailing whitespace in directive token text", "[formatter][safety]") {
+    FormatOptions opts;
+    opts.port_declaration.align = false;
+    opts.var_declaration.align = false;
+    opts.default_indent_level_inside_outmost_block = 0;
+
+    // Slang includes spaces before the newline in single-line preprocessor
+    // directive token text. The renderer trims those spaces, so safe mode
+    // should normalize trailing token whitespace before comparing text.
+    const std::string src = "`ifndef FOO\n"
+                            "`define FOO\n"
+                            "`endif   \n";
+    const std::string out = format_source(src, opts);
+    CHECK(out == "`ifndef FOO\n"
+                 "`define FOO\n"
+                 "`endif\n");
+    CHECK(format_source(out, opts) == out);
+}
+
+
+
 TEST_CASE("formatter: function call leading line comments keep following argument separate", "[formatter]") {
     FormatOptions opts;
     opts.function_call.break_policy = "auto";
