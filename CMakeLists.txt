@@ -165,6 +165,7 @@ set(LAZYVERILOG_TEST_SOURCES
     tests/test_lsp_features.cpp
     tests/test_completion.cpp
     tests/test_folding_ranges.cpp
+    tests/test_opentitan_benchmark.cpp
     # Feature sources needed by tests (no LSP protocol dependency)
     src/features/completion.cpp
     src/features/code_action.cpp
