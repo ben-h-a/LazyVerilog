@@ -11,25 +11,6 @@ using namespace slang::syntax;
 
 static const std::string DEFAULT_REGISTER_PATTERN = "^r_";
 
-// ── Split lines ───────────────────────────────────────────────────────────────
-
-static std::vector<std::string> split_lines(const std::string& text) {
-    std::vector<std::string> lines;
-    size_t start = 0;
-    while (start <= text.size()) {
-        size_t end = text.find('\n', start);
-        if (end == std::string::npos) {
-            lines.push_back(text.substr(start));
-            break;
-        }
-        lines.push_back(text.substr(start, end - start));
-        start = end + 1;
-    }
-    if (lines.empty())
-        lines.push_back({});
-    return lines;
-}
-
 // ── Parse declaration signals at a given line ─────────────────────────────────
 
 struct DeclAtLineVisitor : public SyntaxVisitor<DeclAtLineVisitor> {

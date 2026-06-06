@@ -1,5 +1,6 @@
 #include "autofunc.hpp"
 #include "../syntax_index.hpp"
+#include "../string_utils.hpp"
 #include <slang/syntax/AllSyntax.h>
 #include <slang/syntax/SyntaxVisitor.h>
 #include <slang/text/SourceManager.h>
@@ -12,23 +13,6 @@ using namespace slang;
 using namespace slang::syntax;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-static std::vector<std::string> split_lines(const std::string& text) {
-    std::vector<std::string> lines;
-    size_t start = 0;
-    while (start <= text.size()) {
-        size_t end = text.find('\n', start);
-        if (end == std::string::npos) {
-            lines.push_back(text.substr(start));
-            break;
-        }
-        lines.push_back(text.substr(start, end - start));
-        start = end + 1;
-    }
-    if (lines.empty())
-        lines.push_back({});
-    return lines;
-}
 
 static bool is_ident_char(char ch) {
     return std::isalnum((unsigned char)ch) || ch == '_';
@@ -316,7 +300,7 @@ std::optional<lsWorkspaceEdit> autofunc(
     auto state = analyzer.get_state(uri);
     if (!state) return std::nullopt;
 
-    auto lines = split_lines(state->text);
+    auto lines = split_lines_owned(state->text);
     if (line < 0 || line >= (int)lines.size())
         return std::nullopt;
 

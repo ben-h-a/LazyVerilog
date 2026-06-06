@@ -1,4 +1,5 @@
 #include "autoinst.hpp"
+#include "../string_utils.hpp"
 #include <algorithm>
 #include <unordered_set>
 #include <slang/syntax/AllSyntax.h>
@@ -8,25 +9,6 @@
 
 using namespace slang;
 using namespace slang::syntax;
-
-// ── Split source into lines ───────────────────────────────────────────────────
-
-static std::vector<std::string> split_lines(const std::string& text) {
-    std::vector<std::string> lines;
-    size_t start = 0;
-    while (start <= text.size()) {
-        size_t end = text.find('\n', start);
-        if (end == std::string::npos) {
-            lines.push_back(text.substr(start));
-            break;
-        }
-        lines.push_back(text.substr(start, end - start));
-        start = end + 1;
-    }
-    if (lines.empty())
-        lines.push_back({});
-    return lines;
-}
 
 // ── Collect HierarchyInstantiation candidates ─────────────────────────────────
 
@@ -176,7 +158,7 @@ std::optional<AutoinstResult> autoinst_impl(const DocumentState& state, int line
         candidates.begin(), candidates.end(),
         [](const InstCandidate& a, const InstCandidate& b) { return a.first_line > b.first_line; });
 
-    auto lines = split_lines(state.text);
+    auto lines = split_lines_owned(state.text);
 
     // Find the first candidate where target line <= end_line
     for (const auto& cand : candidates) {
@@ -248,7 +230,7 @@ std::map<std::string, std::string> autoinst_parse_connections(const std::string&
 std::string format_autoinst(const AutoinstResult& result, const std::string& source,
                             const AutoinstOptions& options) {
     (void)options;
-    auto lines = split_lines(source);
+    auto lines = split_lines_owned(source);
 
     // Detect base indent from original line
     std::string base_indent;

@@ -207,20 +207,6 @@ std::string simple_identifier_from_expr(const PropertyExprSyntax* expr) {
     return {};
 }
 
-std::vector<std::string_view> split_lines(std::string_view source) {
-    std::vector<std::string_view> lines;
-    size_t start = 0;
-    while (start <= source.size()) {
-        size_t end = source.find('\n', start);
-        if (end == std::string_view::npos) {
-            lines.push_back(source.substr(start));
-            break;
-        }
-        lines.push_back(source.substr(start, end - start));
-        start = end + 1;
-    }
-    return lines;
-}
 
 int instance_end_line(const std::vector<std::string_view>& lines, int start_line) {
     for (int i = start_line; i < (int)lines.size(); ++i) {
@@ -423,7 +409,7 @@ void process_module(const ModuleDeclarationSyntax& node, SyntaxIndex& index,
         }
     }
 
-    const auto lines = split_lines(source);
+    const auto lines = split_lines_view(source);
     for (const auto* member : node.members) {
         if (!member)
             continue;

@@ -314,22 +314,6 @@ static void extract_port_declarations(const SyntaxList<MemberSyntax>& members,
     }
 }
 
-static std::vector<std::string_view> split_lines(std::string_view source) {
-    std::vector<std::string_view> lines;
-    size_t start = 0;
-    while (start <= source.size()) {
-        size_t end = source.find('\n', start);
-        if (end == std::string_view::npos) {
-            lines.push_back(source.substr(start));
-            break;
-        }
-        lines.push_back(source.substr(start, end - start));
-        start = end + 1;
-    }
-    if (lines.empty())
-        lines.push_back({});
-    return lines;
-}
 
 static int find_instance_end_line(const std::vector<std::string_view>& lines, int start_line) {
     if (start_line < 0)
@@ -355,7 +339,7 @@ static void extract_instances(const SyntaxList<MemberSyntax>& members,
                               const slang::SourceManager& sm,
                               std::string_view source, std::string_view parent_module) {
     // Split lines once here so find_instance_end_line doesn't re-split per instance.
-    const auto lines = source.empty() ? std::vector<std::string_view>{} : split_lines(source);
+    const auto lines = source.empty() ? std::vector<std::string_view>{} : split_lines_view(source);
 
     for (const auto* member : members) {
         if (!member)

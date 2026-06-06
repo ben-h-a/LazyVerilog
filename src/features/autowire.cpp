@@ -14,23 +14,6 @@ using namespace slang::syntax;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-static std::vector<std::string> split_lines(const std::string& text) {
-    std::vector<std::string> lines;
-    size_t start = 0;
-    while (start <= text.size()) {
-        size_t end = text.find('\n', start);
-        if (end == std::string::npos) {
-            lines.push_back(text.substr(start));
-            break;
-        }
-        lines.push_back(text.substr(start, end - start));
-        start = end + 1;
-    }
-    if (lines.empty())
-        lines.push_back({});
-    return lines;
-}
-
 static bool is_simple_id(const std::string& s) {
     if (s.empty())
         return false;
@@ -605,7 +588,7 @@ std::string autowire_apply(const DocumentState& state, const SyntaxIndex& syntax
     if (new_sigs.empty())
         return state.text;
 
-    auto lines = split_lines(state.text);
+    auto lines = split_lines_owned(state.text);
     std::string decl_text = format_declarations(new_sigs, options);
     TargetModuleRangeFinder module_finder(state.tree->sourceManager(), target_line);
     state.tree->root().visit(module_finder);
@@ -613,7 +596,7 @@ std::string autowire_apply(const DocumentState& state, const SyntaxIndex& syntax
 
     std::vector<std::string> out_lines;
     out_lines.insert(out_lines.end(), lines.begin(), lines.begin() + insert_line);
-    for (const auto& dl : split_lines(decl_text))
+    for (const auto& dl : split_lines_owned(decl_text))
         out_lines.push_back(dl);
     out_lines.push_back(""); // blank line after
     out_lines.insert(out_lines.end(), lines.begin() + insert_line, lines.end());

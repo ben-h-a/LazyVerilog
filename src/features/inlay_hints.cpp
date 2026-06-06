@@ -2,6 +2,7 @@
 
 #include "dynamic_file_index.hpp"
 #include "syntax_index.hpp"
+#include "../string_utils.hpp"
 
 #include <algorithm>
 #include <optional>
@@ -12,22 +13,6 @@
 
 namespace {
 
-static std::vector<std::string_view> split_lines(std::string_view text) {
-    std::vector<std::string_view> lines;
-    size_t start = 0;
-    while (start <= text.size()) {
-        const size_t end = text.find('\n', start);
-        if (end == std::string_view::npos) {
-            lines.push_back(text.substr(start));
-            break;
-        }
-        lines.push_back(text.substr(start, end - start));
-        start = end + 1;
-    }
-    if (lines.empty())
-        lines.push_back({});
-    return lines;
-}
 
 using ModuleMap = std::unordered_map<std::string, ModuleEntry>;
 
@@ -72,7 +57,7 @@ std::vector<lsInlayHint> provide_inlay_hints(const Analyzer& analyzer, const std
     if (!state || !state->tree)
         return {};
 
-    const auto lines = split_lines(state->text);
+    const auto lines = split_lines_view(state->text);
     const auto current_index = get_structural_index(*state);
     const auto modules = build_module_map(analyzer);
     std::vector<lsInlayHint> hints;
