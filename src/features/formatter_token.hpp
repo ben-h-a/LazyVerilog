@@ -7,6 +7,7 @@
 #include <string_view>
 #include <vector>
 #include <slang/parsing/Token.h>
+#include <slang/syntax/SyntaxKind.h>
 #include <slang/text/SourceLocation.h>
 
 namespace svfmt {
@@ -44,6 +45,7 @@ struct LexemeFacts {
 
     std::string text;
     std::string lower_text;
+    slang::syntax::SyntaxKind directive_kind{slang::syntax::SyntaxKind::Unknown};
 
     slang::SourceRange range;
 

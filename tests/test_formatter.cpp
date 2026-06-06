@@ -141,6 +141,46 @@ TEST_CASE("formatter: safety ignores trailing whitespace in directive token text
     CHECK(format_source(out, opts) == out);
 }
 
+TEST_CASE("formatter: conditional preprocessor directives are own-line column zero", "[formatter]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+
+    // Conditional directives describe compile-time source structure.  They
+    // should not inherit indentation from the surrounding runtime syntax, even
+    // when they appear inside begin/end blocks or list-like constructs.  The
+    // statements/data guarded by the directives keep their normal indentation.
+    const std::string input =
+        "module top;\n"
+        "always_comb begin\n"
+        "    `ifdef USE_FAST\n"
+        "y = fast;\n"
+        "    `elsif USE_SLOW\n"
+        "y = slow;\n"
+        "    `else\n"
+        "y = fallback;\n"
+        "    `endif // USE_FAST\n"
+        "end\n"
+        "endmodule\n";
+
+    const std::string expected =
+        "module top;\n"
+        "always_comb begin\n"
+        "`ifdef USE_FAST\n"
+        "    y = fast;\n"
+        "`elsif USE_SLOW\n"
+        "    y = slow;\n"
+        "`else\n"
+        "    y = fallback;\n"
+        "`endif // USE_FAST\n"
+        "end\n"
+        "endmodule\n";
+
+    const std::string out = format_source(input, opts);
+    CHECK(out == expected);
+    CHECK(format_source(out, opts) == out);
+}
+
 
 
 TEST_CASE("formatter: function call leading line comments keep following argument separate", "[formatter]") {

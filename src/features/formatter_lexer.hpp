@@ -213,7 +213,8 @@ private:
                    CommentLexemeKind comment_kind = CommentLexemeKind::None,
                    bool is_format_off_marker = false,
                    bool is_format_on_marker = false,
-                   bool is_disabled_region_body = false) {
+                   bool is_disabled_region_body = false,
+                   slang::syntax::SyntaxKind directive_kind = slang::syntax::SyntaxKind::Unknown) {
         Tok tok;
         auto& lex = tok.lex;
         lex.kind = kind;
@@ -225,6 +226,7 @@ private:
         // repeated large-file formatting runs.
         if (is_directive)
             lex.lower_text = lower_ascii(text);
+        lex.directive_kind = is_directive ? directive_kind : slang::syntax::SyntaxKind::Unknown;
         lex.range = slang::SourceRange(slang::SourceLocation(slang::BufferID::getPlaceholder(), pos),
                                         slang::SourceLocation(slang::BufferID::getPlaceholder(), pos + text.size()));
         lex.is_directive = is_directive;
@@ -344,7 +346,9 @@ private:
             if (define_end > pos) {
                 std::string_view define_raw(source_.data() + pos, define_end - pos);
                 add_token(slang::parsing::TokenKind::Directive, define_raw, pos,
-                          true, /*whitespace_sensitive=*/true);
+                          true, /*whitespace_sensitive=*/true,
+                          CommentLexemeKind::None, false, false, false,
+                          token.directiveKind());
                 consume_text(define_raw, false);
                 passthrough_end_ = define_end;
                 return;
@@ -369,7 +373,9 @@ private:
             if (line_end == std::string::npos)
                 line_end = source_.size();
             std::string_view directive_raw(source_.data() + pos, line_end - pos);
-            add_token(kind, directive_raw, pos, true, false);
+            add_token(kind, directive_raw, pos, true, false,
+                      CommentLexemeKind::None, false, false, false,
+                      token.directiveKind());
             consume_text(directive_raw, false);
             passthrough_end_ = line_end;
             return;
@@ -390,7 +396,11 @@ private:
         if (raw_chunk.empty())
             return;
         add_token(token.kind, raw_chunk, cursor_,
-                  token.kind == slang::parsing::TokenKind::Directive, true);
+                  token.kind == slang::parsing::TokenKind::Directive, true,
+                  CommentLexemeKind::None, false, false, false,
+                  token.kind == slang::parsing::TokenKind::Directive
+                      ? token.directiveKind()
+                      : slang::syntax::SyntaxKind::Unknown);
         consume_text(raw_chunk, false);
     }
 

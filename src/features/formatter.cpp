@@ -57,6 +57,8 @@ static bool token_stream_same(const TokenStream& a, const TokenStream& b) {
             return false;
         if (x.lex.is_directive != y.lex.is_directive)
             return false;
+        if (x.lex.directive_kind != y.lex.directive_kind)
+            return false;
         if (x.lex.is_whitespace_sensitive != y.lex.is_whitespace_sensitive)
             return false;
     }

@@ -687,6 +687,39 @@ inline bool parameter_list_contains_directive(const TokenStream& tokens, size_t 
     return false;
 }
 
+inline bool is_conditional_preprocessor_directive(const Tok& t) {
+    if (!t.lex.is_directive)
+        return false;
+
+    // Conditional preprocessor directives are compilation-structure markers,
+    // not ordinary statements nested in the surrounding SystemVerilog syntax.
+    // Keep them visually anchored at column 0 even when they appear inside a
+    // begin/end block, a module header, or an instance port list:
+    //
+    //   always_comb begin
+    //   `ifdef USE_FAST_PATH
+    //     y = fast;
+    //   `else
+    //     y = slow;
+    //   `endif
+    //   end
+    //
+    // TokenKind is intentionally coarse here: every preprocessor directive has
+    // TokenKind::Directive.  Slang still provides the precise directive syntax
+    // through Token::directiveKind(), which the formatter lexer stores as an
+    // immutable fact so later passes do not need spelling/string comparisons.
+    switch (t.lex.directive_kind) {
+    case slang::syntax::SyntaxKind::IfDefDirective:
+    case slang::syntax::SyntaxKind::IfNDefDirective:
+    case slang::syntax::SyntaxKind::ElsIfDirective:
+    case slang::syntax::SyntaxKind::ElseDirective:
+    case slang::syntax::SyntaxKind::EndIfDirective:
+        return true;
+    default:
+        return false;
+    }
+}
+
 inline size_t module_header_parameter_hash_owner(const TokenStream& tokens, size_t hash) {
     if (hash >= tokens.size() || !kind_is(tokens[hash], TK::Hash))
         return npos;
@@ -1873,6 +1906,8 @@ public:
                 t.mutable_.indent.base_indent = 0;
             else if (is_outer_open(t.lex.kind) && opts_.default_indent_level_inside_outmost_block == 0)
                 t.mutable_.indent.base_indent = 0; // OuterOpen itself is at outer level
+            if (is_conditional_preprocessor_directive(t))
+                t.mutable_.indent.base_indent = 0;
             if (t.mutable_.wrap.continuation)
                 t.mutable_.indent.continuation_indent = opts_.indent_size;
 
@@ -2023,6 +2058,7 @@ public:
                 if ((kind == WrapListKind::ModuleParametersBlock ||
                      kind == WrapListKind::ModuleParametersHanging) &&
                     tokens[k].lex.is_directive &&
+                    !is_conditional_preprocessor_directive(tokens[k]) &&
                     tokens[k].mutable_.wrap.must_break_before)
                     tokens[k].mutable_.indent.base_indent = std::max(0, item_indent);
             }
