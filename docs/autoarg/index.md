@@ -19,10 +19,12 @@ module m_alu(
 After running AutoArg, the port list `(...)` is regenerated from the body declarations.
 
 As a **code action**, it applies to the module under the cursor.
-With **`autoarg_on_save`**, it runs on every module in the file on save. In
-that save-time path, AutoArg now enables formatter `safe_mode` automatically
-so a generated port-list edit will abort instead of returning broken output if
-the formatter would change non-whitespace content.
+With **`autoarg_on_save`**, it runs on every module in the file on save.
+
+AutoArg-generated edits are passed through the formatter, whose safety checks
+are always enabled. If formatting would change non-whitespace content or alter
+the token stream, LazyVerilog aborts the edit and warns the LSP client instead
+of returning broken output.
 
 AutoArg first regenerates the port list from body declarations, then passes the generated module-header replacement through the main formatter. The final layout therefore follows `[format]` and `[format.module]` settings, including indentation and non-ANSI ports-per-line options.
 

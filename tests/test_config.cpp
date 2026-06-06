@@ -70,8 +70,6 @@ enable = false
 indent_size = 4
 blank_lines_between_items = 2
 default_indent_level_inside_outmost_block = 0
-safe_mode = true
-safe_mode2 = true
 tab_align = true
 format_off_comment_pattern = "// lazyverilog: off"
 format_on_comment_pattern = "// lazyverilog: on"
@@ -215,8 +213,6 @@ autoarg_on_save = true
     CHECK(cfg.format.indent_size == 4);
     CHECK(cfg.format.blank_lines_between_items == 2);
     CHECK(cfg.format.default_indent_level_inside_outmost_block == 0);
-    CHECK(cfg.format.safe_mode == true);
-    CHECK(cfg.format.safe_mode2 == true);
     CHECK(cfg.format.tab_align == true);
     CHECK(cfg.format.format_off_comment_pattern == "// lazyverilog: off");
     CHECK(cfg.format.format_on_comment_pattern == "// lazyverilog: on");

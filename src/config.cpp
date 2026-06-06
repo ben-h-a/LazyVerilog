@@ -163,10 +163,6 @@ Config load_config(const std::filesystem::path& root, std::string* warning,
                 cfg.format.default_indent_level_inside_outmost_block = static_cast<int>(*v);
             if (auto v = (*f)["enable_format_on_save"].value<bool>())
                 cfg.format.enable_format_on_save = *v;
-            if (auto v = (*f)["safe_mode"].value<bool>())
-                cfg.format.safe_mode = *v;
-            if (auto v = (*f)["safe_mode2"].value<bool>())
-                cfg.format.safe_mode2 = *v;
             if (auto v = (*f)["tab_align"].value<bool>())
                 cfg.format.tab_align = *v;
             if (auto v = (*f)["format_off_comment_pattern"].value<std::string>())

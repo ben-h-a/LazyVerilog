@@ -63,4 +63,4 @@ mkdir -p /tmp/fmt-log
 |------|---------|
 | `0` | Success |
 | `1` | File not found or cannot be read/written |
-| `2` | `safe_mode` triggered — formatting would have changed non-whitespace content |
+| `2` | Formatter safety check failed — formatting would have changed non-whitespace content or the token stream |

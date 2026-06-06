@@ -1121,9 +1121,6 @@ void LazyVerilogServer::register_handlers() {
             if (state) {
                 std::string text = state->text;
                 FormatOptions save_format = config_.format;
-                if (config_.autoarg.autoarg_on_save)
-                    save_format.safe_mode = true;
-
                 if (config_.autoarg.autoarg_on_save && state->tree) {
                     auto results = autoarg_all_modules(*state);
                     // apply back-to-front so earlier offsets stay valid
@@ -1329,11 +1326,13 @@ void LazyVerilogServer::register_handlers() {
     });
 
     // ── textDocument/codeAction ───────────────────────────────────────────────
-    ep.registerHandler([&](const td_codeActionCode::request& req) {
+    ep.registerHandler([&, show_warning](const td_codeActionCode::request& req) {
         td_codeActionCode::response rsp;
         rsp.id = req.id;
         try {
             rsp.result = provide_code_actions(analyzer_, config_, req.params);
+        } catch (const SafeModeError& e) {
+            show_warning(e.what());
         } catch (const std::exception& e) {
             std::cerr << "[lazyverilog] codeAction error: " << e.what() << "\n";
         }

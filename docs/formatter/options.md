@@ -118,25 +118,13 @@ enable_format_on_save = true
 
 ---
 
-### `safe_mode`
+### Formatter safety checks
 
-When `true`, the formatter verifies that no non-whitespace content changed after formatting. If a formatting bug would corrupt code, it throws `SafeModeError` and aborts instead of returning broken output.
-
-```toml
-[format]
-safe_mode = true
-```
-
----
-
-### `safe_mode2`
-
-When `true`, the formatter re-lexes the formatted output and compares the token stream against the original input token stream. This is stricter than `safe_mode` because it catches tokenization changes, not just text changes.
-
-```toml
-[format]
-safe_mode2 = true
-```
+Formatter safety checks are always enabled and are not user-configurable. After
+formatting, LazyVerilog verifies both that non-whitespace source content is
+unchanged and that re-lexing the formatted output produces the same token
+stream. If either check fails, formatting aborts with `SafeModeError`; the LSP
+server reports that warning to the client instead of returning a corrupt edit.
 
 ---
 

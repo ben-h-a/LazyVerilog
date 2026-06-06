@@ -6,7 +6,8 @@
 namespace svfmt {
 
 static bool token_stream_same(const TokenStream& a, const TokenStream& b) {
-    // safe_mode2 compares the *lexed* token stream before and after formatting.
+    // The formatter safety check compares the *lexed* token stream before and
+    // after formatting.
     // That means we intentionally ignore whitespace-derived positions and all
     // mutable formatting decisions; the goal is to catch semantic/tokenization
     // changes such as a formatter accidentally deleting or rewriting tokens.
@@ -31,17 +32,16 @@ static bool token_stream_same(const TokenStream& a, const TokenStream& b) {
 
 inline void verify_safe_mode_unchanged(const std::string& source, const std::string& formatted,
                                        const FormatOptions& opts) {
-    if (!opts.safe_mode) return;
+    (void)opts;
     if (!ws_equal(source, formatted))
         throw SafeModeError("Formatter safe-mode: non-whitespace content changed — formatting aborted");
 }
 
 inline void verify_safe_mode2_unchanged(const TokenStream& before, const std::string& formatted,
                                         const FormatOptions& opts) {
-    if (!opts.safe_mode2) return;
     TokenStream after = TokenCollector(formatted, opts).collect();
     if (!token_stream_same(before, after))
-        throw SafeModeError("Formatter safe-mode2: token stream changed — formatting aborted");
+        throw SafeModeError("Formatter safety: token stream changed — formatting aborted");
 }
 
 } // namespace svfmt

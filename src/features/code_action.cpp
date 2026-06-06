@@ -163,6 +163,8 @@ std::vector<CodeAction> provide_code_actions(const Analyzer& analyzer, const Con
                 actions.push_back(std::move(action));
             }
         }
+    } catch (const SafeModeError&) {
+        throw;
     } catch (const std::exception& e) {
         std::cerr << "[lazyverilog] codeAction autoinst: " << e.what() << "\n";
     }
@@ -179,9 +181,10 @@ std::vector<CodeAction> provide_code_actions(const Analyzer& analyzer, const Con
                 // but the project formatter owns final whitespace/layout decisions.  Format the
                 // complete replacement header fragment instead of returning the raw generated
                 // port list so AutoArg behaves like the other auto-code actions.
+                FormatOptions autoarg_format = config.format;
                 std::string formatted = format_emit_text(
-                    line_prefix + format_autoarg(*result, config.autoarg, config.format),
-                    config.format);
+                    line_prefix + format_autoarg(*result, config.autoarg, autoarg_format),
+                    autoarg_format);
                 auto we = make_range_edit(uri, result->open_line, 0,
                                           result->end_line, result->end_col, formatted);
                 CodeAction action;
@@ -191,6 +194,8 @@ std::vector<CodeAction> provide_code_actions(const Analyzer& analyzer, const Con
                 actions.push_back(std::move(action));
             }
         }
+    } catch (const SafeModeError&) {
+        throw;
     } catch (const std::exception& e) {
         std::cerr << "[lazyverilog] codeAction autoarg: " << e.what() << "\n";
     }
@@ -213,6 +218,8 @@ std::vector<CodeAction> provide_code_actions(const Analyzer& analyzer, const Con
             action.edit = optional<lsWorkspaceEdit>(*we);
             actions.push_back(std::move(action));
         }
+    } catch (const SafeModeError&) {
+        throw;
     } catch (const std::exception& e) {
         std::cerr << "[lazyverilog] codeAction autofunc: " << e.what() << "\n";
     }

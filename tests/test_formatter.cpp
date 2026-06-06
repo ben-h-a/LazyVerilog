@@ -86,9 +86,8 @@ TEST_CASE("formatter: function call pass ignores hidden source whitespace", "[fo
     CHECK(format_source(once, opts) == once);
 }
 
-TEST_CASE("formatter: safe_mode2 accepts unchanged token streams", "[formatter][safe_mode]") {
+TEST_CASE("formatter: safety accepts unchanged token streams", "[formatter][safety]") {
     FormatOptions opts;
-    opts.safe_mode2 = true;
     opts.port_declaration.align = false;
     opts.var_declaration.align = false;
     opts.default_indent_level_inside_outmost_block = 0;
@@ -186,7 +185,6 @@ TEST_CASE("formatter: pp conditional function call formats all argument segments
 
 TEST_CASE("formatter: autoarg comment in multiline module header is safe", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.indent_size = 4;
     opts.module.parameter_layout = "hanging";
@@ -256,7 +254,6 @@ TEST_CASE("formatter: module parameter layout hanging", "[formatter]") {
 
 TEST_CASE("formatter: module header imports and include parameters are multiline", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.indent_size = 4;
     opts.module.parameter_layout = "block";
@@ -285,7 +282,6 @@ TEST_CASE("formatter: module header imports and include parameters are multiline
 
 TEST_CASE("formatter: multiple module header imports stay as separate clauses", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.indent_size = 4;
     opts.module.parameter_layout = "block";
@@ -313,7 +309,6 @@ TEST_CASE("formatter: multiple module header imports stay as separate clauses", 
 
 TEST_CASE("formatter: module parameter comments with commas are not split", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.indent_size = 4;
     opts.module.parameter_layout = "hanging";
@@ -336,7 +331,6 @@ TEST_CASE("formatter: module parameter comments with commas are not split", "[fo
 TEST_CASE("formatter: block module parameter comments do not emit trailing whitespace",
           "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.indent_size = 4;
     opts.module.parameter_layout = "block";
@@ -361,7 +355,6 @@ TEST_CASE("formatter: block module parameter comments do not emit trailing white
 
 TEST_CASE("formatter: multiline ANSI module header preserves line comments", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.indent_size = 4;
     opts.port_declaration.align = true;
@@ -390,7 +383,6 @@ TEST_CASE("formatter: multiline ANSI module header preserves line comments", "[f
 
 TEST_CASE("formatter: instance parameter comments do not trip safe mode", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.indent_size = 4;
     opts.instance.align = true;
@@ -418,7 +410,6 @@ TEST_CASE("formatter: instance parameter comments do not trip safe mode", "[form
 
 TEST_CASE("formatter: imported parameterized ANSI header is idempotent", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.indent_size = 4;
     opts.tab_align = true;
@@ -449,7 +440,6 @@ TEST_CASE("formatter: imported parameterized ANSI header is idempotent", "[forma
 
 TEST_CASE("formatter: ANSI module header after package import is aligned", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.indent_size = 4;
     opts.port_declaration.align = true;
@@ -844,7 +834,6 @@ TEST_CASE("formatter: non-adaptive var declarations align semicolon to longest t
 
 TEST_CASE("formatter: module header closing line comment is preserved", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.indent_size = 4;
     opts.port_declaration.align = true;
@@ -861,7 +850,6 @@ TEST_CASE("formatter: module header closing line comment is preserved", "[format
 
 TEST_CASE("formatter: final ANSI port with line comment does not gain comma", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.indent_size = 4;
     opts.port_declaration.align = true;
@@ -1065,7 +1053,6 @@ TEST_CASE("formatter: define macro body not reformatted", "[formatter]") {
 
 TEST_CASE("formatter: instance formatting skips define macro body", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.instance.align = true;
 
     const std::string src = "`define CONNECT \\\n"
@@ -1090,7 +1077,6 @@ TEST_CASE("formatter: instance formatting skips define macro body", "[formatter]
 
 TEST_CASE("formatter: macro calls with empty arguments are preserved", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
 
     const std::string src = "module top;\n"
                             "  `DV_CHECK_FATAL(expr, , msg_id)\n"
@@ -1144,7 +1130,6 @@ TEST_CASE("formatter: object-like macro argument is a function call argument", "
 TEST_CASE("formatter: multiline macro calls with comments are preserved and idempotent",
           "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
 
     const std::string src = "module top;\n"
@@ -1204,7 +1189,6 @@ TEST_CASE("formatter: macro arg call after blank line is idempotent", "[formatte
 
 TEST_CASE("formatter: constraint brace blocks are idempotent", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.indent_size = 4;
 
     const std::string src =
@@ -1230,7 +1214,6 @@ TEST_CASE("formatter: constraint brace blocks are idempotent", "[formatter]") {
 
 TEST_CASE("formatter: begin_newline applies to begin and constraint braces", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.indent_size = 4;
     opts.statement.begin_newline = false;
     opts.statement.wrap_end_else_clauses = false;
@@ -1266,7 +1249,6 @@ TEST_CASE("formatter: begin_newline applies to begin and constraint braces", "[f
 
 TEST_CASE("formatter: adjacent operators keep source token boundaries", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
 
     const std::string formatted = format_source("module top;\n"
@@ -1295,7 +1277,6 @@ TEST_CASE("formatter: adjacent operators keep source token boundaries", "[format
 
 TEST_CASE("formatter: import declarations do not indent on function or task", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.indent_size = 4;
 
     CHECK(format_source("import \"DPI-C\" function chandle usbdpi_create(input string name, input int loglevel);\n"
@@ -1310,7 +1291,6 @@ TEST_CASE("formatter: import declarations do not indent on function or task", "[
 TEST_CASE("formatter: extern class method declarations do not indent following declarations",
           "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
 
     const std::string formatted = format_source(
@@ -1333,7 +1313,6 @@ TEST_CASE("formatter: extern class method declarations do not indent following d
 
 TEST_CASE("formatter: inside expression keeps required word-operator spaces", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.spacing.binary_operator_spacing = "none";
 
     const std::string formatted =
@@ -1347,7 +1326,6 @@ TEST_CASE("formatter: inside expression keeps required word-operator spaces", "[
 TEST_CASE("formatter: typedef class forward declarations do not indent following declarations",
           "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
 
     CHECK(format_source("package p;\n"
@@ -1367,7 +1345,6 @@ TEST_CASE("formatter: typedef class forward declarations do not indent following
 
 TEST_CASE("formatter: labeled endtask stays on one line", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
 
     CHECK(format_source("class c;\n"
@@ -1382,7 +1359,6 @@ TEST_CASE("formatter: labeled endtask stays on one line", "[formatter]") {
 
 TEST_CASE("formatter: labeled endtask keeps following task on next line", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
 
     CHECK(format_source("class c;\n"
@@ -1401,7 +1377,6 @@ TEST_CASE("formatter: labeled endtask keeps following task on next line", "[form
 
 TEST_CASE("formatter: disable statement target stays on one line", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
 
     CHECK(format_source("class c;\n"
@@ -1420,7 +1395,6 @@ TEST_CASE("formatter: disable statement target stays on one line", "[formatter]"
 
 TEST_CASE("formatter: macro call indent follows surrounding block", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
 
     const std::string src = "module top;\n"
                             "foreach (mems[i]) begin\n"
@@ -1441,7 +1415,6 @@ TEST_CASE("formatter: macro call indent follows surrounding block", "[formatter]
 
 TEST_CASE("formatter: comments with parentheses are not treated as calls", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.function_call.break_policy = "always";
 
     const std::string src = "module top;\n"
@@ -1503,7 +1476,6 @@ TEST_CASE("formatter: custom format control comment regex", "[formatter]") {
 
 TEST_CASE("formatter: calls with empty positional arguments are preserved", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.function_call.break_policy = "always";
 
     const std::string src = "module top;\n"
@@ -1515,7 +1487,6 @@ TEST_CASE("formatter: calls with empty positional arguments are preserved", "[fo
 
 TEST_CASE("formatter: port header comments do not gain semicolons", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.port_declaration.align = true;
 
     const std::string src = "module top import pkg::*;\n"
@@ -1789,7 +1760,6 @@ TEST_CASE("formatter: var decl with backtick macro dim is idempotent", "[formatt
     opts.var_declaration.section4_min_width = 16;
     opts.statement.align = true;
     opts.default_indent_level_inside_outmost_block = 0;
-    opts.safe_mode = true;
 
     // `WIDTH is a macro — formatter must not expand it (would change non-whitespace content)
     std::string input = "`define WIDTH 32\n"
@@ -1927,7 +1897,6 @@ TEST_CASE("formatter: user-defined output port type stays in type section", "[fo
 
 TEST_CASE("formatter: non-ANSI port declarations keep five-section alignment", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.indent_size = 4;
     opts.port_declaration.align = true;
@@ -1980,7 +1949,6 @@ TEST_CASE("formatter: non-ANSI port declarations keep five-section alignment", "
 
 TEST_CASE("formatter: variable declarations support user types automatic and comma declarators", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.var_declaration.align = true;
     opts.var_declaration.align_adaptive = true;
@@ -2006,7 +1974,6 @@ TEST_CASE("formatter: variable declarations support user types automatic and com
 
 TEST_CASE("formatter: instance port name width is dot-to-paren field width", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.indent_size = 4;
     opts.instance.align = true;
@@ -2028,7 +1995,6 @@ TEST_CASE("formatter: instance port name width is dot-to-paren field width", "[f
 
 TEST_CASE("formatter: zero-port instance is not variable declaration aligned", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.var_declaration.align = true;
     opts.var_declaration.align_adaptive = true;
@@ -2051,7 +2017,6 @@ TEST_CASE("formatter: zero-port instance is not variable declaration aligned", "
 
 TEST_CASE("formatter: do while condition stays attached to loop end", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.indent_size = 4;
     opts.spacing.control_keyword_space = true;
@@ -2076,7 +2041,6 @@ TEST_CASE("formatter: do while condition stays attached to loop end", "[formatte
 
 TEST_CASE("formatter: format off marker keeps original column and body verbatim", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.indent_size = 4;
 
@@ -2101,7 +2065,6 @@ TEST_CASE("formatter: format off marker keeps original column and body verbatim"
 
 TEST_CASE("formatter: constraint dist list stays item-per-line with attached semicolon", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.indent_size = 4;
 
@@ -2122,7 +2085,6 @@ TEST_CASE("formatter: constraint dist list stays item-per-line with attached sem
 
 TEST_CASE("formatter: covergroup event control follows procedural at spacing", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.indent_size = 4;
     opts.spacing.procedural_event_control_at_spacing = "both";
@@ -2241,7 +2203,6 @@ TEST_CASE("formatter: instance port name width is measured from dot to paren", "
 
 TEST_CASE("formatter: instance expansion skips procedural named-argument calls", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.instance.align = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.indent_size = 4;
@@ -2266,7 +2227,6 @@ TEST_CASE("formatter: instance expansion skips procedural named-argument calls",
 
 TEST_CASE("formatter: instance array dimensions are preserved", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.instance.align = true;
     opts.instance.port_indent_level = 1;
     opts.instance.instance_port_name_width = 10;
@@ -2288,7 +2248,6 @@ TEST_CASE("formatter: instance array dimensions are preserved", "[formatter]") {
 
 TEST_CASE("formatter: autoinst comment does not block instance port expansion", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.instance.align = true;
     opts.instance.port_indent_level = 1;
     opts.instance.instance_port_name_width = 10;
@@ -2311,7 +2270,6 @@ TEST_CASE("formatter: autoinst comment does not block instance port expansion", 
 
 TEST_CASE("formatter: instance parameter line comments are preserved", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.instance.align = true;
     opts.default_indent_level_inside_outmost_block = 0;
 
@@ -2343,7 +2301,6 @@ TEST_CASE("formatter: instance parameter line comments are preserved", "[formatt
 
 TEST_CASE("formatter: line comments do not block instance port expansion", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.instance.align = true;
     opts.instance.port_indent_level = 1;
     opts.instance.instance_port_name_width = 10;
@@ -2375,7 +2332,6 @@ TEST_CASE("formatter: line comments do not block instance port expansion", "[for
 TEST_CASE("formatter: standalone line comments inside instance ports are preserved",
           "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.instance.align = true;
     opts.instance.port_indent_level = 1;
     opts.instance.instance_port_name_width = 10;
@@ -2397,7 +2353,6 @@ TEST_CASE("formatter: standalone line comments inside instance ports are preserv
 
 TEST_CASE("formatter: block comments do not block instance port expansion", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.instance.align = true;
     opts.instance.port_indent_level = 1;
     opts.instance.instance_port_name_width = 10;
@@ -2419,7 +2374,6 @@ TEST_CASE("formatter: block comments do not block instance port expansion", "[fo
 
 TEST_CASE("formatter: block comment between instance port and paren is safe", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.instance.align = true;
     opts.default_indent_level_inside_outmost_block = 0;
 
@@ -3041,7 +2995,6 @@ TEST_CASE("formatter: spacing options survive demo-style alignment passes", "[fo
 
 TEST_CASE("formatter: duplicate instance port comments are preserved", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.instance.align = true;
     opts.instance.instance_port_name_width = 10;
     opts.instance.instance_port_between_paren_width = 10;
@@ -3064,7 +3017,6 @@ TEST_CASE("formatter: duplicate instance port comments are preserved", "[formatt
 TEST_CASE("formatter: conditional instance headers do not corrupt following instances",
           "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.instance.align = true;
     opts.instance.align_adaptive = true;
@@ -3119,7 +3071,6 @@ TEST_CASE("formatter: conditional instance headers do not corrupt following inst
 TEST_CASE("formatter: instance port list continues wrapping after preprocessor conditionals",
           "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.indent_size = 4;
 
@@ -3164,7 +3115,6 @@ TEST_CASE("formatter: instance port list continues wrapping after preprocessor c
 TEST_CASE("formatter: instance port alignment crosses preprocessor conditionals",
           "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.instance.align = true;
     opts.instance.align_adaptive = true;
     opts.instance.instance_port_name_width = 10;
@@ -3212,7 +3162,6 @@ TEST_CASE("formatter: instance port alignment crosses preprocessor conditionals"
 
 TEST_CASE("formatter: ANSI port directives do not receive commas", "[formatter]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.port_declaration.align = true;
     opts.port_declaration.align_adaptive = true;
@@ -3608,7 +3557,6 @@ TEST_CASE("formatter: non-ANSI module ports can wrap by max line length", "[form
 
 TEST_CASE("formatter: non-ANSI module port wrapping applies count and max length", "[formatter][options]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.indent_size = 4;
     opts.module.non_ansi_port_per_line_enabled = true;
@@ -3922,7 +3870,6 @@ TEST_CASE("formatter: forever statement bodies wrap and align like other control
 
 TEST_CASE("formatter: preserves EOF trailing endmodule comments", "[formatter][safe_mode]") {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
 
     const std::string src = "module top;\nendmodule  // top\n";
@@ -3960,7 +3907,6 @@ TEST_CASE("formatter: preserves slang-split based literal chunks", "[formatter]"
 
 TEST_CASE("formatter: named generate block instantiation keeps pp conditionals", "[formatter]" ) {
     FormatOptions opts;
-    opts.safe_mode = true;
     opts.default_indent_level_inside_outmost_block = 0;
     opts.instance.align = true;
     opts.instance.align_adaptive = true;
