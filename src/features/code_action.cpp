@@ -132,20 +132,21 @@ std::vector<CodeAction> provide_code_actions(const Analyzer& analyzer, const Con
         return actions;
 
     // Cross-file fallback for AutoInst.  The current file itself is resolved
-    // AST-first inside autoinst_impl(); this index intentionally contains only
-    // other open/project files.
-    SyntaxIndex project_idx;
+    // AST-first inside autoinst_impl(); other open buffers and project files
+    // stay as separate index layers so code actions do not materialize a flat
+    // all-shard project index on request paths.
+    std::shared_ptr<const SyntaxIndex> opened_index;
+    std::shared_ptr<const ProjectIndexSnapshot> project_index;
     if (state->tree) {
-        if (auto opened = analyzer.opened_files_index(uri))
-            project_idx = *opened;
-        if (auto project = analyzer.extra_project_index())
-            project_idx.merge(*project);
+        opened_index = analyzer.opened_files_index(uri);
+        project_index = analyzer.project_index_snapshot();
     }
 
     // ── 1. AutoInst ──────────────────────────────────────────────────────────
     try {
         if (state->tree) {
-            auto result = autoinst_impl(*state, line, col, project_idx);
+            auto result = autoinst_impl(*state, line, col, opened_index.get(),
+                                        project_index.get());
             if (result) {
                 std::string formatted = format_emit_text(
                     format_autoinst(*result, state->text, config.autoinst), config.format);

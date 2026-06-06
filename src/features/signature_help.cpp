@@ -209,14 +209,9 @@ static std::optional<std::vector<ParamInfo>> module_params_from_tree(const Synta
     return visitor.result;
 }
 
-static std::optional<std::vector<ParamInfo>> module_params_from_index(const SyntaxIndex& index,
-                                                                      const std::string& name) {
-    auto module_it = index.module_by_name.find(name);
-    if (module_it == index.module_by_name.end() || module_it->second >= index.modules.size())
-        return std::nullopt;
-
+static std::optional<std::vector<ParamInfo>> module_params_from_module(const ModuleEntry& module) {
     std::vector<ParamInfo> params;
-    for (const auto& port : index.modules[module_it->second].ports) {
+    for (const auto& port : module.ports) {
         if (port.direction != "parameter" && port.direction != "localparam")
             continue;
         params.push_back(ParamInfo{.name = port.name,
@@ -229,13 +224,22 @@ static std::optional<std::vector<ParamInfo>> module_params_from_index(const Synt
     return params;
 }
 
+static std::optional<std::vector<ParamInfo>> module_params_from_snapshot(
+    const ProjectIndexSnapshot& index, const std::string& name) {
+    const auto it = index.module_by_name.find(name);
+    if (it == index.module_by_name.end() || !it->second.shard ||
+        it->second.module_index >= it->second.shard->modules.size())
+        return std::nullopt;
+    return module_params_from_module(it->second.shard->modules[it->second.module_index]);
+}
+
 static std::optional<std::vector<ParamInfo>> find_module_params(const Analyzer& analyzer,
                                                                 const SyntaxTree& current_tree,
                                                                 const std::string& name) {
     if (auto found = module_params_from_tree(current_tree, name))
         return found;
-    if (auto project = analyzer.extra_project_index())
-        return module_params_from_index(*project, name);
+    if (auto project = analyzer.project_index_snapshot())
+        return module_params_from_snapshot(*project, name);
     return std::nullopt;
 }
 

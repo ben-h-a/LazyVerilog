@@ -7,3 +7,5 @@
 /// Returns ParseDiagInfo items merged with parse diagnostics by the caller.
 std::vector<ParseDiagInfo> run_lint(const DocumentState& state, const LintConfig& config,
                                     const SyntaxIndex* project_index = nullptr);
+std::vector<ParseDiagInfo> run_lint(const DocumentState& state, const LintConfig& config,
+                                    const ProjectIndexSnapshot* project_index);

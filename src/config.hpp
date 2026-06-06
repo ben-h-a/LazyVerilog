@@ -7,6 +7,10 @@
 struct DesignConfig {
     std::string vcode;               // .f filelist path
     std::vector<std::string> define; // preprocessor defines
+    // Debounce merged project-index publishes after live listed-file edits.
+    // The LSP server applies this to Analyzer; standalone tests that instantiate
+    // Analyzer directly keep Analyzer's zero-debounce default unless they opt in.
+    int project_index_publish_debounce_ms{250};
 };
 
 struct CompilationConfig {

@@ -65,10 +65,30 @@ text and AST-derived dynamic shard replace the disk-backed filelist shard. The
 current/open buffer keeps a `DocumentState` / `SyntaxTree`; closed filelist files
 keep only compact `SyntaxIndex` shards.
 
-The merged project index returned by `Analyzer::extra_project_index()` is a
-published immutable snapshot. Request handlers read that snapshot and never merge
-all filelist shards synchronously. While the background index is still warming,
-features see the latest published snapshot, which can be empty or incomplete.
+Request paths should think in three layers:
+
+```text
+1. current request file  -> live DocumentState / SyntaxTree
+2. other open buffers    -> cached SyntaxIndex summaries derived from live ASTs
+3. closed/project files  -> background SyntaxIndex shards
+```
+
+`opened_files_index_cache_` represents layer 2 only. It is keyed by the current
+request URI and excludes that URI, for example a request in `top.sv` may reuse a
+cached merged index for other open files such as `memory.sv` and `pkg.sv`, but
+`top.sv` itself must still be answered from its live AST. This avoids duplicate
+or stale current-file facts while still preserving unsaved edits from other open
+buffers.
+
+The project index returned by `Analyzer::project_index_snapshot()` is a published
+immutable shard snapshot: it keeps per-file `SyntaxIndex` shards plus lightweight
+global lookup maps. Publishing a live-file change replaces the affected shard and
+updates lookup maps without copying every symbol/reference from every file into a
+new flat index. Request handlers consume either the snapshot's global lookups or
+the individual shard references; they should not rebuild a whole-project flat
+`SyntaxIndex` while answering editor requests. While the background index is
+still warming, features see the latest published snapshot, which can be empty or
+incomplete.
 
 ## Request path behavior
 
@@ -104,7 +124,11 @@ directories, and filelist entries.
 
 For listed files that are open in the editor, `didOpen` / `didChange` update the
 cached shard from unsaved in-memory text. The expensive AST-derived shard build is
-done outside the analyzer mutex, then committed under the mutex.
+done outside the analyzer mutex, then committed under the mutex.  Updating this
+live shard schedules an asynchronous project-index snapshot publish; the edit path
+itself does not wait for the whole-project merge.  The publish request is
+coalesced by `[design].project_index_publish_debounce_ms` so rapid typing merges
+and refreshes diagnostics once per burst instead of once per keystroke.
 
 When a listed file is closed, the analyzer schedules an asynchronous disk-backed
 reindex for that file so the project shard eventually returns to saved contents
@@ -125,8 +149,14 @@ When this rule is enabled:
 stale_autoinst_diagnostic = true
 ```
 
-the diagnostic publishing path builds a current-file lint index and merges the
-latest `Analyzer::extra_project_index()` snapshot. It does not synchronously parse
-or merge every filelist file on the diagnostic path. If the background project
-index is not warm yet, stale-AutoInst diagnostics can be incomplete until the
-project snapshot is published.
+the diagnostic publishing path builds a current-file lint index and consults the
+latest `Analyzer::project_index_snapshot()` module lookup map. It does not
+synchronously parse or merge every filelist file on the diagnostic path. If the
+background project index is not warm yet, stale-AutoInst diagnostics can be
+incomplete until the project snapshot is published.
+
+When a project snapshot is published, the server republishes diagnostics for all
+open documents. This is required for edits such as removing a port from
+`memory.sv`: an already-open `memory_top.sv` may need its stale-AutoInst
+diagnostics refreshed even though `memory_top.sv` itself did not receive a new
+`didChange` notification.

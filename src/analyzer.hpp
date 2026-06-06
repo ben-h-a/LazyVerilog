@@ -1,6 +1,7 @@
 #pragma once
 #include "document_state.hpp"
 #include "syntax_index.hpp"
+#include <chrono>
 #include <condition_variable>
 #include <filesystem>
 #include <deque>
@@ -13,6 +14,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 struct SymbolInfo {
@@ -117,10 +119,22 @@ class Analyzer {
     std::vector<std::pair<int, int>> find_occurrences(const std::string& uri,
                                                       const std::string& name) const;
 
-    /// Call f(uri, state) for every open document (under lock).
+    /// Call f(uri, state) for every open document snapshot.
+    ///
+    /// The callback is intentionally invoked *after* releasing map_mutex_.  A
+    /// number of feature callbacks lazily build structural indexes or walk large
+    /// SyntaxTree snapshots.  Running that work under the global analyzer mutex
+    /// would serialize unrelated LSP requests, document edits, and background
+    /// index commits behind potentially expensive AST traversal.
     template <typename F> void for_each_state(F&& f) const {
-        std::lock_guard<std::mutex> lk(map_mutex_);
-        for (const auto& [uri, state] : docs_)
+        std::vector<std::pair<std::string, std::shared_ptr<const DocumentState>>> snapshot;
+        {
+            std::lock_guard<std::mutex> lk(map_mutex_);
+            snapshot.reserve(docs_.size());
+            for (const auto& [uri, state] : docs_)
+                snapshot.emplace_back(uri, state);
+        }
+        for (const auto& [uri, state] : snapshot)
             f(uri, state);
     }
 
@@ -131,8 +145,10 @@ class Analyzer {
     /// set_include_dirs(); they are include search paths, not source files.
     ///
     /// @param filelist_path  Resolved absolute path to the .f file itself (may be empty).
-    ///                       Used to detect filelist changes with a single stat() per request
-    ///                       instead of stat()-ing every individual extra file.
+    ///                       Stored as configuration provenance for reload / diagnostics paths.
+    ///                       Request handlers deliberately do not poll or stat this file on
+    ///                       shared filesystems; freshness is driven by explicit config reloads
+    ///                       and watched-file notifications.
     void set_extra_files(const std::vector<std::string>& paths,
                          const std::string& filelist_path = {});
 
@@ -157,6 +173,10 @@ class Analyzer {
     /// that need deterministic assertions after set_extra_files() may wait for
     /// the background worker to become idle.
     void wait_for_background_index_idle() const;
+
+    /// Configure debounce for publishing the merged project index after shard updates.
+    /// A value <= 0 publishes as soon as the background indexer can process the request.
+    void set_project_index_publish_debounce_ms(int debounce_ms);
 
     /// Set preprocessor defines (from config.design.define).
     /// Applied on every subsequent make_state call.
@@ -196,13 +216,12 @@ class Analyzer {
     /// philosophy: current file uses AST, project files use index.
     std::shared_ptr<const std::vector<ExtraIndexInfo>> extra_index_snapshot_ptr() const;
 
-    /// Return the last background-published project-wide index snapshot.
+    /// Return the last background-published project-wide shard snapshot.
     ///
-    /// The request path never merges per-file shards.  The background worker
-    /// parses/replaces shards and publishes an immutable merged SyntaxIndex
-    /// snapshot.  While the worker is still catching up, callers see the last
-    /// published snapshot (or an empty one before the first publish).
-    std::shared_ptr<const SyntaxIndex> extra_project_index() const;
+    /// This is the Option-B project index: publishing records immutable per-file
+    /// shards plus lightweight global lookup maps.  It does not copy/merge all
+    /// SyntaxIndex entries on every live-file edit.
+    std::shared_ptr<const ProjectIndexSnapshot> project_index_snapshot() const;
 
     /// Register a callback fired whenever the merged project index snapshot is
     /// republished.  The callback may run on the background indexer thread, so
@@ -247,7 +266,6 @@ class Analyzer {
   private:
     std::shared_ptr<DocumentState> make_state(const std::string& uri,
                                               const std::string& text) const;
-    std::shared_ptr<DocumentState> make_file_state(const std::filesystem::path& path) const;
     std::optional<Location>
     definition_of_state(const DocumentState& state, const std::string& uri, int line, int col,
                         std::span<const ExtraFileInfo> extra_files,
@@ -256,15 +274,15 @@ class Analyzer {
     struct ExtraFileCacheEntry {
         std::string path;
         std::string uri;
-        SyntaxIndex index;
+        std::shared_ptr<const SyntaxIndex> index;
     };
 
     void start_background_indexer_locked() const;
     void schedule_background_reindex_locked() const;
     void schedule_background_project_publish_locked() const;
     void background_index_loop(std::stop_token stop) const;
-    void publish_extra_project_index_locked() const;
-    void clear_extra_project_index_locked() const;
+    std::function<void()> publish_project_index_snapshot_locked() const;
+    void clear_project_index_snapshot_locked() const;
     void invalidate_extra_snapshots_locked() const;
     void invalidate_opened_files_index_locked() const;
     std::shared_ptr<const std::vector<ExtraFileInfo>> build_extra_file_snapshot_locked() const;
@@ -291,7 +309,7 @@ class Analyzer {
     mutable std::unordered_map<std::string, ExtraFileCacheEntry> extra_cache_;
     mutable std::shared_ptr<const std::vector<ExtraFileInfo>> extra_file_snapshot_cache_;
     mutable std::shared_ptr<const std::vector<ExtraIndexInfo>> extra_index_snapshot_cache_;
-    mutable std::shared_ptr<const SyntaxIndex> extra_project_index_cache_;
+    mutable std::shared_ptr<const ProjectIndexSnapshot> project_index_snapshot_cache_;
     mutable std::function<void()> project_index_publish_callback_;
     // Per-current-URI merged dynamic layer for "other open files".  The key is
     // necessary because current/open file facts must come from the caller's AST,
@@ -311,6 +329,8 @@ class Analyzer {
     mutable std::deque<std::string> background_pending_files_;
     mutable bool background_index_active_{false};
     mutable bool background_publish_requested_{false};
+    mutable int background_publish_debounce_ms_{0};
+    mutable std::chrono::steady_clock::time_point background_publish_due_time_{};
     mutable uint64_t background_generation_{0};
     mutable std::jthread background_indexer_;
 

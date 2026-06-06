@@ -59,10 +59,16 @@ ctest --test-dir build                          # all tests
   not by retained full ASTs.  Project/filelist files may number in the hundreds
   or thousands, so keeping full ASTs for every file would increase memory use,
   allocator/source-manager lifetime complexity, and request-path contention.
-- In short:
-  - current file: AST is authoritative;
-  - other/project/closed files: index is authoritative;
-  - avoid designing features that require closed project files to keep ASTs.
+- In short, requests have three layers:
+  - current request file: live AST / `DocumentState` is authoritative;
+  - other open buffers: use cached `SyntaxIndex` summaries derived from their
+    live ASTs so unsaved cross-file edits are visible;
+  - closed/project files: use background `SyntaxIndex` shards.
+- `opened_files_index_cache_` is keyed by the current request URI and excludes
+  that URI. For example, while handling a request in `top.sv`, the opened-files
+  index may include `memory.sv` and `pkg.sv`, but not `top.sv`; `top.sv` must be
+  inspected from its live AST to avoid stale or duplicate current-file facts.
+- Avoid designing features that require closed project files to keep ASTs.
 - If a current/open file needs index-shaped facts such as modules, instances,
   symbol IDs, or reference occurrences, derive those facts from the current
   file AST.  Prefer caching such AST-derived indexes per immutable

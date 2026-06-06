@@ -2,6 +2,7 @@
 #include "analyzer.hpp"
 #include "config.hpp"
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -38,6 +39,13 @@ class LazyVerilogServer {
     // the resulting text through normal didChange notifications.
     std::unordered_map<std::string, int> document_versions_;
     std::unordered_map<std::string, std::unordered_set<std::string>> diagnostic_uris_by_owner_;
+
+    // Background project indexing and optional semantic compilation can request
+    // diagnostic / refresh notifications from worker threads, while normal LSP
+    // didOpen/didChange handlers publish from the endpoint thread.  LspCpp
+    // endpoint sends and diagnostic ownership bookkeeping are not treated as
+    // concurrently mutable server state, so serialize those outbound paths here.
+    std::mutex outbound_mutex_;
 
     struct Impl;
     std::unique_ptr<Impl> impl_;

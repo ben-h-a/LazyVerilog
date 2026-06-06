@@ -29,16 +29,23 @@ struct BackgroundCompilerConfig {
 
 class BackgroundCompiler {
   public:
+    using SnapshotCallback = std::function<CompilationSnapshot()>;
     using ResultCallback = std::function<void(BackgroundCompileResult)>;
 
-    explicit BackgroundCompiler(ResultCallback callback);
+    BackgroundCompiler(SnapshotCallback snapshot_callback, ResultCallback result_callback);
     ~BackgroundCompiler();
 
     BackgroundCompiler(const BackgroundCompiler&) = delete;
     BackgroundCompiler& operator=(const BackgroundCompiler&) = delete;
 
     void configure(BackgroundCompilerConfig config);
-    void schedule(CompilationSnapshot snapshot);
+    /// Request a semantic compile generation.
+    ///
+    /// This is intentionally a lightweight trigger: the expensive full-design
+    /// CompilationSnapshot is constructed by the worker only after the debounce
+    /// window expires.  Rapid edits therefore coalesce before walking the full
+    /// filelist / open-document set.
+    void schedule();
     void stop();
 
   private:
@@ -48,7 +55,8 @@ class BackgroundCompiler {
     std::vector<std::thread> collect_exited_workers_locked();
     BackgroundCompileResult compile(uint64_t generation, CompilationSnapshot snapshot) const;
 
-    ResultCallback callback_;
+    SnapshotCallback snapshot_callback_;
+    ResultCallback result_callback_;
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;
@@ -59,7 +67,7 @@ class BackgroundCompiler {
     int nice_value_{10};
     size_t next_worker_id_{0};
     uint64_t latest_generation_{0};
-    std::optional<CompilationSnapshot> pending_;
+    bool pending_{false};
     std::chrono::steady_clock::time_point due_time_{};
     // Each worker owns a stable slot so configure() can request retirement
     // without relying on vector indices.  This matters when the user lowers

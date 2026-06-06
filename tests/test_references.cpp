@@ -538,10 +538,10 @@ TEST_CASE("references: changed watched file refreshes only that project shard", 
     analyzer.set_extra_files({path.string()});
     analyzer.wait_for_background_index_idle();
 
-    auto project = analyzer.extra_project_index();
+    auto project = analyzer.project_index_snapshot();
     REQUIRE(project);
-    REQUIRE(project->modules.size() == 1);
-    CHECK(project->modules[0].name == "old_name");
+    REQUIRE(project->module_by_name.size() == 1);
+    CHECK(project->module_by_name.contains("old_name"));
 
     {
         std::ofstream out(path, std::ios::trunc);
@@ -555,10 +555,10 @@ TEST_CASE("references: changed watched file refreshes only that project shard", 
     analyzer.refresh_changed_extra_files({uri_from_path(path)});
     analyzer.wait_for_background_index_idle();
 
-    project = analyzer.extra_project_index();
+    project = analyzer.project_index_snapshot();
     REQUIRE(project);
-    REQUIRE(project->modules.size() == 1);
-    CHECK(project->modules[0].name == "new_name");
+    REQUIRE(project->module_by_name.size() == 1);
+    CHECK(project->module_by_name.contains("new_name"));
 
     std::filesystem::remove(path);
 }

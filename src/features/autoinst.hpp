@@ -17,7 +17,9 @@ struct AutoinstResult {
 };
 
 std::optional<AutoinstResult> autoinst_impl(
-    const DocumentState& state, int line, int col, const SyntaxIndex& syntax_index);
+    const DocumentState& state, int line, int col,
+    const SyntaxIndex* opened_index = nullptr,
+    const ProjectIndexSnapshot* project_index = nullptr);
 
 std::string format_autoinst(
     const AutoinstResult& result, const std::string& source, const AutoinstOptions& options);

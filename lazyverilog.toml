@@ -1,6 +1,7 @@
 [design]
 vcode = "demo/vcode.f"
 define = ["RTL_SIM"]   # preprocessor defines passed to slang for parsing
+project_index_publish_debounce_ms = 250 # debounce merged project-index publish after live file edits
 
 [compilation]
 background_compilation = false # run semantic compilation in background workers (slower, richer diagnostics)

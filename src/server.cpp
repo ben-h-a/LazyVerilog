@@ -551,12 +551,31 @@ LazyVerilogServer::LazyVerilogServer() : impl_(std::make_unique<Impl>()) {
     root_ = std::filesystem::current_path();
     config_found_ = std::filesystem::exists(root_ / "lazyverilog.toml");
     config_ = load_config(root_);
-    analyzer_.set_project_index_publish_callback([this] { request_inlay_hint_refresh(); });
+    analyzer_.set_project_index_publish_callback([this] {
+        request_inlay_hint_refresh();
+
+        // A project-index publish can change lint results in already-open
+        // documents even when the edited file is a different open/filelist
+        // buffer.  Example: editing memory.sv removes a port; memory_top.sv is
+        // still open and has stale-AutoInst lint enabled.  Re-publish foreground
+        // diagnostics for all open documents so those cross-file diagnostics are
+        // refreshed as soon as the merged project index catches up.
+        std::vector<std::string> open_uris;
+        analyzer_.for_each_state(
+            [&](const std::string& uri, const std::shared_ptr<const DocumentState>& state) {
+                if (state)
+                    open_uris.push_back(uri);
+            });
+        for (const auto& uri : open_uris)
+            publish_diagnostics(uri);
+    });
+    analyzer_.set_project_index_publish_debounce_ms(config_.design.project_index_publish_debounce_ms);
     { auto vcode = load_vcode(root_, config_);
       analyzer_.set_project_config(config_.design.define, vcode.include_dirs,
                                    vcode.files, resolve_vcode_path(root_, config_)); }
-    background_compiler_ =
-        std::make_unique<BackgroundCompiler>([this](BackgroundCompileResult result) {
+    background_compiler_ = std::make_unique<BackgroundCompiler>(
+        [this] { return analyzer_.compilation_snapshot(); },
+        [this](BackgroundCompileResult result) {
             std::unordered_set<std::string> uris_to_publish;
             auto publish_if_open = [&](const std::string& uri) {
                 if (analyzer_.get_state(uri))
@@ -598,6 +617,7 @@ void LazyVerilogServer::request_inlay_hint_refresh() {
     if (!config_.inlay_hint.enable || !impl_)
         return;
 
+    std::lock_guard<std::mutex> outbound_lock(outbound_mutex_);
     try {
         auto req = impl_->remote_endpoint.createRequest<wp_inlayHintRefresh::request>();
         req.params = JsonNull{};
@@ -626,10 +646,11 @@ void LazyVerilogServer::configure_background_compiler() {
 void LazyVerilogServer::schedule_background_compilation() {
     if (!background_compiler_ || !config_.compilation.background_compilation)
         return;
-    background_compiler_->schedule(analyzer_.compilation_snapshot());
+    background_compiler_->schedule();
 }
 
 void LazyVerilogServer::publish_config_diagnostic(const ConfigWarning* warning) {
+    std::lock_guard<std::mutex> outbound_lock(outbound_mutex_);
     try {
         if (!config_diagnostic_uri_.empty()) {
             Notify_TextDocumentPublishDiagnostics::notify clear;
@@ -661,6 +682,7 @@ void LazyVerilogServer::publish_config_diagnostic(const ConfigWarning* warning) 
 }
 
 void LazyVerilogServer::publish_diagnostics(const std::string& uri) {
+    std::lock_guard<std::mutex> outbound_lock(outbound_mutex_);
     try {
         auto state = analyzer_.get_state(uri);
         std::unordered_map<std::string, std::vector<ParseDiagInfo>> diags_by_uri;
@@ -681,9 +703,9 @@ void LazyVerilogServer::publish_diagnostics(const std::string& uri) {
             // latest immutable background-published index snapshot.  Do not
             // synchronously parse, copy, or merge the full design filelist on
             // every edit.
-            std::shared_ptr<const SyntaxIndex> project_lint_index;
+            std::shared_ptr<const ProjectIndexSnapshot> project_lint_index;
             if (config_.lint.module.stale_autoinst_diagnostic)
-                project_lint_index = analyzer_.extra_project_index();
+                project_lint_index = analyzer_.project_index_snapshot();
 
             auto lint_diags = run_lint(*state, config_.lint, project_lint_index.get());
             for (auto diag : lint_diags)
@@ -732,6 +754,7 @@ void LazyVerilogServer::publish_diagnostics(const std::string& uri) {
 }
 
 void LazyVerilogServer::clear_published_diagnostics_for_owner(const std::string& owner_uri) {
+    std::lock_guard<std::mutex> outbound_lock(outbound_mutex_);
     // LSP diagnostics are client-owned state: once the server has published a
     // diagnostic for a URI, many clients keep displaying it until the same
     // server publishes an empty diagnostics array for that URI.  Closing the
@@ -868,6 +891,7 @@ void LazyVerilogServer::register_handlers() {
                     show_warning(warn);
                 publish_config_diagnostic(warn.empty() ? nullptr : &warning_detail);
 
+                analyzer_.set_project_index_publish_debounce_ms(config_.design.project_index_publish_debounce_ms);
                 auto vcode = load_vcode(root_, config_);
                 analyzer_.set_project_config(config_.design.define, vcode.include_dirs,
                                              vcode.files, resolve_vcode_path(root_, config_));
@@ -985,6 +1009,7 @@ void LazyVerilogServer::register_handlers() {
                 if (!warn.empty())
                     show_warning(warn);
                 publish_config_diagnostic(warn.empty() ? nullptr : &warning_detail);
+                analyzer_.set_project_index_publish_debounce_ms(config_.design.project_index_publish_debounce_ms);
                 { auto vcode = load_vcode(root_, config_);
                   analyzer_.set_project_config(config_.design.define, vcode.include_dirs,
                                                vcode.files, resolve_vcode_path(root_, config_)); }
@@ -1048,6 +1073,7 @@ void LazyVerilogServer::register_handlers() {
                     if (!warn.empty())
                         show_warning(warn);
                     publish_config_diagnostic(warn.empty() ? nullptr : &warning_detail);
+                    analyzer_.set_project_index_publish_debounce_ms(config_.design.project_index_publish_debounce_ms);
                     { auto vcode = load_vcode(root_, config_);
                       analyzer_.set_project_config(config_.design.define, vcode.include_dirs,
                                                    vcode.files, resolve_vcode_path(root_, config_)); }
@@ -1577,13 +1603,11 @@ void LazyVerilogServer::register_handlers() {
                 int target_line = get_int(1);
                 auto state = analyzer_.get_state(uri);
                 if (state && state->tree) {
-                    SyntaxIndex idx;
-                    if (auto opened = analyzer_.opened_files_index(uri))
-                        idx = *opened;
-                    if (auto project = analyzer_.extra_project_index())
-                        idx.merge(*project);
+                    auto opened = analyzer_.opened_files_index(uri);
+                    auto project = analyzer_.project_index_snapshot();
                     if (cmd == "lazyverilog.autowirepreview") {
-                        auto preview = autowire_preview(*state, idx, config_.autowire, target_line);
+                        auto preview = autowire_preview(*state, opened.get(), project.get(),
+                                                        config_.autowire, target_line);
                         // Return preview lines as JSON array of strings
                         std::string json = "[";
                         for (size_t i = 0; i < preview.size(); ++i) {
@@ -1606,7 +1630,8 @@ void LazyVerilogServer::register_handlers() {
                         rsp.result.SetJsonString(json, lsp::Any::kUnKnown);
                     } else {
                         std::string new_source =
-                            autowire_apply(*state, idx, config_.autowire, target_line);
+                            autowire_apply(*state, opened.get(), project.get(),
+                                           config_.autowire, target_line);
                         if (new_source != state->text)
                             new_source = format_source(new_source, config_.format);
                         if (new_source != state->text) {

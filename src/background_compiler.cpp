@@ -20,6 +20,13 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+// Keep optional semantic compilation conservative by default.  This is a
+// background diagnostic path, not a throughput benchmark; high worker counts can
+// consume large amounts of CPU and memory on shared/HPC machines.
+constexpr int kMaxBackgroundCompilerThreads = 4;
+constexpr int kMinNiceValue = 0;
+constexpr int kMaxNiceValue = 19;
+
 static std::string diagnostic_uri(const slang::SourceManager& sm, const std::string& fallback_uri,
                                   slang::SourceLocation location) {
     if (!location.valid())
@@ -97,7 +104,10 @@ struct BackgroundCompiler::WorkerSlot {
     std::thread thread;
 };
 
-BackgroundCompiler::BackgroundCompiler(ResultCallback callback) : callback_(std::move(callback)) {}
+BackgroundCompiler::BackgroundCompiler(SnapshotCallback snapshot_callback,
+                                       ResultCallback result_callback)
+    : snapshot_callback_(std::move(snapshot_callback)),
+      result_callback_(std::move(result_callback)) {}
 
 BackgroundCompiler::~BackgroundCompiler() { stop(); }
 
@@ -121,8 +131,9 @@ std::vector<std::thread> BackgroundCompiler::collect_exited_workers_locked() {
 }
 
 void BackgroundCompiler::configure(BackgroundCompilerConfig config) {
-    config.thread_count = std::max(1, config.thread_count);
+    config.thread_count = std::clamp(config.thread_count, 1, kMaxBackgroundCompilerThreads);
     config.debounce_ms = std::max(0, config.debounce_ms);
+    config.nice_value = std::clamp(config.nice_value, kMinNiceValue, kMaxNiceValue);
 
     std::vector<std::thread> exited_threads;
     {
@@ -135,7 +146,7 @@ void BackgroundCompiler::configure(BackgroundCompilerConfig config) {
         exited_threads = collect_exited_workers_locked();
 
         if (!enabled_) {
-            pending_.reset();
+            pending_ = false;
             ++latest_generation_;
             lock.unlock();
             cv_.notify_all();
@@ -188,12 +199,12 @@ void BackgroundCompiler::configure(BackgroundCompilerConfig config) {
     }
 }
 
-void BackgroundCompiler::schedule(CompilationSnapshot snapshot) {
+void BackgroundCompiler::schedule() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!enabled_ || stopping_)
         return;
 
-    pending_ = std::move(snapshot);
+    pending_ = true;
     due_time_ = Clock::now() + std::chrono::milliseconds(debounce_ms_);
     ++latest_generation_;
     cv_.notify_all();
@@ -207,7 +218,7 @@ void BackgroundCompiler::stop() {
             return;
         stopping_ = true;
         enabled_ = false;
-        pending_.reset();
+        pending_ = false;
         ++latest_generation_;
 
         // Move thread handles out while holding mutex_ so configure() cannot
@@ -237,14 +248,14 @@ void BackgroundCompiler::worker_loop(std::shared_ptr<WorkerSlot> slot) {
         {
             std::unique_lock<std::mutex> lock(mutex_);
             cv_.wait(lock, [&] {
-                return stopping_ || slot->retire || (enabled_ && pending_.has_value());
+                return stopping_ || slot->retire || (enabled_ && pending_);
             });
             if (stopping_ || slot->retire) {
                 slot->exited = true;
                 return;
             }
 
-            while (!stopping_ && !slot->retire && pending_.has_value()) {
+            while (!stopping_ && !slot->retire && pending_) {
                 if (cv_.wait_until(lock, due_time_) == std::cv_status::timeout)
                     break;
             }
@@ -256,8 +267,19 @@ void BackgroundCompiler::worker_loop(std::shared_ptr<WorkerSlot> slot) {
                 continue;
 
             generation = latest_generation_;
-            snapshot = std::move(*pending_);
-            pending_.reset();
+            pending_ = false;
+        }
+
+        // Build the full design snapshot only after debounce has elapsed.  This
+        // avoids walking the whole filelist/open-document set for every
+        // keystroke when rapid edits will be coalesced anyway.
+        if (snapshot_callback_)
+            snapshot = snapshot_callback_();
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stopping_ || generation != latest_generation_)
+                continue;
         }
 
         auto result = compile(generation, std::move(snapshot));
@@ -267,7 +289,7 @@ void BackgroundCompiler::worker_loop(std::shared_ptr<WorkerSlot> slot) {
             if (stopping_ || generation != latest_generation_)
                 continue;
         }
-        callback_(std::move(result));
+        result_callback_(std::move(result));
     }
 }
 

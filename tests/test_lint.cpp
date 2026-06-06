@@ -93,7 +93,7 @@ TEST_CASE("lint: stale autoinst uses merged extra-file module ports", "[lint]") 
     auto state = analyzer.get_state(uri);
     REQUIRE(state != nullptr);
 
-    auto project_index = analyzer.extra_project_index();
+    auto project_index = analyzer.project_index_snapshot();
     REQUIRE(project_index != nullptr);
 
     LintConfig cfg;

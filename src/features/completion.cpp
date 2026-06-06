@@ -881,6 +881,35 @@ static std::unordered_set<std::string> value_names_for_type(const SyntaxIndex& i
     return names;
 }
 
+static void append_set(std::unordered_set<std::string>& dst,
+                       std::unordered_set<std::string> src) {
+    dst.insert(std::make_move_iterator(src.begin()), std::make_move_iterator(src.end()));
+}
+
+static void dedupe_completion_items(std::vector<lsCompletionItem>& items) {
+    std::unordered_set<std::string> seen;
+    std::vector<lsCompletionItem> deduped;
+    deduped.reserve(items.size());
+
+    for (auto& item : items) {
+        // Preserve layer priority by keeping the first equivalent item.  The
+        // caller appends current/open-buffer items before project-shard items,
+        // so unsaved text wins over background facts without needing a flat
+        // project merge.
+        std::string key = item.label;
+        key.push_back('\x1f');
+        key += std::to_string(item.kind ? static_cast<int>(*item.kind) : -1);
+        key.push_back('\x1f');
+        if (item.insertText)
+            key += *item.insertText;
+        if (!seen.insert(std::move(key)).second)
+            continue;
+        deduped.push_back(std::move(item));
+    }
+
+    items = std::move(deduped);
+}
+
 static bool value_visible_in_context(const SyntaxIndex& index, const CompletionContext& ctx,
                                      const ValueEntry& value) {
     if (!ctx.current_scope_name.empty() && !value.parent_scope.empty() &&
@@ -2664,9 +2693,15 @@ CompletionList CompletionEngine::complete(const lsTextDocumentPositionParams& pa
     SyntaxIndex completion_index = std::move(current_index);
     if (auto opened_index = analyzer.opened_files_index(params.textDocument.uri.raw_uri_))
         completion_index.merge(*opened_index);
+    std::vector<const SyntaxIndex*> project_shards;
     if (completion_context_needs_project_index(ctx.kind)) {
-        if (auto project_index = analyzer.extra_project_index())
-            completion_index.merge(*project_index);
+        if (auto project_index = analyzer.project_index_snapshot()) {
+            project_shards.reserve(project_index->shards.size());
+            for (const auto& shard : project_index->shards) {
+                if (shard.index)
+                    project_shards.push_back(shard.index.get());
+            }
+        }
     }
 
     // Collect symbol names declared in the current document for scope scoring.
@@ -2734,6 +2769,28 @@ CompletionList CompletionEngine::complete(const lsTextDocumentPositionParams& pa
     }
 
     try {
+        CompletionContext project_ctx = ctx;
+        if (ctx.kind == CompletionContextKind::MemberAccess && !ctx.scope_name.empty()) {
+            // Member access is inherently layered:
+            //
+            //   current/open layer:  my_handle is declared as some_pkg::my_class
+            //   project shard:       my_class members are indexed in a library file
+            //
+            // A flat merged index used to make type_of_value(current variable)
+            // and class_by_name(project class) visible to the same provider
+            // invocation.  Now that project shards remain separate, resolve the
+            // receiver's type once from the current/open layer and ask each
+            // project shard for members of that type.  This keeps the no-flat-
+            // merge rule without losing the common "variable_of_project_class."
+            // completion case.
+            if (auto value_type = type_of_value(completion_index, ctx.current_scope_name,
+                                                ctx.scope_name)) {
+                const std::string base = completion_base_type_name(*value_type);
+                if (!base.empty())
+                    project_ctx.scope_name = base;
+            }
+        }
+
         for (const auto& provider : providers_) {
             if (tok.cancelled) throw CompletionCancelled{};
             if (!provider->accepts(ctx)) continue;
@@ -2741,6 +2798,14 @@ CompletionList CompletionEngine::complete(const lsTextDocumentPositionParams& pa
             all_items.insert(all_items.end(),
                              std::make_move_iterator(items.begin()),
                              std::make_move_iterator(items.end()));
+            for (const auto* shard : project_shards) {
+                if (!shard)
+                    continue;
+                auto project_items = provider->provide(project_ctx, *shard, tok);
+                all_items.insert(all_items.end(),
+                                 std::make_move_iterator(project_items.begin()),
+                                 std::make_move_iterator(project_items.end()));
+            }
         }
     } catch (const CompletionCancelled&) {
         return result; // return empty on cancellation
@@ -2756,8 +2821,15 @@ CompletionList CompletionEngine::complete(const lsTextDocumentPositionParams& pa
         all_items = fallback.provide(ctx, completion_index, dummy);
     }
 
-    const auto expected_names = enum_members_for_type(completion_index, ctx.expected_type);
-    const auto same_type_names = value_names_for_type(completion_index, ctx);
+    auto expected_names = enum_members_for_type(completion_index, ctx.expected_type);
+    auto same_type_names = value_names_for_type(completion_index, ctx);
+    for (const auto* shard : project_shards) {
+        if (!shard)
+            continue;
+        append_set(expected_names, enum_members_for_type(*shard, ctx.expected_type));
+        append_set(same_type_names, value_names_for_type(*shard, ctx));
+    }
+    dedupe_completion_items(all_items);
     rank_and_sort(all_items, ctx, local_names, expected_names, same_type_names);
     result.items = std::move(all_items);
     return result;

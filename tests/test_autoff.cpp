@@ -94,10 +94,8 @@ TEST_CASE("autowire uses cached extra-file modules", "[autowire]") {
     REQUIRE(state);
     REQUIRE(state->tree);
     auto index = build_dynamic_file_index(*state);
-    if (auto project = analyzer.extra_project_index())
-        index.merge(*project);
-
-    auto updated = autowire_apply(*state, index, AutowireOptions{});
+    auto updated = autowire_apply(*state, &index, analyzer.project_index_snapshot().get(),
+                                  AutowireOptions{});
     CHECK(updated.find("logic [7:0] child_dout;") != std::string::npos);
 
     std::filesystem::remove(extra_path);

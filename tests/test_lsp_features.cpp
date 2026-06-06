@@ -1,5 +1,6 @@
 #include "analyzer.hpp"
 #include "features/autofunc.hpp"
+#include "features/autoinst.hpp"
 #include "features/code_action.hpp"
 #include "features/hover.hpp"
 #include "features/signature_help.hpp"
@@ -7,6 +8,57 @@
 #include <catch2/catch_test_macros.hpp>
 #include <filesystem>
 #include <fstream>
+
+
+TEST_CASE("autoinst: skips module parameters from project index", "[autoinst]") {
+    const auto module_path = std::filesystem::temp_directory_path() /
+                             "lazyverilog_autoinst_param_memory.sv";
+    {
+        std::ofstream out(module_path);
+        out << R"SV(module memory #(
+    parameter WIDTH = 8
+)(
+    i_clk, address, i_data,
+    i_test, o_data, o_test,
+    o_test2, o_test3
+);
+input logic i_clk;
+input logic [WIDTH-1:0] address;
+input logic [WIDTH-1:0] i_data;
+input logic i_test;
+output logic [WIDTH-1:0] o_data;
+output logic o_test;
+output logic o_test2;
+output logic o_test3;
+endmodule
+)SV";
+    }
+
+    Analyzer analyzer;
+    analyzer.set_extra_files({module_path.string()});
+    analyzer.wait_for_background_index_idle();
+
+    const std::string uri = "file:///tmp/lazyverilog_autoinst_param_top.sv";
+    const std::string top = R"SV(module top;
+    memory u_mem2 ();
+endmodule
+)SV";
+    analyzer.open(uri, top);
+    auto state = analyzer.get_state(uri);
+    REQUIRE(state);
+
+    auto result = autoinst_impl(*state, 1, 12, nullptr,
+                                analyzer.project_index_snapshot().get());
+    REQUIRE(result.has_value());
+    CHECK(std::find(result->port_names.begin(), result->port_names.end(), "WIDTH") ==
+          result->port_names.end());
+    CHECK(std::find(result->port_names.begin(), result->port_names.end(), "i_clk") !=
+          result->port_names.end());
+
+    const auto formatted = format_autoinst(*result, top, AutoinstOptions{});
+    CHECK(formatted.find(".WIDTH") == std::string::npos);
+    CHECK(formatted.find(".i_clk") != std::string::npos);
+}
 
 TEST_CASE("hover: formats symbol info as markdown", "[hover]") {
     Analyzer analyzer;

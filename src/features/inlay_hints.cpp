@@ -24,8 +24,12 @@ static void overlay_modules(ModuleMap& modules, const SyntaxIndex& index) {
 static ModuleMap build_module_map(const Analyzer& analyzer) {
     ModuleMap modules;
 
-    if (auto project_index = analyzer.extra_project_index())
-        overlay_modules(modules, *project_index);
+    if (auto project_index = analyzer.project_index_snapshot()) {
+        for (const auto& [name, ref] : project_index->module_by_name) {
+            if (ref.shard && ref.module_index < ref.shard->modules.size())
+                modules[name] = ref.shard->modules[ref.module_index];
+        }
+    }
 
     analyzer.for_each_state(
         [&](const std::string&, const std::shared_ptr<const DocumentState>& state) {

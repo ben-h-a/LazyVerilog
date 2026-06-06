@@ -129,6 +129,8 @@ Config load_config(const std::filesystem::path& root, std::string* warning,
                     }
                 });
             }
+            if (auto v = (*d)["project_index_publish_debounce_ms"].value<int64_t>())
+                cfg.design.project_index_publish_debounce_ms = static_cast<int>(*v);
         }
 
         // [compilation]

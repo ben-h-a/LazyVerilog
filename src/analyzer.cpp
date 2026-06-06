@@ -48,7 +48,6 @@ void log_perf(std::string_view label, Clock::time_point start) {
 
 static std::string file_name_to_uri(std::string_view file_name, const std::string& fallback_uri);
 
-
 static int saturating_lsp_int(size_t value) {
     constexpr auto max_int = static_cast<size_t>(std::numeric_limits<int>::max());
     return value > max_int ? std::numeric_limits<int>::max() : static_cast<int>(value);
@@ -214,7 +213,7 @@ make_file_state_with_options(const std::filesystem::path& path,
         state->index.include_dependencies = state->include_dependencies;
     }
     collect_parse_diagnostics(*state, uri);
-    log_perf("make_file_state " + uri, start);
+    log_perf("make_file_state_with_options " + uri, start);
     return state;
 }
 
@@ -287,31 +286,6 @@ std::shared_ptr<DocumentState> Analyzer::make_state(const std::string& uri,
     return state;
 }
 
-std::shared_ptr<DocumentState> Analyzer::make_file_state(const std::filesystem::path& path) const {
-    std::vector<std::string> defines;
-    std::vector<std::string> include_dirs;
-    std::vector<OpenTextOverlay> open_overlays;
-    const auto normalized_path = normalize_filesystem_path(path).string();
-    {
-        std::lock_guard<std::mutex> lock(map_mutex_);
-        defines = defines_;
-        include_dirs = include_dirs_;
-        open_overlays.reserve(docs_.size());
-        for (const auto& [open_uri, open_state] : docs_) {
-            if (!open_state)
-                continue;
-            if (open_state->normalized_path == normalized_path)
-                continue;
-            open_overlays.push_back(OpenTextOverlay{
-                .uri = open_uri,
-                .path = open_state->normalized_path,
-                .state = open_state,
-            });
-        }
-    }
-    return make_file_state_with_options(path, defines, include_dirs, open_overlays);
-}
-
 void Analyzer::open(const std::string& uri, const std::string& text) {
     auto state = make_state(uri, text);
 
@@ -375,7 +349,7 @@ void Analyzer::change(const std::string& uri, const std::string& text) {
         }
 
         for (const auto& [extra_uri, entry] : extra_cache_) {
-            if (docs_.contains(extra_uri) || !index_depends_on_changed_uri(entry.index.include_dependencies))
+            if (docs_.contains(extra_uri) || !index_depends_on_changed_uri(entry.index ? entry.index->include_dependencies : std::vector<std::string>{}))
                 continue;
             background_pending_files_.push_front(entry.path);
             queued_dependent = true;
@@ -2124,13 +2098,18 @@ std::vector<std::pair<int, int>> Analyzer::find_occurrences(const std::string& u
     return result;
 }
 
+void Analyzer::set_project_index_publish_debounce_ms(int debounce_ms) {
+    std::lock_guard<std::mutex> lock(map_mutex_);
+    background_publish_debounce_ms_ = std::max(0, debounce_ms);
+}
+
 void Analyzer::set_defines(const std::vector<std::string>& defines) {
     std::lock_guard<std::mutex> lock(map_mutex_);
     defines_ = defines;
     // Invalidate extra-file cache so reopened files pick up the new defines.
     extra_cache_.clear();
     invalidate_extra_snapshots_locked();
-    clear_extra_project_index_locked();
+    clear_project_index_snapshot_locked();
     if (!extra_files_.empty())
         schedule_background_reindex_locked();
 }
@@ -2149,7 +2128,7 @@ void Analyzer::set_include_dirs(const std::vector<std::string>& include_dirs) {
     // UVM include directory would not be visible until the next source edit.
     extra_cache_.clear();
     invalidate_extra_snapshots_locked();
-    clear_extra_project_index_locked();
+    clear_project_index_snapshot_locked();
     if (!extra_files_.empty())
         schedule_background_reindex_locked();
 }
@@ -2170,7 +2149,7 @@ void Analyzer::set_extra_files(const std::vector<std::string>& paths,
         extra_file_set_.insert(path);
     extra_cache_.clear();
     invalidate_extra_snapshots_locked();
-    clear_extra_project_index_locked();
+    clear_project_index_snapshot_locked();
 
     // Always index configured project files asynchronously, regardless of
     // whether they came from a .f file or an explicit path list.  This keeps
@@ -2212,7 +2191,7 @@ void Analyzer::set_project_config(const std::vector<std::string>& defines,
 
     extra_cache_.clear();
     invalidate_extra_snapshots_locked();
-    clear_extra_project_index_locked();
+    clear_project_index_snapshot_locked();
 
     if (!extra_files_.empty())
         schedule_background_reindex_locked();
@@ -2328,7 +2307,7 @@ Analyzer::build_extra_file_snapshot_locked() const {
                 .path = entry.path,
                 .uri = entry.uri,
                 .state = it->second,
-                .index = entry.index,
+                .index = entry.index ? *entry.index : SyntaxIndex{},
             });
             continue;
         }
@@ -2336,7 +2315,7 @@ Analyzer::build_extra_file_snapshot_locked() const {
             .path = entry.path,
             .uri = entry.uri,
             .state = nullptr,
-            .index = entry.index,
+            .index = entry.index ? *entry.index : SyntaxIndex{},
         });
     }
     return result;
@@ -2350,7 +2329,7 @@ Analyzer::build_extra_index_snapshot_locked() const {
         result->push_back(ExtraIndexInfo{
             .path = entry.path,
             .uri = entry.uri,
-            .index = entry.index,
+            .index = entry.index ? *entry.index : SyntaxIndex{},
         });
     }
     return result;
@@ -2384,17 +2363,14 @@ Analyzer::extra_index_snapshot_ptr() const {
     return extra_index_snapshot_cache_;
 }
 
-std::shared_ptr<const SyntaxIndex> Analyzer::extra_project_index() const {
+std::shared_ptr<const ProjectIndexSnapshot> Analyzer::project_index_snapshot() const {
     const auto start = Clock::now();
     std::lock_guard<std::mutex> lock(map_mutex_);
 
-    // Request path is read-only: the background/index-update path publishes
-    // immutable merged ProjectIndex snapshots.  If the worker has not published
-    // yet, return an empty snapshot rather than merging shards synchronously.
-    if (!extra_project_index_cache_)
-        extra_project_index_cache_ = std::make_shared<SyntaxIndex>();
-    log_perf("extra_project_index files=" + std::to_string(extra_cache_.size()), start);
-    return extra_project_index_cache_;
+    if (!project_index_snapshot_cache_)
+        project_index_snapshot_cache_ = std::make_shared<ProjectIndexSnapshot>();
+    log_perf("project_index_snapshot shards=" + std::to_string(project_index_snapshot_cache_->shards.size()), start);
+    return project_index_snapshot_cache_;
 }
 
 void Analyzer::set_project_index_publish_callback(std::function<void()> callback) {
@@ -2727,6 +2703,8 @@ void Analyzer::schedule_background_reindex_locked() const {
 
 void Analyzer::schedule_background_project_publish_locked() const {
     background_publish_requested_ = true;
+    background_publish_due_time_ = Clock::now() +
+        std::chrono::milliseconds(std::max(0, background_publish_debounce_ms_));
     start_background_indexer_locked();
     background_cv_.notify_all();
 }
@@ -2750,10 +2728,22 @@ void Analyzer::background_index_loop(std::stop_token stop) const {
             if (stop.stop_requested())
                 break;
 
-            if (background_publish_requested_) {
+            if (background_publish_requested_ && background_pending_files_.empty()) {
+                const auto now = Clock::now();
+                if (background_publish_due_time_ > now) {
+                    background_cv_.wait_until(lock, stop, background_publish_due_time_, [&] {
+                        return stop.stop_requested() || !background_pending_files_.empty() ||
+                               background_publish_due_time_ <= Clock::now();
+                    });
+                    continue;
+                }
+
                 background_publish_requested_ = false;
-                publish_extra_project_index_locked();
+                auto publish_callback = publish_project_index_snapshot_locked();
                 background_cv_.notify_all();
+                lock.unlock();
+                if (publish_callback)
+                    publish_callback();
                 continue;
             }
 
@@ -2806,7 +2796,7 @@ void Analyzer::background_index_loop(std::stop_token stop) const {
                         extra_cache_[uri] = ExtraFileCacheEntry{
                             .path = path_string,
                             .uri = uri,
-                            .index = std::move(live_index),
+                            .index = std::make_shared<SyntaxIndex>(std::move(live_index)),
                         };
                         invalidate_extra_snapshots_locked();
                         background_publish_requested_ = true;
@@ -2850,7 +2840,7 @@ void Analyzer::background_index_loop(std::stop_token stop) const {
             extra_cache_[uri] = ExtraFileCacheEntry{
                 .path = path_string,
                 .uri = uri,
-                .index = std::move(committed_index),
+                .index = std::make_shared<SyntaxIndex>(std::move(committed_index)),
             };
             invalidate_extra_snapshots_locked();
 
@@ -2869,18 +2859,42 @@ void Analyzer::background_index_loop(std::stop_token stop) const {
     }
 }
 
-void Analyzer::publish_extra_project_index_locked() const {
-    auto merged = std::make_shared<SyntaxIndex>();
+std::function<void()> Analyzer::publish_project_index_snapshot_locked() const {
+    auto snapshot = std::make_shared<ProjectIndexSnapshot>();
+    snapshot->shards.reserve(extra_cache_.size());
+
     for (const auto& [key, entry] : extra_cache_) {
-        merged->merge(entry.index);
+        if (!entry.index)
+            continue;
+
+        snapshot->shards.push_back(ProjectIndexSnapshot::Shard{
+            .path = entry.path,
+            .uri = entry.uri,
+            .index = entry.index,
+        });
+
+        // Lightweight global module lookup.  Keep first definition wins to
+        // preserve the historical merge behavior for duplicate module names.
+        for (size_t i = 0; i < entry.index->modules.size(); ++i) {
+            const auto& module = entry.index->modules[i];
+            snapshot->module_by_name.try_emplace(module.name, ProjectIndexModuleRef{
+                .shard = entry.index,
+                .module_index = i,
+            });
+        }
     }
-    extra_project_index_cache_ = std::move(merged);
-    if (project_index_publish_callback_)
-        project_index_publish_callback_();
+
+    project_index_snapshot_cache_ = std::move(snapshot);
+
+    // Return the callback to the caller instead of invoking it here.  This
+    // function is called while map_mutex_ is held; endpoint notifications can
+    // block on client or logging behavior and must not run under the analyzer
+    // mutex.
+    return project_index_publish_callback_;
 }
 
-void Analyzer::clear_extra_project_index_locked() const {
-    extra_project_index_cache_.reset();
+void Analyzer::clear_project_index_snapshot_locked() const {
+    project_index_snapshot_cache_.reset();
 }
 
 void Analyzer::update_extra_cache_for_live_state_locked(
@@ -2900,13 +2914,15 @@ void Analyzer::update_extra_cache_for_live_state_locked(
     extra_cache_[uri] = ExtraFileCacheEntry{
         .path = path_string,
         .uri = uri,
-        .index = std::move(index),
+        .index = std::make_shared<SyntaxIndex>(std::move(index)),
     };
     invalidate_extra_snapshots_locked();
 
-    // This is the Option-B shard replacement point: b.sv's shard is replaced
-    // when b.sv receives didOpen/didChange.  The merged project view is
-    // published asynchronously by the background worker; request handlers keep
-    // seeing the previous snapshot until the worker finishes the merge.
+    // The per-file shard changed, so the published merged project snapshot is
+    // stale until the background indexer republishes it.  Publish asynchronously
+    // instead of merging synchronously on the edit/open path; this preserves the
+    // HPC-friendly rule that request/edit handlers do not rebuild whole-project
+    // state inline.
     schedule_background_project_publish_locked();
+
 }

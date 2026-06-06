@@ -20,6 +20,7 @@ TEST_CASE("config: missing file returns defaults", "[config]") {
     Config cfg = load_config(dir);
     CHECK(cfg.design.vcode.empty());
     CHECK(cfg.design.define.empty());
+    CHECK(cfg.design.project_index_publish_debounce_ms == 250);
     CHECK(cfg.compilation.background_compilation == false);
     CHECK(cfg.compilation.background_compilation_threads == 1);
     CHECK(cfg.compilation.background_compilation_debounce_ms == 1500);
@@ -53,6 +54,7 @@ TEST_CASE("config: parse all sections correctly", "[config]") {
 [design]
 vcode = "my.f"
 define = ["RTL_SIM", "FAST_MODEL"]
+project_index_publish_debounce_ms = 375
 
 [compilation]
 background_compilation = true
@@ -199,6 +201,7 @@ autoarg_on_save = true
     REQUIRE(cfg.design.define.size() == 2);
     CHECK(cfg.design.define[0] == "RTL_SIM");
     CHECK(cfg.design.define[1] == "FAST_MODEL");
+    CHECK(cfg.design.project_index_publish_debounce_ms == 375);
 
     CHECK(cfg.compilation.background_compilation == true);
     CHECK(cfg.compilation.background_compilation_threads == 2);

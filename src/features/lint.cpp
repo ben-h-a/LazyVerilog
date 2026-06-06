@@ -244,6 +244,7 @@ struct LintVisitor : public SyntaxVisitor<LintVisitor> {
     const LintConfig&          cfg;
     const CurrentModulePortMap& current_modules;
     const SyntaxIndex*         project_index;
+    const ProjectIndexSnapshot* project_snapshot;
     SourceManager&             sm;
     std::vector<ParseDiagInfo> diags;
     bool in_always_ff_{false};
@@ -266,8 +267,9 @@ struct LintVisitor : public SyntaxVisitor<LintVisitor> {
     CachedRegex localparam_re_;
 
     LintVisitor(const LintConfig& c, const CurrentModulePortMap& current,
-                const SyntaxIndex* project, SourceManager& s, std::string file_stem)
-        : cfg(c), current_modules(current), project_index(project), sm(s),
+                const SyntaxIndex* project, const ProjectIndexSnapshot* snapshot,
+                SourceManager& s, std::string file_stem)
+        : cfg(c), current_modules(current), project_index(project), project_snapshot(snapshot), sm(s),
           file_stem_(std::move(file_stem)) {
         if (cfg.naming.enable) {
             module_re_      = compile_re(cfg.naming.module_pattern);
@@ -377,9 +379,17 @@ struct LintVisitor : public SyntaxVisitor<LintVisitor> {
     }
 
     const ModuleEntry* find_project_module_entry(std::string_view module_name) const {
+        const std::string key(module_name);
+        if (project_snapshot) {
+            const auto it = project_snapshot->module_by_name.find(key);
+            if (it == project_snapshot->module_by_name.end() || !it->second.shard ||
+                it->second.module_index >= it->second.shard->modules.size())
+                return nullptr;
+            return &it->second.shard->modules[it->second.module_index];
+        }
         if (!project_index)
             return nullptr;
-        const auto it = project_index->module_by_name.find(std::string(module_name));
+        const auto it = project_index->module_by_name.find(key);
         if (it == project_index->module_by_name.end() || it->second >= project_index->modules.size())
             return nullptr;
         return &project_index->modules[it->second];
@@ -672,8 +682,9 @@ struct LintVisitor : public SyntaxVisitor<LintVisitor> {
     }
 };
 
-std::vector<ParseDiagInfo> run_lint(const DocumentState& state, const LintConfig& config,
-                                    const SyntaxIndex* project_index) {
+static std::vector<ParseDiagInfo> run_lint_impl(const DocumentState& state, const LintConfig& config,
+                                                const SyntaxIndex* project_index,
+                                                const ProjectIndexSnapshot* project_snapshot) {
     std::vector<ParseDiagInfo> diags;
     if (!config.enable)
         return diags;
@@ -719,11 +730,21 @@ std::vector<ParseDiagInfo> run_lint(const DocumentState& state, const LintConfig
         state.tree->root().visit(collector);
         current_modules = std::move(collector.modules);
     }
-    LintVisitor v(config, current_modules, project_index, sm, file_stem_from_uri(state.uri));
+    LintVisitor v(config, current_modules, project_index, project_snapshot, sm, file_stem_from_uri(state.uri));
     state.tree->root().visit(v);
     v.diags.erase(std::remove_if(v.diags.begin(), v.diags.end(), [&](const auto& diag) {
         return !diag.uri.empty() && diag.uri != state.uri;
     }), v.diags.end());
     diags.insert(diags.end(), v.diags.begin(), v.diags.end());
     return diags;
+}
+
+std::vector<ParseDiagInfo> run_lint(const DocumentState& state, const LintConfig& config,
+                                    const SyntaxIndex* project_index) {
+    return run_lint_impl(state, config, project_index, nullptr);
+}
+
+std::vector<ParseDiagInfo> run_lint(const DocumentState& state, const LintConfig& config,
+                                    const ProjectIndexSnapshot* project_index) {
+    return run_lint_impl(state, config, nullptr, project_index);
 }

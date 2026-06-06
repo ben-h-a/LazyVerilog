@@ -6,12 +6,14 @@ Design-wide features (go-to-definition, find references, inlay hints, workspace 
 [design]
 vcode = "demo/vcode.f"
 define = ["RTL_SIM"]
+project_index_publish_debounce_ms = 250
 ```
 
 | Option | Type | Description |
 |--------|------|-------------|
 | `vcode` | string | Path to filelist (`.f`) relative to the `lazyverilog.toml` file |
 | `define` | string[] | Preprocessor defines passed to the parser for all design files |
+| `project_index_publish_debounce_ms` | integer | Debounce, in milliseconds, before publishing a merged project index after live listed-file edits. Higher values reduce background CPU/diagnostic churn while typing; lower values refresh cross-file diagnostics sooner. |
 
 ## Filelist format
 

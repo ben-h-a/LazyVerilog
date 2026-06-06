@@ -376,3 +376,19 @@ struct SyntaxIndex {
     std::string source_uri(SourceFileID file_id) const;
     void rebuild_reference_location_lookup();
 };
+
+struct ProjectIndexModuleRef {
+    std::shared_ptr<const SyntaxIndex> shard;
+    size_t module_index{0};
+};
+
+struct ProjectIndexSnapshot {
+    struct Shard {
+        std::string path;
+        std::string uri;
+        std::shared_ptr<const SyntaxIndex> index;
+    };
+
+    std::vector<Shard> shards;
+    std::unordered_map<std::string, ProjectIndexModuleRef> module_by_name;
+};

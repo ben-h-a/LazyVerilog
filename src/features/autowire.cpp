@@ -211,6 +211,22 @@ static std::optional<PortEntry> project_port(const SyntaxIndex& syntax_index,
     return module.ports[port_it->second];
 }
 
+static std::optional<PortEntry> project_port(const ProjectIndexSnapshot& snapshot,
+                                             const std::string& module_name,
+                                             const std::string& port_name) {
+    const auto module_it = snapshot.module_by_name.find(module_name);
+    if (module_it == snapshot.module_by_name.end() || !module_it->second.shard)
+        return std::nullopt;
+    const auto& shard = *module_it->second.shard;
+    if (module_it->second.module_index >= shard.modules.size())
+        return std::nullopt;
+    const auto& module = shard.modules[module_it->second.module_index];
+    const auto port_it = module.port_by_name.find(port_name);
+    if (port_it == module.port_by_name.end() || port_it->second >= module.ports.size())
+        return std::nullopt;
+    return module.ports[port_it->second];
+}
+
 static std::unordered_map<std::string, PortEntry>
 current_ast_ports_for_module(const DocumentState& state, const std::string& module_name) {
     std::unordered_map<std::string, PortEntry> ports;
@@ -348,7 +364,8 @@ current_ast_instance_connections(const DocumentState& state, LineRange parent_ra
 }
 
 static std::vector<InstSignal> collect_inst_signals(const DocumentState& state,
-                                                    const SyntaxIndex& syntax_index,
+                                                    const SyntaxIndex* opened_index,
+                                                    const ProjectIndexSnapshot* project_index,
                                                     const std::string& parent_module,
                                                     LineRange parent_range) {
     std::vector<InstSignal> results;
@@ -376,8 +393,10 @@ static std::vector<InstSignal> collect_inst_signals(const DocumentState& state,
             std::optional<PortEntry> port;
             if (auto it = current_ports.find(port_name); it != current_ports.end())
                 port = it->second;
-            else
-                port = project_port(syntax_index, module_name, port_name);
+            else if (opened_index)
+                port = project_port(*opened_index, module_name, port_name);
+            if (!port && project_index)
+                port = project_port(*project_index, module_name, port_name);
 
             if (port) {
                 direction = port->direction;
@@ -521,7 +540,8 @@ static std::string format_declarations(std::vector<SignalDecl> signals, const Au
 // ── Main entry points ─────────────────────────────────────────────────────────
 
 static std::vector<SignalDecl> compute_new_signals(const DocumentState& state,
-                                                   const SyntaxIndex& syntax_index,
+                                                   const SyntaxIndex* opened_index,
+                                                   const ProjectIndexSnapshot* project_index,
                                                    int target_line) {
     if (!state.tree)
         return {};
@@ -543,8 +563,8 @@ static std::vector<SignalDecl> compute_new_signals(const DocumentState& state,
     state.tree->root().visit(comb_coll);
 
     // Collect instantiation signals in the same parent module.
-    auto inst_sigs = collect_inst_signals(state, syntax_index, module_finder.name,
-                                          module_finder.range);
+    auto inst_sigs = collect_inst_signals(state, opened_index, project_index,
+                                          module_finder.name, module_finder.range);
 
     // Build result: filter out already declared
     std::set<std::string> seen;
@@ -582,9 +602,10 @@ static std::vector<SignalDecl> compute_new_signals(const DocumentState& state,
     return result;
 }
 
-std::string autowire_apply(const DocumentState& state, const SyntaxIndex& syntax_index,
+std::string autowire_apply(const DocumentState& state, const SyntaxIndex* opened_index,
+                           const ProjectIndexSnapshot* project_index,
                            const AutowireOptions& options, int target_line) {
-    auto new_sigs = compute_new_signals(state, syntax_index, target_line);
+    auto new_sigs = compute_new_signals(state, opened_index, project_index, target_line);
     if (new_sigs.empty())
         return state.text;
 
@@ -611,9 +632,10 @@ std::string autowire_apply(const DocumentState& state, const SyntaxIndex& syntax
 }
 
 std::vector<std::string> autowire_preview(const DocumentState& state,
-                                          const SyntaxIndex& syntax_index,
+                                          const SyntaxIndex* opened_index,
+                                          const ProjectIndexSnapshot* project_index,
                                           const AutowireOptions& options, int target_line) {
-    auto new_sigs = compute_new_signals(state, syntax_index, target_line);
+    auto new_sigs = compute_new_signals(state, opened_index, project_index, target_line);
     std::vector<std::string> out;
     if (!new_sigs.empty()) {
         out.push_back("Will add:");
@@ -631,4 +653,15 @@ std::vector<std::string> autowire_preview(const DocumentState& state,
         }
     }
     return out;
+}
+
+std::string autowire_apply(const DocumentState& state, const SyntaxIndex& opened_index,
+                           const AutowireOptions& options, int target_line) {
+    return autowire_apply(state, &opened_index, nullptr, options, target_line);
+}
+
+std::vector<std::string> autowire_preview(const DocumentState& state,
+                                          const SyntaxIndex& opened_index,
+                                          const AutowireOptions& options, int target_line) {
+    return autowire_preview(state, &opened_index, nullptr, options, target_line);
 }

@@ -56,6 +56,14 @@ static std::string simple_identifier_from_expr(const PropertyExprSyntax* expr) {
     return {};
 }
 
+static bool is_instance_port_direction(std::string_view direction) {
+    // Module parameters are stored alongside ports in SyntaxIndex::ModuleEntry
+    // so parameter-completion and signature-help can share the same compact
+    // module facts.  AutoInst, however, emits the instance *port* connection
+    // list and must not turn #(parameter WIDTH=...) into .WIDTH(...).
+    return direction != "parameter" && direction != "localparam";
+}
+
 static void push_unique_port(std::vector<std::string>& ports, std::unordered_set<std::string>& seen,
                              std::string name) {
     if (!name.empty() && seen.insert(name).second)
@@ -106,9 +114,13 @@ static std::vector<std::string> ports_for_module_in_current_ast(const DocumentSt
 
         void handle(const PortDeclarationSyntax& node) {
             if (in_target) {
-                for (const auto* declarator : node.declarators) {
-                    if (declarator)
-                        push_unique_port(ports, seen, std::string(declarator->name.valueText()));
+                const std::string direction = node.header ? std::string(node.header->getFirstToken().valueText())
+                                                          : std::string{};
+                if (is_instance_port_direction(direction)) {
+                    for (const auto* declarator : node.declarators) {
+                        if (declarator)
+                            push_unique_port(ports, seen, std::string(declarator->name.valueText()));
+                    }
                 }
             }
             if (!done)
@@ -121,8 +133,8 @@ static std::vector<std::string> ports_for_module_in_current_ast(const DocumentSt
     return ports;
 }
 
-static std::vector<std::string> ports_for_module_in_project_index(const SyntaxIndex& syntax_index,
-                                                                  const std::string& module_type) {
+static std::vector<std::string> ports_for_module_in_syntax_index(const SyntaxIndex& syntax_index,
+                                                                 const std::string& module_type) {
     const ModuleEntry* mod_entry = nullptr;
     auto module_it = syntax_index.module_by_name.find(module_type);
     if (module_it != syntax_index.module_by_name.end() &&
@@ -133,15 +145,40 @@ static std::vector<std::string> ports_for_module_in_project_index(const SyntaxIn
 
     std::vector<std::string> port_names;
     port_names.reserve(mod_entry->ports.size());
-    for (const auto& p : mod_entry->ports)
+    for (const auto& p : mod_entry->ports) {
+        if (!is_instance_port_direction(p.direction))
+            continue;
         port_names.push_back(p.name);
+    }
+    return port_names;
+}
+
+static std::vector<std::string> ports_for_module_in_project_snapshot(
+    const ProjectIndexSnapshot& snapshot, const std::string& module_type) {
+    const auto module_it = snapshot.module_by_name.find(module_type);
+    if (module_it == snapshot.module_by_name.end() || !module_it->second.shard)
+        return {};
+
+    const auto& shard = *module_it->second.shard;
+    if (module_it->second.module_index >= shard.modules.size())
+        return {};
+
+    const auto& mod_entry = shard.modules[module_it->second.module_index];
+    std::vector<std::string> port_names;
+    port_names.reserve(mod_entry.ports.size());
+    for (const auto& p : mod_entry.ports) {
+        if (!is_instance_port_direction(p.direction))
+            continue;
+        port_names.push_back(p.name);
+    }
     return port_names;
 }
 
 // ── Main implementation ───────────────────────────────────────────────────────
 
 std::optional<AutoinstResult> autoinst_impl(const DocumentState& state, int line, int /*col*/,
-                                            const SyntaxIndex& syntax_index) {
+                                            const SyntaxIndex* opened_index,
+                                            const ProjectIndexSnapshot* project_index) {
     if (!state.tree)
         return std::nullopt;
 
@@ -186,8 +223,10 @@ std::optional<AutoinstResult> autoinst_impl(const DocumentState& state, int line
         // current file, extract its ports directly from the live SyntaxTree.
         // Only fall back to the project index when same-file AST lookup fails.
         auto port_names = ports_for_module_in_current_ast(state, module_type);
-        if (port_names.empty())
-            port_names = ports_for_module_in_project_index(syntax_index, module_type);
+        if (port_names.empty() && opened_index)
+            port_names = ports_for_module_in_syntax_index(*opened_index, module_type);
+        if (port_names.empty() && project_index)
+            port_names = ports_for_module_in_project_snapshot(*project_index, module_type);
 
         if (port_names.empty())
             return std::nullopt;
