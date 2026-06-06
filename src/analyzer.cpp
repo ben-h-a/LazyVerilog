@@ -1573,13 +1573,12 @@ std::optional<Location> Analyzer::definition_of(const std::string& uri, int line
     if (!state || !state->tree)
         return std::nullopt;
 
-    auto extra = extra_file_snapshots();
-    // Remove the current document from extra to avoid searching it twice
-    // (definition_of_state already searches it as the primary doc).
-    extra.erase(std::remove_if(extra.begin(), extra.end(),
-                               [&uri](const ExtraFileInfo& e) { return e.uri == uri; }),
-                extra.end());
-    auto result = definition_of_state(*state, uri, line, col, extra);
+    auto extra = extra_file_snapshot_ptr();
+    // Skip the current document during extra-file iteration to avoid searching
+    // it twice.  The snapshot itself is shared and immutable, so this remains
+    // O(1) instead of copying and erase/removing a potentially large filelist
+    // vector on every goto-definition request.
+    auto result = definition_of_state(*state, uri, line, col, *extra, &uri);
     log_perf("definition_of " + uri + ":" + std::to_string(line) + ":" + std::to_string(col),
              start);
     return result;
