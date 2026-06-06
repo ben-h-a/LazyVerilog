@@ -20,18 +20,6 @@ static std::string tok_str(const slang::parsing::Token& token) {
     return std::string(token.valueText());
 }
 
-static std::string simple_identifier_from_expr(const PropertyExprSyntax* expr) {
-    if (!expr)
-        return {};
-    if (const auto* prop = expr->as_if<SimplePropertyExprSyntax>()) {
-        if (const auto* seq = prop->expr->as_if<SimpleSequenceExprSyntax>()) {
-            if (const auto* ident = seq->expr->as_if<IdentifierNameSyntax>())
-                return tok_str(ident->identifier);
-        }
-    }
-    return {};
-}
-
 static std::pair<int, int> source_range_lines(const slang::SourceManager& sm,
                                               slang::SourceRange range) {
     if (!range.start().valid() || !range.end().valid())

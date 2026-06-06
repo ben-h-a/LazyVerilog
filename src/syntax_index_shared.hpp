@@ -13,6 +13,10 @@
 
 namespace slang {
 class SourceManager;
+namespace syntax {
+class ExpressionSyntax;
+class PropertyExprSyntax;
+}
 }
 
 /// Convert a SourceManager file name to a URI.  slang may already store a URI
@@ -55,6 +59,16 @@ std::string render_syntax_node_text(const slang::SourceManager& sm,
 std::string symbol_canonical(std::string kind, std::string scope, std::string name);
 bool is_module_value_kind(std::string_view kind);
 std::string canonical_type_name_from_text(std::string_view type);
+
+/// Return the plain identifier name represented by a syntax expression, or an
+/// empty string if the expression is more complex than a single identifier.
+std::string simple_identifier_from_expr(const slang::syntax::ExpressionSyntax* expr);
+
+/// Property-expression wrapper used by named port / parameter connections.
+/// It intentionally accepts only the simple property -> simple sequence ->
+/// identifier shape so callers do not accidentally treat arbitrary expressions
+/// as connection signal names.
+std::string simple_identifier_from_expr(const slang::syntax::PropertyExprSyntax* expr);
 std::vector<std::string> collect_include_dependency_uris(const slang::SourceManager& sm,
                                                          const std::string& owning_uri);
 

@@ -166,6 +166,25 @@ bool is_module_value_kind(std::string_view kind) {
            kind == "port";
 }
 
+
+std::string simple_identifier_from_expr(const slang::syntax::ExpressionSyntax* expr) {
+    if (!expr)
+        return {};
+    if (const auto* ident = expr->as_if<IdentifierNameSyntax>())
+        return std::string(ident->identifier.valueText());
+    return {};
+}
+
+std::string simple_identifier_from_expr(const slang::syntax::PropertyExprSyntax* expr) {
+    if (!expr)
+        return {};
+    if (const auto* prop = expr->as_if<SimplePropertyExprSyntax>()) {
+        if (const auto* seq = prop->expr->as_if<SimpleSequenceExprSyntax>())
+            return simple_identifier_from_expr(seq->expr);
+    }
+    return {};
+}
+
 std::string canonical_type_name_from_text(std::string_view type) {
     // Keep this deliberately syntactic and cheap.  The index cannot rely on a
     // full semantic type checker for closed files, so for member references we
@@ -230,14 +249,6 @@ std::string canonical_type_name_for_references(std::string_view type) {
     while (begin > 0 && syntax_fragment_edge_is_wordlike(type[begin - 1]))
         --begin;
     return std::string(type.substr(begin, end - begin));
-}
-
-std::string simple_identifier_from_expr_node(const ExpressionSyntax* expr) {
-    if (!expr)
-        return {};
-    if (const auto* ident = expr->as_if<IdentifierNameSyntax>())
-        return std::string(ident->identifier.valueText());
-    return {};
 }
 
 slang::parsing::Token last_identifier_token(const SyntaxNode& node) {
@@ -928,7 +939,7 @@ void collect_reference_occurrences(const SyntaxNode& root, SyntaxIndex& index,
 
         void handle(const MemberAccessExpressionSyntax& node) {
             const std::string field_name(node.name.valueText());
-            const std::string object_name = simple_identifier_from_expr_node(node.left);
+            const std::string object_name = simple_identifier_from_expr(node.left);
             if (!current_module.empty() && !field_name.empty() && !object_name.empty()) {
                 const auto value_it = module_value_types.find(current_module + "\n" + object_name);
                 if (value_it != module_value_types.end()) {

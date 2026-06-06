@@ -175,19 +175,6 @@ std::string port_signal_decl_type(const slang::SourceManager& sm, const PortHead
     return {};
 }
 
-std::string simple_identifier_from_expr(const PropertyExprSyntax* expr) {
-    if (!expr)
-        return {};
-    if (const auto* prop = expr->as_if<SimplePropertyExprSyntax>()) {
-        if (const auto* seq = prop->expr->as_if<SimpleSequenceExprSyntax>()) {
-            if (const auto* ident = seq->expr->as_if<IdentifierNameSyntax>())
-                return tok_text(ident->identifier);
-        }
-    }
-    return {};
-}
-
-
 int instance_end_line(const std::vector<std::string_view>& lines, int start_line) {
     for (int i = start_line; i < (int)lines.size(); ++i) {
         if (lines[(size_t)i].find(';') != std::string_view::npos)

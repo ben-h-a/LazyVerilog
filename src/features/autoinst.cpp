@@ -1,5 +1,6 @@
 #include "autoinst.hpp"
 #include "../string_utils.hpp"
+#include "../syntax_index_shared.hpp"
 #include <algorithm>
 #include <unordered_set>
 #include <slang/syntax/AllSyntax.h>
@@ -42,18 +43,6 @@ static int find_inst_end(const std::vector<std::string>& lines, int start_line) 
             return i;
     }
     return (int)lines.size() - 1;
-}
-
-static std::string simple_identifier_from_expr(const PropertyExprSyntax* expr) {
-    if (!expr)
-        return {};
-    if (const auto* prop = expr->as_if<SimplePropertyExprSyntax>()) {
-        if (const auto* seq = prop->expr->as_if<SimpleSequenceExprSyntax>()) {
-            if (const auto* id = seq->expr->as_if<IdentifierNameSyntax>())
-                return std::string(id->identifier.valueText());
-        }
-    }
-    return {};
 }
 
 static bool is_instance_port_direction(std::string_view direction) {
