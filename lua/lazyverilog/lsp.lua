@@ -224,30 +224,70 @@ local function _auto_install(on_done)
 
 	local bin_dir  = _bin_dir()
 	local bin_path = _managed_bin()
-	local asset    = "lazyverilog-lsp-" .. RELEASE_VERSION .. "-" .. platform
-	local url      = RELEASE_BASE_URL .. "/" .. RELEASE_VERSION .. "/" .. asset
 
 	vim.fn.mkdir(bin_dir, "p")
-	vim.notify("[LazyVerilog] downloading server binary…", vim.log.levels.INFO)
-	vim.system({ "curl", "-fsSL", "-o", bin_path, url }, {}, function(dl)
-		if dl.code ~= 0 then
-			_fail_install_waiters(
-				"[LazyVerilog] download failed: " .. (dl.stderr or "unknown error")
-			)
-			return
-		end
 
-		vim.system({ "chmod", "+x", bin_path }, {}, function(ch)
-			if ch.code ~= 0 then
-				_fail_install_waiters("[LazyVerilog] chmod +x failed")
+	local function _finish()
+		install_in_progress = false
+		vim.schedule(function()
+			vim.notify("[LazyVerilog] server installed", vim.log.levels.INFO)
+			_flush_install_waiters(bin_path)
+		end)
+	end
+
+	local function _download(asset_platform, on_success, on_compat_fail)
+		local asset = "lazyverilog-lsp-" .. RELEASE_VERSION .. "-" .. asset_platform
+		local url   = RELEASE_BASE_URL .. "/" .. RELEASE_VERSION .. "/" .. asset
+		vim.system({ "curl", "-fsSL", "-o", bin_path, url }, {}, function(dl)
+			if dl.code ~= 0 then
+				_fail_install_waiters(
+					"[LazyVerilog] download failed: " .. (dl.stderr or "unknown error")
+				)
 				return
 			end
-
-			install_in_progress = false
-			vim.schedule(function()
-				vim.notify("[LazyVerilog] server installed", vim.log.levels.INFO)
-				_flush_install_waiters(bin_path)
+			vim.system({ "chmod", "+x", bin_path }, {}, function(ch)
+				if ch.code ~= 0 then
+					_fail_install_waiters("[LazyVerilog] chmod +x failed")
+					return
+				end
+				-- On Linux, verify the binary's shared-library dependencies are
+				-- satisfied before declaring success.  This catches glibc version
+				-- mismatches without executing the server (which reads JSON-RPC
+				-- from stdin and would hang).  macOS ships dyld which handles
+				-- compatibility differently; skip the check there.
+				local uname = vim.uv.os_uname()
+				if uname.sysname:lower():find("linux") then
+					vim.system({ "ldd", bin_path }, {}, function(ldd)
+						if ldd.stdout and ldd.stdout:find("not found") then
+							on_compat_fail("binary not compatible with this system (missing libs)")
+							return
+						end
+						on_success()
+					end)
+				else
+					on_success()
+				end
 			end)
+		end)
+	end
+
+	-- Linux has static fallback builds; macOS does not.
+	local static_platform = platform:find("^linux") and (platform .. "-static") or nil
+
+	vim.notify("[LazyVerilog] downloading server binary…", vim.log.levels.INFO)
+	_download(platform, _finish, function(err)
+		if not static_platform then
+			_fail_install_waiters("[LazyVerilog] " .. err)
+			return
+		end
+		vim.schedule(function()
+			vim.notify(
+				"[LazyVerilog] " .. err .. ", trying static build…",
+				vim.log.levels.WARN
+			)
+		end)
+		_download(static_platform, _finish, function(err2)
+			_fail_install_waiters("[LazyVerilog] " .. err2)
 		end)
 	end)
 end
