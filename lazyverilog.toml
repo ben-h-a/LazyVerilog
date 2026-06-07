@@ -1,7 +1,6 @@
 [design]
 vcode = "demo/vcode.f"
 define = ["RTL_SIM"]   # preprocessor defines passed to slang for parsing
-project_index_publish_debounce_ms = 250 # debounce merged project-index publish after live file edits
 
 [compilation]
 background_compilation = false # run semantic compilation in background workers (slower, richer diagnostics)
@@ -10,7 +9,8 @@ background_compilation_debounce_ms = 10000 # wait after edits before starting se
 log_timing = false              # emit [compilation] timing lines to the LSP log for profiling
 
 [lint]
-enable = true   # global kill-switch; false disables all lint rules
+enable = true                  # global kill-switch; false disables all lint rules
+diagnostic_debounce_ms = 150   # wait after last edit before running reparse + lint; 0 = synchronous
 
 
 [lint.naming]

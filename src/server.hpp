@@ -3,6 +3,7 @@
 #include "config.hpp"
 #include <memory>
 #include <mutex>
+#include <stop_token>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -27,6 +28,8 @@ class LazyVerilogServer {
     void request_inlay_hint_refresh();
     void configure_background_compiler();
     void schedule_background_compilation();
+    void schedule_diagnostics(const std::string& uri);
+    void diag_debounce_loop(std::stop_token stop);
 
     std::filesystem::path root_;
     bool config_found_{false};

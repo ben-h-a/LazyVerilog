@@ -7,10 +7,6 @@
 struct DesignConfig {
     std::string vcode;               // .f filelist path
     std::vector<std::string> define; // preprocessor defines
-    // Debounce merged project-index publishes after live listed-file edits.
-    // The LSP server applies this to Analyzer; standalone tests that instantiate
-    // Analyzer directly keep Analyzer's zero-debounce default unless they opt in.
-    int project_index_publish_debounce_ms{250};
 };
 
 struct CompilationConfig {
@@ -228,6 +224,10 @@ struct StyleLintConfig {
 
 struct LintConfig {
     bool enable{true};
+    // Debounce per-URI diagnostic publishes after edits.  0 = publish
+    // synchronously (old behaviour).  Default 150 ms absorbs typical
+    // keystroke bursts without making diagnostics feel sluggish.
+    int diagnostic_debounce_ms{150};
     NamingConfig naming;
     ModuleLintConfig module;
     StatementLintConfig statement;

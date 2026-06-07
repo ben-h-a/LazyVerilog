@@ -129,8 +129,6 @@ Config load_config(const std::filesystem::path& root, std::string* warning,
                     }
                 });
             }
-            if (auto v = (*d)["project_index_publish_debounce_ms"].value<int64_t>())
-                cfg.design.project_index_publish_debounce_ms = static_cast<int>(*v);
         }
 
         // [compilation]
@@ -342,6 +340,8 @@ Config load_config(const std::filesystem::path& root, std::string* warning,
             };
 
             set_bool(lint, "enable", cfg.lint.enable);
+            if (auto v = (*lint)["diagnostic_debounce_ms"].value<int64_t>())
+                cfg.lint.diagnostic_debounce_ms = static_cast<int>(*v);
 
             if (auto fn = (*lint)["function"].as_table()) {
                 set_rule(fn, cfg.lint.function);

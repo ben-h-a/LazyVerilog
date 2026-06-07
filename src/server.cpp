@@ -61,8 +61,11 @@
 #include <slang/syntax/SyntaxTree.h>
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -522,6 +525,21 @@ struct LazyVerilogServer::Impl {
     std::shared_ptr<StdOutStream> output = std::make_shared<StdOutStream>();
     std::shared_ptr<StdInStream> input = std::make_shared<StdInStream>();
     Condition<bool> exit_event;
+
+    // Edit debounce — coalesces rapid didChange edits so reparse + lint only
+    // fires after the user pauses.  pending_text holds the latest in-memory
+    // text per URI; each didChange applies its incremental diffs here instead
+    // of committing to the analyzer immediately.
+    //
+    // Declared after endpoint state so diag_thread (destroyed first as the
+    // last-declared member) joins before remote_endpoint is torn down.
+    int diag_debounce_ms{0};
+    std::mutex diag_pending_mutex;
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> diag_pending;
+    std::mutex pending_text_mutex;
+    std::unordered_map<std::string, std::string> pending_text;
+    std::condition_variable_any diag_cv;
+    std::jthread diag_thread;
 };
 
 LazyVerilogServer::LazyVerilogServer() : impl_(std::make_unique<Impl>()) {
@@ -544,9 +562,17 @@ LazyVerilogServer::LazyVerilogServer() : impl_(std::make_unique<Impl>()) {
                     open_uris.push_back(uri);
             });
         for (const auto& uri : open_uris)
-            publish_diagnostics(uri);
+            schedule_diagnostics(uri);
     });
-    analyzer_.set_project_index_publish_debounce_ms(config_.design.project_index_publish_debounce_ms);
+    // Hardcoded 250 ms shard-merge cadence.  This coalesces rapid shard
+    // completions without exposing a knob most users never tune.  The
+    // user-visible diagnostic latency is controlled by [lint].diagnostic_debounce_ms.
+    analyzer_.set_project_index_publish_debounce_ms(250);
+    impl_->diag_debounce_ms = config_.lint.diagnostic_debounce_ms;
+    if (impl_->diag_debounce_ms > 0)
+        impl_->diag_thread = std::jthread([this](std::stop_token stop) {
+            diag_debounce_loop(stop);
+        });
     background_compiler_ = std::make_unique<BackgroundCompiler>(
         [this] { return analyzer_.compilation_snapshot(); },
         [this](BackgroundCompileResult result) {
@@ -727,6 +753,71 @@ void LazyVerilogServer::publish_diagnostics(const std::string& uri) {
     }
 }
 
+void LazyVerilogServer::schedule_diagnostics(const std::string& uri) {
+    if (impl_->diag_debounce_ms <= 0) {
+        publish_diagnostics(uri);
+        return;
+    }
+    {
+        std::lock_guard lock(impl_->diag_pending_mutex);
+        impl_->diag_pending[uri] = std::chrono::steady_clock::now() +
+                                   std::chrono::milliseconds(impl_->diag_debounce_ms);
+    }
+    impl_->diag_cv.notify_one();
+}
+
+void LazyVerilogServer::diag_debounce_loop(std::stop_token stop) {
+    using Clock = std::chrono::steady_clock;
+    while (!stop.stop_requested()) {
+        std::unique_lock<std::mutex> lock(impl_->diag_pending_mutex);
+        impl_->diag_cv.wait(lock, stop, [&] { return !impl_->diag_pending.empty(); });
+        if (stop.stop_requested())
+            break;
+
+        // Find soonest due time across all pending URIs.
+        auto soonest = impl_->diag_pending.begin()->second;
+        for (const auto& [u, due] : impl_->diag_pending)
+            if (due < soonest) soonest = due;
+
+        if (soonest > Clock::now()) {
+            impl_->diag_cv.wait_until(lock, stop, soonest, [] { return false; });
+            continue;
+        }
+
+        // Drain all due entries under the lock, then publish without it.
+        std::vector<std::string> due_uris;
+        const auto now = Clock::now();
+        for (auto it = impl_->diag_pending.begin(); it != impl_->diag_pending.end();) {
+            if (it->second <= now) {
+                due_uris.push_back(it->first);
+                it = impl_->diag_pending.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        lock.unlock();
+
+        for (const auto& uri : due_uris) {
+            // Drain buffered text and reparse before linting.
+            std::string pending;
+            {
+                std::lock_guard lock(impl_->pending_text_mutex);
+                auto it = impl_->pending_text.find(uri);
+                if (it != impl_->pending_text.end()) {
+                    pending = std::move(it->second);
+                    impl_->pending_text.erase(it);
+                }
+            }
+            if (!pending.empty()) {
+                analyzer_.change(uri, pending);
+                analyzer_.clear_semantic_diagnostics(uri);
+                schedule_background_compilation();
+            }
+            publish_diagnostics(uri);
+        }
+    }
+}
+
 void LazyVerilogServer::clear_published_diagnostics_for_owner(const std::string& owner_uri) {
     std::lock_guard<std::mutex> outbound_lock(outbound_mutex_);
     // LSP diagnostics are client-owned state: once the server has published a
@@ -865,7 +956,6 @@ void LazyVerilogServer::register_handlers() {
                     show_warning(warn);
                 publish_config_diagnostic(warn.empty() ? nullptr : &warning_detail);
 
-                analyzer_.set_project_index_publish_debounce_ms(config_.design.project_index_publish_debounce_ms);
                 auto vcode = load_vcode(root_, config_);
                 analyzer_.set_project_config(config_.design.define, vcode.include_dirs,
                                              vcode.files, resolve_vcode_path(root_, config_));
@@ -990,7 +1080,6 @@ void LazyVerilogServer::register_handlers() {
                 if (!warn.empty())
                     show_warning(warn);
                 publish_config_diagnostic(warn.empty() ? nullptr : &warning_detail);
-                analyzer_.set_project_index_publish_debounce_ms(config_.design.project_index_publish_debounce_ms);
                 { auto vcode = load_vcode(root_, config_);
                   analyzer_.set_project_config(config_.design.define, vcode.include_dirs,
                                                vcode.files, resolve_vcode_path(root_, config_)); }
@@ -1054,7 +1143,6 @@ void LazyVerilogServer::register_handlers() {
                     if (!warn.empty())
                         show_warning(warn);
                     publish_config_diagnostic(warn.empty() ? nullptr : &warning_detail);
-                    analyzer_.set_project_index_publish_debounce_ms(config_.design.project_index_publish_debounce_ms);
                     { auto vcode = load_vcode(root_, config_);
                       analyzer_.set_project_config(config_.design.define, vcode.include_dirs,
                                                    vcode.files, resolve_vcode_path(root_, config_)); }
@@ -1088,15 +1176,25 @@ void LazyVerilogServer::register_handlers() {
                 document_versions_[uri] = incoming_version;
             }
             if (!note.params.contentChanges.empty()) {
-                auto state = analyzer_.get_state(uri);
-                std::string text = state ? state->text : "";
+                // Use pending_text as diff base so rapid edits accumulate
+                // correctly without committing a parse on every keystroke.
+                std::string text;
+                {
+                    std::lock_guard lock(impl_->pending_text_mutex);
+                    auto it = impl_->pending_text.find(uri);
+                    if (it != impl_->pending_text.end())
+                        text = it->second;
+                }
+                if (text.empty()) {
+                    auto state = analyzer_.get_state(uri);
+                    text = state ? state->text : "";
+                }
                 for (const auto& chg : note.params.contentChanges)
                     text = apply_incremental_change(std::move(text), chg);
-                analyzer_.change(uri, text);
-                analyzer_.clear_semantic_diagnostics(uri);
+                std::lock_guard lock(impl_->pending_text_mutex);
+                impl_->pending_text[uri] = std::move(text);
             }
-            publish_diagnostics(uri);
-            schedule_background_compilation();
+            schedule_diagnostics(uri);
         } catch (const std::exception& e) {
             std::cerr << "[lazyverilog] didChange error: " << e.what() << "\n";
         }
@@ -1108,6 +1206,10 @@ void LazyVerilogServer::register_handlers() {
             const auto& uri = note.params.textDocument.uri.raw_uri_;
             analyzer_.close(uri);
             document_versions_.erase(uri);
+            {
+                std::lock_guard lock(impl_->pending_text_mutex);
+                impl_->pending_text.erase(uri);
+            }
             clear_published_diagnostics_for_owner(uri);
         } catch (const std::exception& e) {
             std::cerr << "[lazyverilog] didClose error: " << e.what() << "\n";
