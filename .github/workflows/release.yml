@@ -12,9 +12,8 @@ jobs:
         include:
           - os: ubuntu-20.04
             platform: linux-x64
-          - os: ubuntu-20.04
+          - os: ubuntu-22.04-arm
             platform: linux-arm64
-            cross: true
           - os: macos-13
             platform: darwin-x64
           - os: macos-14
@@ -27,32 +26,21 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install cross-compilation tools (linux-arm64)
-        if: matrix.cross
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+      - name: Pin Xcode 15.2 (darwin-x64)
+        if: matrix.platform == 'darwin-x64'
+        run: sudo xcode-select -s /Applications/Xcode_15.2.app
 
-      - name: Configure (native)
-        if: "!matrix.cross"
+      - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
-
-      - name: Configure (cross arm64)
-        if: matrix.cross
-        run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_SYSTEM_NAME=Linux \
-            -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
-            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++
 
       - name: Build
         run: cmake --build build -j$(nproc 2>/dev/null || sysctl -n hw.logicalcpu)
 
-      - name: Rename artifact
+      - name: Strip and rename artifact
         run: |
           cp build/lazyverilog-lsp \
              "lazyverilog-lsp-${{ github.ref_name }}-${{ matrix.platform }}"
+          strip "lazyverilog-lsp-${{ github.ref_name }}-${{ matrix.platform }}"
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
