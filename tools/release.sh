@@ -8,7 +8,9 @@
 #   1. Ask for the version to release, for example: v1.2.3 or v1.2.3-rc.1.
 #   2. Update lua/lazyverilog/version.lua so the Neovim plugin downloads the
 #      matching GitHub release asset.
-#   3. Create a git commit and tag if needed, then run `git push --tags`.
+#   3. Commit the version bump and push the branch.
+#   4. Trigger a workflow_dispatch build test via `gh` and wait for it to pass.
+#   5. Create a git tag and push --tags to trigger the release build.
 #
 # GitHub Actions (.github/workflows/release.yml) handles the build and upload:
 # pushing the tag triggers a matrix build (linux-x64, linux-arm64, darwin-x64,
@@ -18,12 +20,14 @@
 #   - Release tags use a leading "v" SemVer-ish spelling, such as v1.0.2.
 #   - The version file is lua/lazyverilog/version.lua and contains:
 #         return "vX.Y.Z"
+#   - `gh` (GitHub CLI) is installed and authenticated.
 #
 # Optional flags:
 #   --version VERSION   Skip the interactive version prompt.
 #   --no-commit        Update version file, but do not create a commit.
 #   --no-tag           Do not create a git tag.
 #   --no-push          Do not run git push --tags.
+#   --no-build-test    Skip the workflow_dispatch build test.
 #   --dry-run          Print commands that would mutate git, but do not run them.
 #
 # Examples:
@@ -42,10 +46,11 @@ VERSION=""
 DO_COMMIT=1
 DO_TAG=1
 DO_PUSH=1
+DO_BUILD_TEST=1
 DRY_RUN=0
 
 usage() {
-    sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die() {
@@ -96,6 +101,10 @@ parse_args() {
                 DO_PUSH=0
                 shift
                 ;;
+            --no-build-test)
+                DO_BUILD_TEST=0
+                shift
+                ;;
             --dry-run)
                 DRY_RUN=1
                 shift
@@ -115,7 +124,12 @@ require_tools() {
     local missing=()
     local tool
 
-    for tool in git; do
+    local tools=(git)
+    if [[ "$DO_BUILD_TEST" == 1 && "$DO_PUSH" == 1 ]]; then
+        tools+=(gh)
+    fi
+
+    for tool in "${tools[@]}"; do
         if ! command -v "$tool" >/dev/null 2>&1; then
             missing+=("$tool")
         fi
@@ -197,6 +211,50 @@ commit_version_file() {
     run git -C "$REPO_ROOT" commit -m "Release ${VERSION}"
 }
 
+push_branch() {
+    [[ "$DO_PUSH" == 1 ]] || return 0
+
+    confirm "Push branch now? (needed for build test)" || die "aborted before pushing branch"
+    run git -C "$REPO_ROOT" push
+}
+
+trigger_build_test() {
+    [[ "$DO_BUILD_TEST" == 1 && "$DO_PUSH" == 1 ]] || return 0
+
+    local branch
+    branch="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)"
+
+    printf 'Triggering build test via workflow_dispatch on branch %s...\n' "$branch"
+    run gh workflow run release.yml --repo hxxdev/LazyVerilog --ref "$branch"
+
+    if [[ "$DRY_RUN" == 1 ]]; then
+        return 0
+    fi
+
+    # Wait for the run to appear (dispatch is async)
+    printf 'Waiting for workflow run to start'
+    local run_id=""
+    local attempts=0
+    while [[ $attempts -lt 15 ]]; do
+        printf '.'
+        sleep 3
+        run_id="$(gh run list --repo hxxdev/LazyVerilog --workflow=release.yml \
+            --limit=1 --json databaseId,status \
+            --jq '.[] | select(.status != "completed") | .databaseId' 2>/dev/null || true)"
+        [[ -n "$run_id" ]] && break
+        ((attempts++))
+    done
+    printf '\n'
+
+    [[ -n "$run_id" ]] || die "could not find workflow run after dispatch — check Actions tab manually"
+
+    printf 'Watching run %s...\n' "$run_id"
+    gh run watch "$run_id" --repo hxxdev/LazyVerilog --exit-status \
+        || die "build test failed — fix the issue before releasing"
+
+    printf 'Build test passed.\n\n'
+}
+
 tag_release() {
     [[ "$DO_TAG" == 1 ]] || return 0
 
@@ -209,10 +267,10 @@ tag_release() {
 }
 
 push_tags() {
-    [[ "$DO_PUSH" == 1 ]] || return 0
+    [[ "$DO_PUSH" == 1 && "$DO_TAG" == 1 ]] || return 0
 
-    confirm "Run 'git push --tags' now? (triggers GitHub Actions build)" || die "aborted before pushing tags"
-    run git -C "$REPO_ROOT" push
+    confirm "Push tag ${VERSION} now? (triggers GitHub Actions release build)" \
+        || die "aborted before pushing tag"
     run git -C "$REPO_ROOT" push --tags
 }
 
@@ -232,6 +290,8 @@ main() {
     ensure_clean_enough_for_release
     update_version_file
     commit_version_file
+    push_branch
+    trigger_build_test
     tag_release
     push_tags
 
