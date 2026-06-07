@@ -17,7 +17,7 @@ jobs:
             platform: linux-arm64
           - os: macos-13
             platform: darwin-x64
-          - os: macos-14
+          - os: macos-15
             platform: darwin-arm64
 
     runs-on: ${{ matrix.os }}
@@ -27,8 +27,8 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Pin Xcode 15.2 (macOS)
-        if: runner.os == 'macOS'
+      - name: Pin Xcode 15.2 (darwin-x64)
+        if: matrix.platform == 'darwin-x64'
         run: sudo xcode-select -s /Applications/Xcode_15.2.app
 
       - name: Configure
