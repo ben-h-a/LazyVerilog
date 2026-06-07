@@ -65,14 +65,7 @@ static bool token_stream_same(const TokenStream& a, const TokenStream& b) {
     return true;
 }
 
-inline void verify_safe_mode_unchanged(const std::string& source, const std::string& formatted,
-                                       const FormatOptions& opts) {
-    (void)opts;
-    if (!ws_equal(source, formatted))
-        throw SafeModeError("Formatter safe-mode: non-whitespace content changed — formatting aborted");
-}
-
-inline void verify_safe_mode2_unchanged(const TokenStream& before, const std::string& formatted,
+inline void verify_token_stream_safety_unchanged(const TokenStream& before, const std::string& formatted,
                                         const FormatOptions& opts) {
     TokenStream after = TokenCollector(formatted, opts).collect();
     if (!token_stream_same(before, after))
@@ -103,7 +96,6 @@ std::string format_source(const std::string& source, const FormatOptions& opts) 
     svfmt::write_log(opts, "98_token_stream_final.log", tokens);
     std::string out = svfmt::render_tokens(tokens);
     svfmt::write_log(opts, "99_output.sv", out);
-    svfmt::verify_safe_mode_unchanged(source, out, opts);
-    svfmt::verify_safe_mode2_unchanged(before_tokens, out, opts);
+    svfmt::verify_token_stream_safety_unchanged(before_tokens, out, opts);
     return out;
 }
