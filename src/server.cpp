@@ -61,6 +61,7 @@
 #include <slang/syntax/SyntaxTree.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
@@ -533,7 +534,7 @@ struct LazyVerilogServer::Impl {
     //
     // Declared after endpoint state so diag_thread (destroyed first as the
     // last-declared member) joins before remote_endpoint is torn down.
-    int diag_debounce_ms{0};
+    std::atomic<int> diag_debounce_ms{0};
     std::mutex diag_pending_mutex;
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> diag_pending;
     std::mutex pending_text_mutex;
@@ -569,10 +570,9 @@ LazyVerilogServer::LazyVerilogServer() : impl_(std::make_unique<Impl>()) {
     // user-visible diagnostic latency is controlled by [lint].diagnostic_debounce_ms.
     analyzer_.set_project_index_publish_debounce_ms(250);
     impl_->diag_debounce_ms = config_.lint.diagnostic_debounce_ms;
-    if (impl_->diag_debounce_ms > 0)
-        impl_->diag_thread = std::jthread([this](std::stop_token stop) {
-            diag_debounce_loop(stop);
-        });
+    impl_->diag_thread = std::jthread([this](std::stop_token stop) {
+        diag_debounce_loop(stop);
+    });
     background_compiler_ = std::make_unique<BackgroundCompiler>(
         [this] { return analyzer_.compilation_snapshot(); },
         [this](BackgroundCompileResult result) {
@@ -952,6 +952,7 @@ void LazyVerilogServer::register_handlers() {
                 std::string warn;
                 ConfigWarning warning_detail;
                 config_ = load_config(root_, &warn, &warning_detail);
+                impl_->diag_debounce_ms = config_.lint.diagnostic_debounce_ms;
                 if (!warn.empty())
                     show_warning(warn);
                 publish_config_diagnostic(warn.empty() ? nullptr : &warning_detail);
@@ -1075,6 +1076,7 @@ void LazyVerilogServer::register_handlers() {
                 std::string warn;
                 ConfigWarning warning_detail;
                 config_ = load_config(root_, &warn, &warning_detail);
+                impl_->diag_debounce_ms = config_.lint.diagnostic_debounce_ms;
                 std::cerr << "[lazyverilog] reloaded config from "
                           << (root_ / "lazyverilog.toml").string() << "\n";
                 if (!warn.empty())
@@ -1140,6 +1142,7 @@ void LazyVerilogServer::register_handlers() {
                     std::string warn;
                     ConfigWarning warning_detail;
                     config_ = load_config(root_, &warn, &warning_detail);
+                impl_->diag_debounce_ms = config_.lint.diagnostic_debounce_ms;
                     if (!warn.empty())
                         show_warning(warn);
                     publish_config_diagnostic(warn.empty() ? nullptr : &warning_detail);
