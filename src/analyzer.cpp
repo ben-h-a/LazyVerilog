@@ -7,7 +7,6 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
 #include <functional>
 #include <iostream>
 #include <limits>
@@ -168,14 +167,14 @@ make_file_state_with_options(const std::filesystem::path& path,
     if (!tree_or_error)
         return nullptr;
 
-    // SyntaxTree::fromFile already loaded the file into SourceManager.  Closed
-    // project indexing only needs source text temporarily for syntactic fallback
-    // helpers; retaining a second full copy in DocumentState would keep large
-    // filelist text resident until the background state is discarded.  :LintAll
-    // opts into retention because a few lint rules intentionally inspect raw
-    // text, for example trailing whitespace.
-    auto text = read_file_text_optional(norm);
-    auto state = std::make_shared<DocumentState>(uri, retain_text ? text.value_or(std::string{})
+    // fromFile already loaded source into SourceManager; read text from there
+    // instead of opening the file a second time.  On NFS this avoids an extra
+    // open + stat + read per indexed file.
+    std::string_view sm_source;
+    if (const auto& t = *tree_or_error; t)
+        sm_source = sm->getSourceText(t->root().sourceRange().start().buffer());
+
+    auto state = std::make_shared<DocumentState>(uri, retain_text ? std::string(sm_source)
                                                                   : std::string{},
                                                  nullptr);
     state->normalized_path = norm.string();
@@ -187,8 +186,7 @@ make_file_state_with_options(const std::filesystem::path& path,
     state->include_dependency_set.insert(state->include_dependencies.begin(),
                                          state->include_dependencies.end());
     if (state->tree) {
-        const std::string_view index_source = text ? std::string_view(*text) : std::string_view{};
-        state->index = SyntaxIndex::build(*state->tree, index_source, IndexDepth::Declarations);
+        state->index = SyntaxIndex::build(*state->tree, sm_source, IndexDepth::Declarations);
         state->index.include_dependencies = state->include_dependencies;
     }
     collect_parse_diagnostics(*state, uri);
