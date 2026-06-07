@@ -16,3 +16,4 @@ Implementing feature needs careful DAG change of formatter.
 
 4. Renew the docs.
 5. Renew `lazyverilog.toml`. Look for options that is implemented in the source code but not listed in `lazyverilog.toml` and vice versa.
+6. Add VSCODE client Support. Current supports only NeoVIM.
