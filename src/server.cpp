@@ -547,9 +547,6 @@ LazyVerilogServer::LazyVerilogServer() : impl_(std::make_unique<Impl>()) {
             publish_diagnostics(uri);
     });
     analyzer_.set_project_index_publish_debounce_ms(config_.design.project_index_publish_debounce_ms);
-    { auto vcode = load_vcode(root_, config_);
-      analyzer_.set_project_config(config_.design.define, vcode.include_dirs,
-                                   vcode.files, resolve_vcode_path(root_, config_)); }
     background_compiler_ = std::make_unique<BackgroundCompiler>(
         [this] { return analyzer_.compilation_snapshot(); },
         [this](BackgroundCompileResult result) {
@@ -880,6 +877,12 @@ void LazyVerilogServer::register_handlers() {
                 initialize_workspace_root(uri_to_path(req.params.rootUri->raw_uri_));
             } else if (req.params.rootPath && !req.params.rootPath->empty()) {
                 initialize_workspace_root(std::filesystem::path(*req.params.rootPath));
+            } else {
+                // No workspace root from client; index using the path resolved at
+                // construction time.  project config is only applied here (not in
+                // the constructor) so there is no wasted first-generation parse
+                // when the client does supply a rootUri.
+                initialize_workspace_root(root_);
             }
 
             // Inlay hints
