@@ -347,6 +347,19 @@ void Analyzer::change(const std::string& uri, const std::string& text) {
 
 }
 
+void Analyzer::update_text(const std::string& uri, const std::string& text) {
+    std::string path = uri;
+    if (path.starts_with("file://"))
+        path = path.substr(7);
+    auto state = std::make_shared<DocumentState>(uri, text, nullptr);
+    state->normalized_path = normalize_filesystem_path(path).string();
+    cache_document_end_position(*state);
+    // tree remains null — full reparse deferred to the next change() call
+    std::lock_guard<std::mutex> lock(map_mutex_);
+    docs_[uri] = std::move(state);
+    invalidate_extra_snapshots_locked();
+}
+
 void Analyzer::close(const std::string& uri) {
     std::lock_guard<std::mutex> lock(map_mutex_);
     docs_.erase(uri);

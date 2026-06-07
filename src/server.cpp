@@ -527,18 +527,11 @@ struct LazyVerilogServer::Impl {
     std::shared_ptr<StdInStream> input = std::make_shared<StdInStream>();
     Condition<bool> exit_event;
 
-    // Edit debounce — coalesces rapid didChange edits so reparse + lint only
-    // fires after the user pauses.  pending_text holds the latest in-memory
-    // text per URI; each didChange applies its incremental diffs here instead
-    // of committing to the analyzer immediately.
-    //
     // Declared after endpoint state so diag_thread (destroyed first as the
     // last-declared member) joins before remote_endpoint is torn down.
     std::atomic<int> diag_debounce_ms{0};
     std::mutex diag_pending_mutex;
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> diag_pending;
-    std::mutex pending_text_mutex;
-    std::unordered_map<std::string, std::string> pending_text;
     std::condition_variable_any diag_cv;
     std::jthread diag_thread;
 };
@@ -798,18 +791,10 @@ void LazyVerilogServer::diag_debounce_loop(std::stop_token stop) {
         lock.unlock();
 
         for (const auto& uri : due_uris) {
-            // Drain buffered text and reparse before linting.
-            std::string pending;
-            {
-                std::lock_guard lock(impl_->pending_text_mutex);
-                auto it = impl_->pending_text.find(uri);
-                if (it != impl_->pending_text.end()) {
-                    pending = std::move(it->second);
-                    impl_->pending_text.erase(it);
-                }
-            }
-            if (!pending.empty()) {
-                analyzer_.change(uri, pending);
+            // If update_text() staged a text-only state (null tree), reparse now.
+            auto state = analyzer_.get_state(uri);
+            if (state && !state->tree) {
+                analyzer_.change(uri, state->text);
                 analyzer_.clear_semantic_diagnostics(uri);
                 schedule_background_compilation();
             }
@@ -1179,23 +1164,11 @@ void LazyVerilogServer::register_handlers() {
                 document_versions_[uri] = incoming_version;
             }
             if (!note.params.contentChanges.empty()) {
-                // Use pending_text as diff base so rapid edits accumulate
-                // correctly without committing a parse on every keystroke.
-                std::string text;
-                {
-                    std::lock_guard lock(impl_->pending_text_mutex);
-                    auto it = impl_->pending_text.find(uri);
-                    if (it != impl_->pending_text.end())
-                        text = it->second;
-                }
-                if (text.empty()) {
-                    auto state = analyzer_.get_state(uri);
-                    text = state ? state->text : "";
-                }
+                auto state = analyzer_.get_state(uri);
+                std::string text = state ? state->text : "";
                 for (const auto& chg : note.params.contentChanges)
                     text = apply_incremental_change(std::move(text), chg);
-                std::lock_guard lock(impl_->pending_text_mutex);
-                impl_->pending_text[uri] = std::move(text);
+                analyzer_.update_text(uri, text);
             }
             schedule_diagnostics(uri);
         } catch (const std::exception& e) {
@@ -1209,10 +1182,6 @@ void LazyVerilogServer::register_handlers() {
             const auto& uri = note.params.textDocument.uri.raw_uri_;
             analyzer_.close(uri);
             document_versions_.erase(uri);
-            {
-                std::lock_guard lock(impl_->pending_text_mutex);
-                impl_->pending_text.erase(uri);
-            }
             clear_published_diagnostics_for_owner(uri);
         } catch (const std::exception& e) {
             std::cerr << "[lazyverilog] didClose error: " << e.what() << "\n";

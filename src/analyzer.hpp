@@ -109,6 +109,11 @@ class Analyzer {
     /// Update text for uri, creating a new immutable DocumentState snapshot.
     void change(const std::string& uri, const std::string& text);
 
+    /// Update text immediately without reparsing (tree will be null until
+    /// the next change() call).  Use on every didChange so get_state()->text
+    /// is always current; call change() on debounce to build the AST.
+    void update_text(const std::string& uri, const std::string& text);
+
     /// Remove document from cache.
     void close(const std::string& uri);
 
