@@ -111,7 +111,7 @@ section4_min_width = 16
 break_policy = "auto"      # never | always | auto
 line_length = 100
 arg_count = 3 # when auto: break if arg count >= this value; -1 disables arg-count breaking
-layout = "block"           # hanging | block
+layout = "hanging"           # hanging | block
 space_before_paren = false
 space_inside_paren = false
 
@@ -119,6 +119,20 @@ space_inside_paren = false
 layout = "block"           # hanging | block — applies to function and task declarations
 line_length = 13          # declarations shorter than this stay single-line
 space_before_paren = false # insert a space between function/task name and '('
+
+[format.macros]
+object_like_expr = []      # expression token, for example: `MY_WIDTH
+function_like_expr = [
+    "dv_fatal"
+]    # expression-valued call, for example: `CLAMP(a, b)
+statement_like = []        # complete procedural statement, for example: `DV_CHECK_EQ(a, b)
+declaration_like = [
+    "DV_ALERT_IF_CONNECT", # module/class item helper; often used without a trailing semicolon
+]
+control_flow_like = []     # control-like macro, for example: `ASSERT_IF(en)
+block_begin_like = []      # opens logical indent scope, for example: `MY_BLOCK_BEGIN()
+block_end_like = []        # closes logical indent scope, for example: `MY_BLOCK_END
+whitespace_sensitive = []  # preserve invocation argument spelling/line breaks
 
 [format.module]
 parameter_layout = "block" # block | hanging
