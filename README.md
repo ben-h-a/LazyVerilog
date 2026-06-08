@@ -245,18 +245,7 @@ require("lazyverilog").setup({
 
 ## 🚀 Usage
 
-### 1. Open a SystemVerilog project
-
-Start Neovim in your project root, then open a Verilog/SystemVerilog file:
-
-```bash
-nvim rtl/top.sv
-```
-
-The Neovim plugin starts the LazyVerilog LSP automatically for `verilog` and `systemverilog` buffers.
-Use `:LspInfo` to confirm that the `lazyverilog` client is attached.
-
-### 2. Add a project config
+### 1. Add a project config to your RTL project root.
 
 Create `lazyverilog.toml` in the project root.  At minimum, point `design.vcode` to a filelist so
 LazyVerilog can index modules, packages, ports, and cross-file references:
@@ -280,12 +269,24 @@ enable = true
 Example `vcode.f`:
 
 ```text
-path/to/rtl1
-path/to/rtl2
-path/to/rtl3
+path/to/rtl1.sv
+path/to/rtl2.sv
+path/to/rtl3.sv
++incdir+path/to/your/include_dir1
++incdir+path/to/your/include_dir2
 ```
 
-After saving `lazyverilog.toml`, the plugin notifies the server to reload the config.
+### 2. Open a SystemVerilog project
+
+Start Neovim in your project root, then open a Verilog/SystemVerilog file:
+
+```bash
+nvim path/to/rtl1.sv
+```
+
+The Neovim plugin starts the LazyVerilog LSP automatically for `verilog` and `systemverilog` buffers.
+Use `:LspInfo` to confirm that the `lazyverilog` client is attached.
+
 
 ### 3. Use standard LSP actions
 
