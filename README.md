@@ -243,7 +243,7 @@ require("lazyverilog").setup({
 })
 ```
 
-## 🚀 Usage
+## 🚀 Usage for neovim users
 
 ### 1. Add a project config to your RTL project root.
 
@@ -278,13 +278,15 @@ path/to/rtl3.sv
 
 ### 2. Open a SystemVerilog project
 
-Start Neovim in your project root, then open a Verilog/SystemVerilog file:
+Open a Verilog/SystemVerilog RTL file:
+
+Server will traverse toward the root(`/`) and look for `lazyverilog.toml`.
 
 ```bash
-nvim path/to/rtl1.sv
+nvim path/to/rtl.sv
 ```
 
-The Neovim plugin starts the LazyVerilog LSP automatically for `verilog` and `systemverilog` buffers.
+The Neovim plugin downloads LazyVerilog release if it is your first launch. Then Neovim plugin starts the LazyVerilog LSP automatically for `verilog` and `systemverilog` buffers.
 Use `:LspInfo` to confirm that the `lazyverilog` client is attached.
 
 
@@ -316,6 +318,10 @@ cursor is on a supported construct.
 | `:Interface <inst>` | Inspect one instance interface |
 | `:Interface <inst1> <inst2>` | Inspect and edit connections between two instances |
 | `:Connect <module1> <module2>` | Interactively connect module instances through the hierarchy |
+
+> For VSCode users:
+> LazyVerilog is LSP-compliant. VSCode is not supported out of the box yet, but manual configuration should work.
+> VSCode support is coming soon.
 
 ## 🏗️ Build
 
