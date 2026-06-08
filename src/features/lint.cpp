@@ -298,6 +298,7 @@ struct LintVisitor : public SyntaxVisitor<LintVisitor> {
 
     int naming_sev() const { return severity_from(cfg.naming.severity); }
     int module_sev() const { return severity_from(cfg.module.severity); }
+    int instance_sev() const { return severity_from(cfg.instance.severity); }
     int statement_sev() const { return severity_from(cfg.statement.severity); }
 
     void chk_name(const std::string& name, SourceLocation loc,
@@ -438,7 +439,7 @@ struct LintVisitor : public SyntaxVisitor<LintVisitor> {
 
     // ── module_instantiation_style: "named" | "positional" | "both" ─────────
     void handle(const HierarchyInstantiationSyntax& node) {
-        const auto& style = cfg.module.module_instantiation_style;
+        const auto& style = cfg.instance.module_instantiation_style;
         if (!style.empty()) {
             for (uint32_t i = 0; i < node.instances.size(); ++i) {
                 const auto* inst = node.instances[i];
@@ -463,7 +464,7 @@ struct LintVisitor : public SyntaxVisitor<LintVisitor> {
                         "[module] instance mixes positional and named port connections"));
             }
         }
-        if (cfg.module.stale_autoinst_diagnostic) {
+        if (cfg.instance.stale_instance_diagnostic) {
             const auto module_name = std::string_view(node.type.valueText());
             if (const auto* current = find_current_module_ports(module_name)) {
                 // Current/open-file facts come from the live AST.  They win over
@@ -723,9 +724,9 @@ static std::vector<ParseDiagInfo> run_lint_impl(const DocumentState& state, cons
         config.naming.check_package_filename);
     if (!config.statement.case_missing_default && !config.function.functions_automatic &&
         !config.function.explicit_function_lifetime && !config.function.explicit_task_lifetime &&
-        config.module.module_instantiation_style.empty() && config.function.function_call_style.empty() &&
+        config.instance.module_instantiation_style.empty() && config.function.function_call_style.empty() &&
         !config.module.one_module_per_file &&
-        !config.module.stale_autoinst_diagnostic && !config.statement.latch_inference_detection &&
+        !config.instance.stale_instance_diagnostic && !config.statement.latch_inference_detection &&
         !config.statement.explicit_begin && !config.statement.no_raw_always &&
         !config.statement.blocking_nonblocking_assignments && config.naming.register_pattern.empty() &&
         !naming_active)
@@ -738,7 +739,7 @@ static std::vector<ParseDiagInfo> run_lint_impl(const DocumentState& state, cons
     // declarations, but current/open-file facts are derived from the live AST
     // below while closed/project facts are read from project_index.
     CurrentModulePortMap current_modules;
-    if (config.module.stale_autoinst_diagnostic) {
+    if (config.instance.stale_instance_diagnostic) {
         CurrentModulePortCollector collector;
         state.tree->root().visit(collector);
         current_modules = std::move(collector.modules);

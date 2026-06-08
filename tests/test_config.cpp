@@ -175,8 +175,12 @@ explicit_task_lifetime = true
 enable = true
 severity = "warning"
 one_module_per_file = true
+
+[lint.instance]
+enable = true
+severity = "warning"
 module_instantiation_style = "named"
-stale_autoinst_diagnostic = true
+stale_instance_diagnostic = true
 
 [lint.naming]
 enable = true
@@ -304,8 +308,8 @@ autoarg_on_save = true
     CHECK(cfg.lint.function.function_call_style == "named");
     CHECK(cfg.lint.module.enable == true);
     CHECK(cfg.lint.module.one_module_per_file == true);
-    CHECK(cfg.lint.module.module_instantiation_style == "named");
-    CHECK(cfg.lint.module.stale_autoinst_diagnostic == true);
+    CHECK(cfg.lint.instance.module_instantiation_style == "named");
+    CHECK(cfg.lint.instance.stale_instance_diagnostic == true);
     CHECK(cfg.lint.statement.latch_inference_detection == true);
     CHECK(cfg.lint.statement.explicit_begin == true);
     CHECK(cfg.lint.statement.no_raw_always == true);

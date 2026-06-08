@@ -199,8 +199,11 @@ struct NamingConfig : LintRuleConfig {
 
 struct ModuleLintConfig : LintRuleConfig {
     bool one_module_per_file{false};
+};
+
+struct InstanceLintConfig : LintRuleConfig {
     std::string module_instantiation_style; // "positional" | "named" | "both" | ""
-    bool stale_autoinst_diagnostic{false};
+    bool stale_instance_diagnostic{false};
 };
 
 struct StatementLintConfig : LintRuleConfig {
@@ -230,6 +233,7 @@ struct LintConfig {
     int diagnostic_debounce_ms{150};
     NamingConfig naming;
     ModuleLintConfig module;
+    InstanceLintConfig instance;
     StatementLintConfig statement;
     FunctionLintConfig function;
     StyleLintConfig style;

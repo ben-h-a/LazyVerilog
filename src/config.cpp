@@ -37,8 +37,8 @@ static std::vector<std::string> validate_config(const Config& cfg) {
         msg += ")";
         errors.push_back(msg);
     };
-    check_enum(cfg.lint.module.module_instantiation_style,
-               "[lint.module].module_instantiation_style", {"positional", "named", "both"});
+    check_enum(cfg.lint.instance.module_instantiation_style,
+               "[lint.instance].module_instantiation_style", {"positional", "named", "both"});
     check_enum(cfg.lint.function.function_call_style, "[lint.function].function_call_style",
                {"positional", "named", "both"});
     check_enum(cfg.format.function_call.break_policy, "[format.function_call].break_policy",
@@ -368,10 +368,13 @@ Config load_config(const std::filesystem::path& root, std::string* warning,
             if (auto mod = (*lint)["module"].as_table()) {
                 set_rule(mod, cfg.lint.module);
                 set_bool(mod, "one_module_per_file", cfg.lint.module.one_module_per_file);
-                if (auto v = (*mod)["module_instantiation_style"].value<std::string>())
-                    cfg.lint.module.module_instantiation_style = *v;
-                set_bool(mod, "stale_autoinst_diagnostic",
-                         cfg.lint.module.stale_autoinst_diagnostic);
+            }
+            if (auto inst = (*lint)["instance"].as_table()) {
+                set_rule(inst, cfg.lint.instance);
+                if (auto v = (*inst)["module_instantiation_style"].value<std::string>())
+                    cfg.lint.instance.module_instantiation_style = *v;
+                set_bool(inst, "stale_instance_diagnostic",
+                         cfg.lint.instance.stale_instance_diagnostic);
             }
             if (auto nm = (*lint)["naming"].as_table()) {
                 set_rule(nm, cfg.lint.naming);

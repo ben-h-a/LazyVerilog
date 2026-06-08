@@ -64,7 +64,7 @@ static bool has_message_containing(const std::vector<ParseDiagInfo>& diags,
 TEST_CASE("lint: module rules emit diagnostics", "[lint]") {
     LintConfig cfg;
     cfg.module.one_module_per_file = true;
-    cfg.module.stale_autoinst_diagnostic = true;
+    cfg.instance.stale_instance_diagnostic = true;
 
     auto diags = lint_text("module child(input a, output b);\nendmodule\n"
                            "module top;\n"
@@ -97,7 +97,7 @@ TEST_CASE("lint: stale autoinst uses merged extra-file module ports", "[lint]") 
     REQUIRE(project_index != nullptr);
 
     LintConfig cfg;
-    cfg.module.stale_autoinst_diagnostic = true;
+    cfg.instance.stale_instance_diagnostic = true;
     auto diags = run_lint(*state, cfg, project_index.get());
 
     CHECK(has_message_containing(diags, "unknown port 'old'"));
@@ -126,7 +126,7 @@ TEST_CASE("lint: stale autoinst ignores parameter-only module entries", "[lint]"
     REQUIRE(project_index != nullptr);
 
     LintConfig cfg;
-    cfg.module.stale_autoinst_diagnostic = true;
+    cfg.instance.stale_instance_diagnostic = true;
     auto diags = run_lint(*state, cfg, project_index.get());
 
     CHECK(!has_message_containing(diags, "missing port 'WIDTH'"));

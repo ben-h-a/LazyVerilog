@@ -709,7 +709,7 @@ void LazyVerilogServer::publish_diagnostics(const std::string& uri) {
             // synchronously parse, copy, or merge the full design filelist on
             // every edit.
             std::shared_ptr<const ProjectIndexSnapshot> project_lint_index;
-            if (config_.lint.module.stale_autoinst_diagnostic)
+            if (config_.lint.instance.stale_instance_diagnostic)
                 project_lint_index = analyzer_.project_index_snapshot();
 
             auto lint_diags = run_lint(*state, config_.lint, project_lint_index.get());
@@ -1509,7 +1509,7 @@ void LazyVerilogServer::register_handlers() {
                 // still consult the current published ProjectIndexSnapshot; the
                 // command does not perform hidden reindexing as a side effect.
                 std::shared_ptr<const ProjectIndexSnapshot> project_lint_index;
-                if (config_.lint.module.stale_autoinst_diagnostic)
+                if (config_.lint.instance.stale_instance_diagnostic)
                     project_lint_index = analyzer_.project_index_snapshot();
 
                 auto add_diag = [&](const std::string& fallback_uri, ParseDiagInfo diag) {

@@ -34,8 +34,12 @@ check_package_filename = true # check that package name matches filename
 enable = true
 severity = "warning"          # "warning" | "error" | "hint"
 one_module_per_file = true   # check that at most one module is declared per file
+
+[lint.instance]
+enable = true
+severity = "warning"          # "warning" | "error" | "hint"
 module_instantiation_style = "named"  # "positional", "named", or "both"
-stale_autoinst_diagnostic = true
+stale_instance_diagnostic = true
 
 [lint.statement]
 enable = true

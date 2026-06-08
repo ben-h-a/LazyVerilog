@@ -425,6 +425,16 @@ Diagnostic: `[module] more than one module declared in this file`
 
 ---
 
+---
+
+## `[lint.instance]`
+
+```toml
+[lint.instance]
+enable = true
+severity = "warning"
+```
+
 ### `module_instantiation_style`
 
 Enforces a consistent port connection style across all instantiations.
@@ -436,7 +446,7 @@ Values: `"positional"` | `"named"` | `"both"` | `""` (disabled)
 - `"both"` — mixing positional and named in the same instance is forbidden
 
 ```toml
-[lint.module]
+[lint.instance]
 module_instantiation_style = "named"
 ```
 
@@ -460,13 +470,13 @@ Diagnostics:
 
 ---
 
-### `stale_autoinst_diagnostic`
+### `stale_instance_diagnostic`
 
-Flags autoinst port connections that no longer match the instantiated module's port list — missing ports, duplicate connections, or connections to ports that no longer exist.
+Flags port connections that no longer match the instantiated module's port list — missing ports, duplicate connections, or connections to ports that no longer exist.
 
 ```toml
-[lint.module]
-stale_autoinst_diagnostic = true
+[lint.instance]
+stale_instance_diagnostic = true
 ```
 
 ```systemverilog
@@ -793,9 +803,13 @@ check_package_filename = true
 [lint.module]
 enable = true
 severity = "warning"
-one_module_per_file          = true
-module_instantiation_style   = "named"
-stale_autoinst_diagnostic    = true
+one_module_per_file = true
+
+[lint.instance]
+enable = true
+severity = "warning"
+module_instantiation_style = "named"
+stale_instance_diagnostic  = true
 
 [lint.statement]
 enable = true
