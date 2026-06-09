@@ -1513,7 +1513,7 @@ public:
                 !opts_.statement.wrap_end_else_clauses;
             bool end_before_do_while =
                 kind_is(t, TK::EndKeyword) && next_i != npos && kind_is(tokens[next_i], TK::WhileKeyword);
-            if (kind_is(t, TK::BeginKeyword) ||
+            if ((kind_is(t, TK::BeginKeyword) && !followed_by_label_colon) ||
                 is_fork_block_open(tokens, i) ||
                 (is_outer_close(t.lex.kind) && !followed_by_label_colon) ||
                 (is_close_block(t.lex.kind) && !followed_by_label_colon &&
@@ -1531,7 +1531,8 @@ public:
                 size_t p = prev_code(tokens, i);
                 size_t pp = p == npos ? npos : prev_code(tokens, p);
                 if (p != npos && pp != npos && kind_is(tokens[p], TK::Colon) &&
-                    (is_close_block(tokens[pp].lex.kind) || is_outer_close(tokens[pp].lex.kind)))
+                    (is_close_block(tokens[pp].lex.kind) || is_outer_close(tokens[pp].lex.kind) ||
+                     kind_is(tokens[pp], TK::BeginKeyword)))
                     t.mutable_.wrap.must_break_after = true;
             }
             if (opts_.statement.begin_newline &&
@@ -1931,7 +1932,8 @@ private:
                 if (body != npos &&
                     !kind_is(tokens[body], TK::BeginKeyword) &&
                     !kind_is(tokens[body], TK::ForkKeyword) &&
-                    !kind_is(tokens[body], TK::OpenBrace))
+                    !kind_is(tokens[body], TK::OpenBrace) &&
+                    !kind_is(tokens[body], TK::IfKeyword))
                     tokens[body].mutable_.wrap.must_break_before = true;
                 continue;
             }
@@ -2439,9 +2441,16 @@ public:
             // Compute LHS width
             if (ln.assign_idx != npos) {
                 ln.lhs_width = canonical_width(tokens, scan_start, ln.assign_idx);
+                // Count identifiers at bracket depth 0 only: arr[b] has one
+                // top-level identifier (arr), so it should not be treated like
+                // a two-identifier user-defined-type declaration (packet_t v).
                 int identifiers_before_assign = 0;
+                int ident_bd = 0;
                 for (size_t k = scan_start; k < ln.assign_idx; ++k) {
-                    if (is_code_token(tokens[k]) && is_identifier_like(tokens[k]))
+                    if (is_passthrough(tokens[k])) continue;
+                    if (kind_is(tokens[k], TK::OpenBracket)) ++ident_bd;
+                    else if (kind_is(tokens[k], TK::CloseBracket) && ident_bd > 0) --ident_bd;
+                    if (ident_bd == 0 && is_code_token(tokens[k]) && is_identifier_like(tokens[k]))
                         ++identifiers_before_assign;
                 }
                 if (identifiers_before_assign >= 2)
@@ -2770,6 +2779,13 @@ public:
                         packed_dim = k;
                         break;
                     }
+                }
+                // If first_name sits inside the packed_dim brackets, this is a
+                // subscript LHS (e.g. arr[p.value] = 3;), not a var declaration.
+                if (packed_dim != npos) {
+                    size_t close_dim = tokens[packed_dim].immutable.syntax.matching_token;
+                    if (close_dim != npos && first_name > packed_dim && first_name < close_dim)
+                        return false;
                 }
                 out = {ln.first, ln.end, semi, eq, first_name, first_delim,
                        packed_dim, packed_dim != npos, ln.indent};

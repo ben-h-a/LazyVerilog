@@ -4316,3 +4316,96 @@ TEST_CASE("formatter: binary operator followed by unary operand keeps token sepa
     CHECK(format_source(src, opts) == expected);
     CHECK(format_source(expected, opts) == expected);
 }
+
+TEST_CASE("formatter: array subscript with hierarchical ref not misidentified as var decl", "[formatter][align]") {
+    FormatOptions opts = var_section_stress_options(true);
+
+    const std::string src =
+        "module top;\n"
+        "always_comb begin\n"
+        "arr[p.value] = 3;\n"
+        "end\n"
+        "endmodule\n";
+
+    const std::string expected =
+        "module top;\n"
+        "always_comb begin\n"
+        "    arr[p.value] = 3;\n"
+        "end\n"
+        "endmodule\n";
+
+    CHECK(format_source(src, opts) == expected);
+    CHECK(format_source(expected, opts) == expected);
+}
+
+TEST_CASE("formatter: else if stays on same line", "[formatter][wrap]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+    opts.statement.wrap_end_else_clauses = true;
+
+    const std::string src =
+        "module top;\n"
+        "always_comb begin\n"
+        "if (0) begin\n"
+        "a = 1;\n"
+        "end else if (1) begin\n"
+        "a = 2;\n"
+        "end\n"
+        "end\n"
+        "endmodule\n";
+
+    std::string result = format_source(src, opts);
+    INFO("formatted:\n" << result);
+    CHECK(result.find("else if") != std::string::npos);
+    CHECK(format_source(result, opts) == result);
+}
+
+TEST_CASE("formatter: named begin block keeps label on same line as begin", "[formatter][wrap]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+
+    const std::string src =
+        "module top;\n"
+        "always begin : my_label\n"
+        "foo = 3;\n"
+        "end\n"
+        "endmodule\n";
+
+    std::string result = format_source(src, opts);
+    INFO("formatted:\n" << result);
+    CHECK(result.find("begin: my_label") != std::string::npos);
+    CHECK(format_source(result, opts) == result);
+}
+
+TEST_CASE("formatter: array subscript with identifier index aligned with group", "[formatter][align]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.indent_size = 4;
+    opts.statement.align = true;
+    opts.statement.lhs_min_width = 10;
+
+    const std::string src =
+        "module top;\n"
+        "always_comb begin\n"
+        "a = 3;\n"
+        "b = 3;\n"
+        "arr[3] = 3;\n"
+        "arr[b] = 3;\n"
+        "end\n"
+        "endmodule\n";
+
+    const std::string expected =
+        "module top;\n"
+        "always_comb begin\n"
+        "    a          = 3;\n"
+        "    b          = 3;\n"
+        "    arr[3]     = 3;\n"
+        "    arr[b]     = 3;\n"
+        "end\n"
+        "endmodule\n";
+
+    CHECK(format_source(src, opts) == expected);
+    CHECK(format_source(expected, opts) == expected);
+}
