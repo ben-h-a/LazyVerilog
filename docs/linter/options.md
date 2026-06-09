@@ -22,19 +22,6 @@ enable = true
 
 ---
 
-### `diagnostic_debounce_ms`
-
-Milliseconds to wait after the last edit before reparsing and running lint. Rapid keystrokes reset the timer; only one reparse fires after the user pauses. Set to `0` to reparse synchronously on every change (old behaviour).
-
-```toml
-[lint]
-diagnostic_debounce_ms = 150
-```
-
-Higher values reduce CPU and filesystem load during fast typing at the cost of slightly delayed diagnostics. On NFS or shared HPC systems, values of 200–500 ms are recommended.
-
----
-
 ## Severity levels
 
 Every rule category exposes a `severity` field. The value controls how the LSP reports violations.
@@ -778,7 +765,6 @@ Diagnostics:
 ```toml
 [lint]
 enable = true
-diagnostic_debounce_ms = 150
 
 [lint.style]
 trailing_whitespace = true

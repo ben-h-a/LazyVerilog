@@ -10,7 +10,6 @@ log_timing = false              # emit [compilation] timing lines to the LSP log
 
 [lint]
 enable = true                  # global kill-switch; false disables all lint rules
-diagnostic_debounce_ms = 1000   # wait after last edit before running reparse + lint; 0 = synchronous
 
 
 [lint.naming]

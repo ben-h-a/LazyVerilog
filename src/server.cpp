@@ -552,8 +552,7 @@ LazyVerilogServer::LazyVerilogServer() : impl_(std::make_unique<Impl>()) {
             publish_diagnostics(uri);
     });
     // Hardcoded 250 ms shard-merge cadence.  This coalesces rapid shard
-    // completions without exposing a knob most users never tune.  The
-    // user-visible diagnostic latency is controlled by [lint].diagnostic_debounce_ms.
+    // completions without exposing a knob most users never tune.
     analyzer_.set_project_index_publish_debounce_ms(250);
     analyzer_.set_parse_complete_callback([this](const std::string& uri) {
         publish_diagnostics(uri);

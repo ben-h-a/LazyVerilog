@@ -227,10 +227,6 @@ struct StyleLintConfig {
 
 struct LintConfig {
     bool enable{true};
-    // Debounce per-URI diagnostic publishes after edits.  0 = publish
-    // synchronously (old behaviour).  Default 150 ms absorbs typical
-    // keystroke bursts without making diagnostics feel sluggish.
-    int diagnostic_debounce_ms{150};
     NamingConfig naming;
     ModuleLintConfig module;
     InstanceLintConfig instance;
