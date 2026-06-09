@@ -173,7 +173,7 @@ static std::vector<FileView> collect_files(const Analyzer& analyzer, const std::
                                      .path = extra.path,
                                      .text = {},
                                      .text_loaded = false,
-                                     .index = extra.index,
+                                     .index = extra.index_ref(),
                                      .state = nullptr});
         }
     }

@@ -49,13 +49,25 @@ struct ExtraFileInfo {
     // project files must not keep DocumentState / SyntaxTree alive; they are
     // represented by `index` only.
     std::shared_ptr<const DocumentState> state;
-    SyntaxIndex index;
+    // Shared pointer avoids deep-copying the SyntaxIndex when the snapshot
+    // cache is rebuilt (e.g. on every didChange).  With 100+ project files the
+    // copy cost is significant; sharing the immutable shard is safe because
+    // ExtraFileCacheEntry already owns the canonical shared_ptr.
+    std::shared_ptr<const SyntaxIndex> index;
+    const SyntaxIndex& index_ref() const {
+        static const SyntaxIndex empty{};
+        return index ? *index : empty;
+    }
 };
 
 struct ExtraIndexInfo {
     std::string path;
     std::string uri;
-    SyntaxIndex index;
+    std::shared_ptr<const SyntaxIndex> index;
+    const SyntaxIndex& index_ref() const {
+        static const SyntaxIndex empty{};
+        return index ? *index : empty;
+    }
 };
 
 struct OpenIndexShard {

@@ -1149,6 +1149,84 @@ struct GenericDefinitionVisitor : public slang::syntax::SyntaxVisitor<GenericDef
     }
 };
 
+// Index-based generic definition lookup.  Replaces the full AST walk for
+// extra-file searches so closed project files are also searched and open
+// files no longer pay a per-request AST traversal cost.
+static std::optional<Location> find_generic_definition_from_index(
+    const SyntaxIndex& index, const std::string& uri, const std::string& name,
+    const std::string& preferred_module, const std::string& preferred_package,
+    const std::vector<ImportEntry>& visible_imports, int use_line_one_based) {
+
+    // Returns true when a symbol declared inside `parent_scope` (a package) is
+    // reachable at the cursor position given the current file's import list.
+    auto pkg_visible = [&](std::string_view parent_scope, std::string_view sym_name) -> bool {
+        if (parent_scope.empty() || !index.package_names.count(std::string(parent_scope)))
+            return true; // not in a package — module/interface scope, always visible
+        if (preferred_package == parent_scope)
+            return true; // cursor is inside the same package
+        for (const auto& imp : visible_imports) {
+            if (imp.package_name != parent_scope)
+                continue;
+            if (!imp.parent_scope.empty() && imp.parent_scope != preferred_module)
+                continue;
+            if (imp.start_line > 0 && use_line_one_based < imp.start_line)
+                continue;
+            if (imp.end_line > 0 && use_line_one_based > imp.end_line)
+                continue;
+            if (imp.wildcard || imp.symbol_name == sym_name)
+                return true;
+        }
+        return false;
+    };
+
+    auto make_loc = [&](SourceFileID file_id, int line, int col) -> Location {
+        const auto actual_uri = index.source_uri(file_id);
+        const int lsp_line = to_lsp_line(line);
+        return Location{actual_uri.empty() ? uri : actual_uri, lsp_line, col, lsp_line,
+                        col + (int)name.size()};
+    };
+
+    // Modules and packages — scope-insensitive, always visible (mirrors
+    // GenericDefinitionVisitor::handle(ModuleDeclarationSyntax) with scope_sensitive=false).
+    if (auto it = index.module_by_name.find(name); it != index.module_by_name.end() &&
+                                                    it->second < index.modules.size())
+        return make_loc(index.modules[it->second].file_id, index.modules[it->second].line,
+                        index.modules[it->second].col);
+
+    // Classes — scope-insensitive (mirrors handle(ClassDeclarationSyntax) scope_sensitive=false).
+    if (auto it = index.class_by_name.find(name); it != index.class_by_name.end() &&
+                                                   it->second < index.classes.size())
+        return make_loc(index.classes[it->second].file_id, index.classes[it->second].line,
+                        index.classes[it->second].col);
+
+    // Typedefs — O(1) lookup with package visibility check.
+    if (auto it = index.typedef_by_name.find(name); it != index.typedef_by_name.end() &&
+                                                     it->second < index.typedefs.size()) {
+        const auto& td = index.typedefs[it->second];
+        if (pkg_visible(td.parent_scope, name))
+            return make_loc(td.file_id, td.line, td.col);
+    }
+
+    // Values: variables, nets, functions, tasks, parameters, ports.
+    // Linear scan but over a flat POD-like vector — far cheaper than an AST
+    // visitor walk.  Prefer a scoped hit (same module as cursor) over a generic
+    // first hit to mirror GenericDefinitionVisitor's scoped_result priority.
+    std::optional<Location> first_hit;
+    std::optional<Location> scoped_hit;
+    for (const auto& v : index.values) {
+        if (v.name != name)
+            continue;
+        if (!pkg_visible(v.parent_scope, name))
+            continue;
+        auto loc = make_loc(v.file_id, v.line, v.col);
+        if (!first_hit)
+            first_hit = loc;
+        if (!preferred_module.empty() && v.parent_scope == preferred_module && !scoped_hit)
+            scoped_hit = loc;
+    }
+    return scoped_hit ? scoped_hit : first_hit;
+}
+
 static std::optional<Location> find_generic_definition(const slang::syntax::SyntaxTree& tree,
                                                        const std::string& uri,
                                                        const std::string& name,
@@ -1936,7 +2014,7 @@ std::optional<SymbolInfo> Analyzer::symbol_at(const std::string& uri, int line, 
                 if (extra.uri != definition->uri || !extra.state || !extra.state->tree)
                     continue;
                 if (auto info = symbol_info_from_definition(*extra.state->tree, extra.uri, name,
-                                                            *definition, &extra.index))
+                                                            *definition, &extra.index_ref()))
                     return info;
             }
         }
@@ -2080,7 +2158,7 @@ Analyzer::definition_of_state(const DocumentState& state, const std::string& uri
             if (skip_extra(extra))
                 continue;
             if (auto loc =
-                    find_port_definition(extra.index, extra.uri, target.module_name, target.name))
+                    find_port_definition(extra.index_ref(), extra.uri, target.module_name, target.name))
                 return loc;
         }
         return std::nullopt;
@@ -2095,7 +2173,7 @@ Analyzer::definition_of_state(const DocumentState& state, const std::string& uri
             if (skip_extra(extra))
                 continue;
             if (auto loc =
-                    find_port_definition(extra.index, extra.uri, target.module_name, target.name))
+                    find_port_definition(extra.index_ref(), extra.uri, target.module_name, target.name))
                 return loc;
         }
         return std::nullopt;
@@ -2124,7 +2202,7 @@ Analyzer::definition_of_state(const DocumentState& state, const std::string& uri
         for (const auto& extra : extra_files) {
             if (skip_extra(extra))
                 continue;
-            if (auto loc = find_module_definition(extra.index, extra.uri, target.module_name))
+            if (auto loc = find_module_definition(extra.index_ref(), extra.uri, target.module_name))
                 return loc;
         }
         return std::nullopt;
@@ -2157,7 +2235,7 @@ Analyzer::definition_of_state(const DocumentState& state, const std::string& uri
             for (const auto& extra : extra_files) {
                 if (skip_extra(extra))
                     continue;
-                if (auto loc = find_class_method_definition(extra.index, extra.uri, *class_type,
+                if (auto loc = find_class_method_definition(extra.index_ref(), extra.uri, *class_type,
                                                             target.name))
                     return loc;
             }
@@ -2175,12 +2253,21 @@ Analyzer::definition_of_state(const DocumentState& state, const std::string& uri
     for (const auto& extra : extra_files) {
         if (skip_extra(extra))
             continue;
-        if (!extra.state || !extra.state->tree)
-            continue;
-        if (auto loc = find_generic_definition(*extra.state->tree, extra.uri, target.name,
-                                               target.scope_module, target.scope_package,
-                                               visible_imports, use_line_one_based))
+        // Index-based search covers all files (open and closed) for modules,
+        // classes, typedefs, and values.
+        if (auto loc = find_generic_definition_from_index(extra.index_ref(), extra.uri, target.name,
+                                                          target.scope_module, target.scope_package,
+                                                          visible_imports, use_line_one_based))
             return loc;
+        // AST fallback for open files only: catches symbols not yet indexed
+        // (e.g. module-level functions/tasks).  Only reached when the index
+        // found nothing for this file.
+        if (extra.state && extra.state->tree) {
+            if (auto loc = find_generic_definition(*extra.state->tree, extra.uri, target.name,
+                                                   target.scope_module, target.scope_package,
+                                                   visible_imports, use_line_one_based))
+                return loc;
+        }
     }
 
     return std::nullopt;
@@ -2226,19 +2313,19 @@ std::vector<Location> Analyzer::find_references(const std::string& uri, int line
     auto target_def = definition_of_state(*state, uri, line, col, extra_files);
     if (!target_def && target_info.kind == DefinitionTargetKind::Instance) {
         for (const auto& extra : *extra_idx) {
-            if ((target_def = find_module_definition(extra.index, extra.uri,
+            if ((target_def = find_module_definition(extra.index_ref(), extra.uri,
                                                      target_info.module_name)))
                 break;
         }
     } else if (!target_def && target_info.kind == DefinitionTargetKind::NamedPort) {
         for (const auto& extra : *extra_idx) {
-            if ((target_def = find_port_definition(extra.index, extra.uri,
+            if ((target_def = find_port_definition(extra.index_ref(), extra.uri,
                                                    target_info.module_name, target_info.name)))
                 break;
         }
     } else if (!target_def && target_info.kind == DefinitionTargetKind::NamedParameter) {
         for (const auto& extra : *extra_idx) {
-            if ((target_def = find_port_definition(extra.index, extra.uri,
+            if ((target_def = find_port_definition(extra.index_ref(), extra.uri,
                                                    target_info.module_name, target_info.name)))
                 break;
         }
@@ -2275,7 +2362,7 @@ std::vector<Location> Analyzer::find_references(const std::string& uri, int line
             (find_class_method_definition(current_index, uri, *class_type, target_info.name)
                  .has_value() ||
              std::any_of(extra_idx->begin(), extra_idx->end(), [&](const ExtraIndexInfo& extra) {
-                 return find_class_method_definition(extra.index, extra.uri, *class_type,
+                 return find_class_method_definition(extra.index_ref(), extra.uri, *class_type,
                                                      target_info.name)
                      .has_value();
              }));
@@ -2326,7 +2413,7 @@ std::vector<Location> Analyzer::find_references(const std::string& uri, int line
             for (const auto& extra : *extra_idx) {
                 if (extra.uri != target_def->uri)
                     continue;
-                if (auto id = symbol_id_for_index_location(extra.index, *target_def))
+                if (auto id = symbol_id_for_index_location(extra.index_ref(), *target_def))
                     target_symbol_debug = *id;
                 break;
             }
@@ -2360,7 +2447,7 @@ std::vector<Location> Analyzer::find_references(const std::string& uri, int line
             for (const auto& extra : *extra_idx) {
                 if (extra.uri != target_def->uri)
                     continue;
-                if (auto id = symbol_id_for_index_location(extra.index, *target_def, true);
+                if (auto id = symbol_id_for_index_location(extra.index_ref(), *target_def, true);
                     id && id->starts_with("name:")) {
                     fallback_symbol_debug = *id;
                 }
@@ -2521,10 +2608,10 @@ std::vector<Location> Analyzer::find_references(const std::string& uri, int line
         // acceleration buckets.  That keeps initial project indexing lighter and
         // closer to the v1.0.4 model; explicit references / rename requests pay
         // the linear scan cost over compact ReferenceEntry records instead.
-        for (const auto& ref : extra.index.references) {
+        for (const auto& ref : extra.index_ref().references) {
             if (ref.symbol_id == target_symbol_id ||
                 (fallback_symbol_id && ref.symbol_id == fallback_symbol_id))
-                add_indexed_reference(extra.uri, extra.index, ref);
+                add_indexed_reference(extra.uri, extra.index_ref(), ref);
         }
     }
 
@@ -2771,7 +2858,7 @@ Analyzer::build_extra_file_snapshot_locked() const {
                 .path = entry.path,
                 .uri = entry.uri,
                 .state = it->second,
-                .index = entry.index ? *entry.index : SyntaxIndex{},
+                .index = entry.index,
             });
             continue;
         }
@@ -2779,7 +2866,7 @@ Analyzer::build_extra_file_snapshot_locked() const {
             .path = entry.path,
             .uri = entry.uri,
             .state = nullptr,
-            .index = entry.index ? *entry.index : SyntaxIndex{},
+            .index = entry.index,
         });
     }
     return result;
@@ -2793,7 +2880,7 @@ Analyzer::build_extra_index_snapshot_locked() const {
         result->push_back(ExtraIndexInfo{
             .path = entry.path,
             .uri = entry.uri,
-            .index = entry.index ? *entry.index : SyntaxIndex{},
+            .index = entry.index,
         });
     }
     return result;
@@ -3067,7 +3154,7 @@ std::optional<RtlTreeNode> Analyzer::rtl_tree(const std::string& uri) const {
             add_rtl_index_file(view, seen_uris, state_uri, get_structural_index(*state_snapshot));
     }
     for (const auto& extra : *extra_snapshot)
-        add_rtl_index_file(view, seen_uris, extra.uri, extra.index);
+        add_rtl_index_file(view, seen_uris, extra.uri, extra.index_ref());
     build_rtl_parent_adjacency(view);
 
     const auto* root = &state_index.modules.front();
@@ -3145,7 +3232,7 @@ std::optional<RtlTreeNode> Analyzer::rtl_tree_reverse(const std::string& uri) co
             add_rtl_index_file(view, seen_uris, state_uri, get_structural_index(*state_snapshot));
     }
     for (const auto& extra : *extra_snapshot)
-        add_rtl_index_file(view, seen_uris, extra.uri, extra.index);
+        add_rtl_index_file(view, seen_uris, extra.uri, extra.index_ref());
 
     const auto* target = &state_index.modules.front();
     for (const auto& module : state_index.modules) {
