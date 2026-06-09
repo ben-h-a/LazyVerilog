@@ -213,6 +213,11 @@ commit_version_file() {
 
     run git -C "$REPO_ROOT" add "$VERSION_FILE"
 
+    local note="${REPO_ROOT}/docs/releases/${VERSION}.md"
+    if [[ -f "$note" ]]; then
+        run git -C "$REPO_ROOT" add "$note"
+    fi
+
     if git -C "$REPO_ROOT" diff --cached --quiet -- "$VERSION_FILE"; then
         printf 'No staged version-file change to commit.\n'
         return 0
