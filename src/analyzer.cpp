@@ -2253,21 +2253,10 @@ Analyzer::definition_of_state(const DocumentState& state, const std::string& uri
     for (const auto& extra : extra_files) {
         if (skip_extra(extra))
             continue;
-        // Index-based search covers all files (open and closed) for modules,
-        // classes, typedefs, and values.
         if (auto loc = find_generic_definition_from_index(extra.index_ref(), extra.uri, target.name,
                                                           target.scope_module, target.scope_package,
                                                           visible_imports, use_line_one_based))
             return loc;
-        // AST fallback for open files only: catches symbols not yet indexed
-        // (e.g. module-level functions/tasks).  Only reached when the index
-        // found nothing for this file.
-        if (extra.state && extra.state->tree) {
-            if (auto loc = find_generic_definition(*extra.state->tree, extra.uri, target.name,
-                                                   target.scope_module, target.scope_package,
-                                                   visible_imports, use_line_one_based))
-                return loc;
-        }
     }
 
     return std::nullopt;

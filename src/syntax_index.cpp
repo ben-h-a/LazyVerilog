@@ -391,15 +391,18 @@ static void process_module(const ModuleDeclarationSyntax& module, SyntaxIndex& i
             }
         } else if (const auto* fn = member->as_if<FunctionDeclarationSyntax>()) {
             const auto& proto = *fn->prototype;
-            auto [vl, vc] = token_pos_line1_col0(sm, proto.keyword);
+            const auto* id_name = proto.name->as_if<IdentifierNameSyntax>();
+            const auto name_tok = id_name ? id_name->identifier : proto.keyword;
+            auto [nl, nc] = token_pos_line1_col0(sm, name_tok);
             index.values.push_back(ValueEntry{
-                .name = render_syntax_node_text(sm, *proto.name),
+                .name = id_name ? std::string(id_name->identifier.valueText())
+                                : render_syntax_node_text(sm, *proto.name),
                 .type = render_syntax_node_text(sm, *proto.returnType),
-                .kind = "function",
+                .kind = std::string(proto.keyword.valueText()),
                 .parent_scope = entry.name,
-                .file_id = source_file_id_for_token(index, sm, proto.keyword),
-                .line = vl,
-                .col = vc,
+                .file_id = source_file_id_for_token(index, sm, name_tok),
+                .line = nl,
+                .col = nc,
             });
         }
     }
@@ -615,7 +618,22 @@ static void process_package(const ModuleDeclarationSyntax& pkg, SyntaxIndex& ind
             symbols.push_back(token_value_text(cls->name));
             process_class(*cls, index, sm, pkg_name);
         } else if (const auto* fn = member->as_if<FunctionDeclarationSyntax>()) {
-            symbols.push_back(render_syntax_node_text(sm, *fn->prototype->name));
+            const auto& proto = *fn->prototype;
+            const auto* id_name = proto.name->as_if<IdentifierNameSyntax>();
+            const auto name_tok = id_name ? id_name->identifier : proto.keyword;
+            const auto fn_name = id_name ? std::string(id_name->identifier.valueText())
+                                         : render_syntax_node_text(sm, *proto.name);
+            symbols.push_back(fn_name);
+            auto [nl, nc] = token_pos_line1_col0(sm, name_tok);
+            index.values.push_back(ValueEntry{
+                .name = fn_name,
+                .type = render_syntax_node_text(sm, *proto.returnType),
+                .kind = std::string(proto.keyword.valueText()),
+                .parent_scope = pkg_name,
+                .file_id = source_file_id_for_token(index, sm, name_tok),
+                .line = nl,
+                .col = nc,
+            });
         } else if (const auto* data = member->as_if<DataDeclarationSyntax>()) {
             const std::string type_text = render_syntax_node_text(sm, *data->type);
             for (const auto* decl : data->declarators) {
