@@ -1972,6 +1972,143 @@ static DefinitionTarget definition_target_at(const slang::syntax::SyntaxTree& tr
     return visitor.target;
 }
 
+static std::optional<SymbolInfo> symbol_info_from_index(const SyntaxIndex& idx,
+                                                        const DefinitionTarget& target,
+                                                        const Location& definition) {
+    if (target.kind == DefinitionTargetKind::Instance) {
+        auto it = idx.module_by_name.find(target.module_name);
+        if (it == idx.module_by_name.end())
+            return std::nullopt;
+        return SymbolInfo{.name = target.module_name,
+                          .kind = "module",
+                          .detail = "module",
+                          .doc = module_doc_from_entry(idx.modules[it->second]),
+                          .line = definition.line,
+                          .col = definition.col};
+    }
+    if (target.kind == DefinitionTargetKind::NamedPort) {
+        auto mit = idx.module_by_name.find(target.module_name);
+        if (mit == idx.module_by_name.end())
+            return std::nullopt;
+        const auto& mod = idx.modules[mit->second];
+        auto pit = mod.port_by_name.find(target.name);
+        if (pit == mod.port_by_name.end())
+            return std::nullopt;
+        const auto& port = mod.ports[pit->second];
+        return SymbolInfo{.name = target.name,
+                          .kind = "port",
+                          .detail = port.decl_type.empty() ? port.type : port.decl_type,
+                          .line = definition.line,
+                          .col = definition.col};
+    }
+    if (target.kind == DefinitionTargetKind::NamedParameter) {
+        auto mit = idx.module_by_name.find(target.module_name);
+        if (mit == idx.module_by_name.end())
+            return std::nullopt;
+        const auto& mod = idx.modules[mit->second];
+        auto pit = mod.port_by_name.find(target.name);
+        if (pit == mod.port_by_name.end())
+            return std::nullopt;
+        const auto& port = mod.ports[pit->second];
+        std::string detail = port.type;
+        if (!port.default_value.empty())
+            detail += " = " + port.default_value;
+        return SymbolInfo{.name = target.name,
+                          .kind = "parameter",
+                          .detail = detail,
+                          .line = definition.line,
+                          .col = definition.col};
+    }
+    if (target.kind == DefinitionTargetKind::ClassMember) {
+        for (const auto& cls : idx.classes) {
+            for (const auto& f : cls.fields) {
+                if (f.name == target.name)
+                    return SymbolInfo{.name = target.name,
+                                      .kind = "variable",
+                                      .detail = f.type,
+                                      .line = definition.line,
+                                      .col = definition.col};
+            }
+            for (const auto& m : cls.methods) {
+                if (m.name == target.name)
+                    return SymbolInfo{
+                        .name = target.name,
+                        .kind = m.is_task ? "task" : "function",
+                        .detail = m.is_task ? "task" : "function",
+                        .doc = m.is_task
+                                   ? ("```\ntask " + m.name + "()\n```")
+                                   : ("```\nfunction " + m.return_type + " " + m.name + "()\n```"),
+                        .line = definition.line,
+                        .col = definition.col};
+            }
+        }
+        return std::nullopt;
+    }
+    if (target.kind == DefinitionTargetKind::Generic) {
+        // function/task first
+        for (const auto& v : idx.values) {
+            if (v.name != target.name)
+                continue;
+            if (v.kind != "function" && v.kind != "task")
+                continue;
+            std::string doc;
+            if (!v.signature.empty())
+                doc = v.signature;
+            return SymbolInfo{.name = target.name,
+                              .kind = v.kind,
+                              .detail = v.kind,
+                              .doc = std::move(doc),
+                              .line = definition.line,
+                              .col = definition.col};
+        }
+        // typedef/enum/struct
+        auto tit = idx.typedef_by_name.find(target.name);
+        if (tit != idx.typedef_by_name.end()) {
+            const auto& td = idx.typedefs[tit->second];
+            std::string detail;
+            if (td.is_enum) {
+                detail = "enum " + td.resolved;
+                if (!td.enum_members.empty()) {
+                    detail += " {";
+                    for (size_t i = 0; i < td.enum_members.size(); ++i) {
+                        if (i)
+                            detail += ", ";
+                        detail += td.enum_members[i].name;
+                    }
+                    detail += "}";
+                }
+            } else if (td.is_struct) {
+                detail = "struct packed";
+                if (!td.fields.empty()) {
+                    detail += " {";
+                    for (const auto& f : td.fields) {
+                        detail += " " + f.type + " " + f.name + ";";
+                    }
+                    detail += " }";
+                }
+            } else {
+                detail = td.resolved;
+            }
+            return SymbolInfo{.name = target.name,
+                              .kind = "typedef",
+                              .detail = detail,
+                              .line = definition.line,
+                              .col = definition.col};
+        }
+        // variable/net/parameter/localparam
+        for (const auto& v : idx.values) {
+            if (v.name == target.name) {
+                return SymbolInfo{.name = target.name,
+                                  .kind = v.kind.empty() ? "variable" : v.kind,
+                                  .detail = v.type,
+                                  .line = definition.line,
+                                  .col = definition.col};
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<SymbolInfo> Analyzer::symbol_at(const std::string& uri, int line, int col) const {
     auto state = get_state(uri);
     if (!state || !state->tree)
@@ -2019,44 +2156,13 @@ std::optional<SymbolInfo> Analyzer::symbol_at(const std::string& uri, int line, 
             }
         }
 
-        if (target.kind == DefinitionTargetKind::Instance) {
-            // symbol_info_from_definition requires a live SyntaxTree which closed
-            // files don't have.  Fall back to the SyntaxIndex shard: module_doc_from_entry
-            // already formats a port table from ModuleEntry, so hover still shows ports.
-            std::string doc;
-            for (const auto& extra : *extra_files) {
-                if (extra.uri != definition->uri)
-                    continue;
-                for (const auto& mod : extra.index_ref().modules) {
-                    if (mod.name == target.module_name) {
-                        doc = module_doc_from_entry(mod);
-                        break;
-                    }
-                }
-                break;
-            }
-            return SymbolInfo{.name = target.module_name,
-                              .kind = "module",
-                              .detail = "module",
-                              .doc = std::move(doc),
-                              .line = definition->line,
-                              .col = definition->col};
+        for (const auto& extra : *extra_files) {
+            if (extra.uri != definition->uri)
+                continue;
+            if (auto info = symbol_info_from_index(extra.index_ref(), target, *definition))
+                return info;
+            break;
         }
-        if (target.kind == DefinitionTargetKind::NamedArgument)
-            return SymbolInfo{.name = target.name,
-                              .kind = "argument",
-                              .line = definition->line,
-                              .col = definition->col};
-        if (target.kind == DefinitionTargetKind::NamedPort)
-            return SymbolInfo{.name = target.name,
-                              .kind = "port",
-                              .line = definition->line,
-                              .col = definition->col};
-        if (target.kind == DefinitionTargetKind::NamedParameter)
-            return SymbolInfo{.name = target.name,
-                              .kind = "parameter",
-                              .line = definition->line,
-                              .col = definition->col};
         return SymbolInfo{
             .name = name, .kind = "symbol", .line = definition->line, .col = definition->col};
     }
