@@ -2809,7 +2809,15 @@ public:
                 int group_packed_width = 0;
                 int group_name_width = 0;
                 int group_trailing_width = 0;
-                while (j < lines.size() && is_vline[j] && vlines[j].indent == indent) {
+                while (j < lines.size() &&
+                       (is_vline[j] ||
+                        (lines[j].first != npos &&
+                         tokens[lines[j].first].lex.comment_kind != CommentLexemeKind::None)) &&
+                       (!is_vline[j] || vlines[j].indent == indent)) {
+                    // Comment-only line inside a declaration group: skip it without
+                    // breaking the group so section2 (packed-dim column) remains
+                    // consistent across declarations separated by comments.
+                    if (!is_vline[j]) { ++j; continue; }
                     group_has_dim = group_has_dim || vlines[j].has_dim;
                     group_type_width = std::max(
                         group_type_width,
@@ -2878,6 +2886,7 @@ public:
                                                 group_trailing_width), opts_);
 
                 for (size_t li = i; li < j; ++li) {
+                    if (!is_vline[li]) continue; // comment line, no alignment tokens
                     const auto& vl = vlines[li];
                     for (size_t k = vl.first; k <= vl.semi && k < tokens.size(); ++k) {
                         tokens[k].mutable_.align.enabled = false;
