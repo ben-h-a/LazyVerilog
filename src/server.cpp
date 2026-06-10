@@ -1521,7 +1521,8 @@ void LazyVerilogServer::register_handlers() {
                 rsp.result.SetJsonString(json, lsp::Any::kObjectType);
             };
 
-            auto apply_ff_edits = [&](const AutoffResult& result, const std::string& uri) {
+            auto apply_ff_edits = [&](const AutoffResult& result, const std::string& uri,
+                                       const std::string& source) {
                 if (result.has_error || (result.edits.empty() && result.warn)) {
                     lsp::Any null_result;
                     null_result.SetJsonString("null", lsp::Any::kNullType);
@@ -1531,25 +1532,51 @@ void LazyVerilogServer::register_handlers() {
                 if (result.edits.empty())
                     return;
 
-                // Each AutoffEdit is a pure insertion at (line, 0).  AutoFF
-                // already uses the surrounding indentation from the source block,
-                // so no whole-file reformat is needed — emit one insert TextEdit
-                // per AutoffEdit and leave the rest of the file untouched.
+                // Build new_source by applying edits in reverse line order (highest
+                // first, as stored) so earlier insertions don't shift later offsets.
+                std::string new_source = source;
+                for (const auto& edit : result.edits) {
+                    size_t pos = 0;
+                    for (int i = 0; i < edit.line; ++i) {
+                        size_t nl = new_source.find('\n', pos);
+                        pos = (nl == std::string::npos) ? new_source.size() : nl + 1;
+                    }
+                    new_source.insert(pos, edit.text);
+                }
+                const std::string formatted = format_source(new_source, config_.format);
+
+                // Emit each edit as a zero-width insertion with the formatted content.
+                // Process in ascending line order, tracking accumulated line shift so
+                // we can slice the correct region from formatted.
+                auto sorted_edits = result.edits;
+                std::sort(sorted_edits.begin(), sorted_edits.end(),
+                          [](const AutoffEdit& a, const AutoffEdit& b) {
+                              return a.line < b.line;
+                          });
+
                 std::string json;
                 json += "{\"changes\":{";
                 json += json_string(uri);
                 json += ":[";
                 bool first = true;
-                for (const auto& edit : result.edits) {
+                int shift = 0;
+                for (const auto& edit : sorted_edits) {
                     if (!first) json += ',';
                     first = false;
+                    const int n_ins =
+                        (int)std::count(edit.text.begin(), edit.text.end(), '\n');
+                    const int ins_line = edit.line + shift;
+                    const std::string fmt_text = slice_lsp_range(
+                        formatted,
+                        lsRange(lsPosition(ins_line, 0), lsPosition(ins_line + n_ins, 0)));
+                    shift += n_ins;
                     const auto line_str = std::to_string(edit.line);
                     json += "{\"range\":{\"start\":{\"line\":";
                     json += line_str;
                     json += ",\"character\":0},\"end\":{\"line\":";
                     json += line_str;
                     json += ",\"character\":0}},\"newText\":";
-                    json += json_string(edit.text);
+                    json += json_string(fmt_text);
                     json += '}';
                 }
                 json += "]}}";
@@ -1598,7 +1625,7 @@ void LazyVerilogServer::register_handlers() {
                 auto state = analyzer_.get_state(uri);
                 if (state) {
                     auto result = autoff(*state, ff_line, config_.autoff.register_pattern);
-                    apply_ff_edits(result, uri);
+                    apply_ff_edits(result, uri, state->text);
                 }
             } else if (cmd == "lazyverilog.autoffAllPreview") {
                 std::string uri = get_string(0);
@@ -1612,7 +1639,7 @@ void LazyVerilogServer::register_handlers() {
                 auto state = analyzer_.get_state(uri);
                 if (state) {
                     auto result = autoff_all(*state, config_.autoff.register_pattern);
-                    apply_ff_edits(result, uri);
+                    apply_ff_edits(result, uri, state->text);
                 }
             } else if (cmd == "lazyverilog.rtlTree") {
                 std::string uri = get_string(0);
