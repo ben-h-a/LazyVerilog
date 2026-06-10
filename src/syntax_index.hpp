@@ -206,6 +206,9 @@ struct ValueEntry {
     int scope_end_line{0};
     int line{0};
     int col{0};
+    // Pre-formatted doc for function/task hover (empty for other kinds).
+    // Format: "```\n[function|task] [return_type] name(params)\n```"
+    std::string signature;
 };
 
 struct ImportEntry {
