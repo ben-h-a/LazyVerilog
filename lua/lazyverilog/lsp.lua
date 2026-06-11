@@ -204,15 +204,21 @@ local function _sha256_file(path, on_done)
 		end
 
 		vim.system(command, {}, function(result)
-			if result.code == 0 then
-				local digest = (result.stdout or ""):match("([0-9a-fA-F]+)")
-				if digest and #digest == 64 then
-					on_done(digest:lower(), nil)
-					return
+			-- `vim.system()` callbacks run in a fast-event context.  Schedule
+			-- before invoking the caller's continuation because the installer
+			-- continuation uses regular Vim APIs such as `vim.fn.rename()` and
+			-- `vim.fn.delete()`, which are illegal from fast events.
+			vim.schedule(function()
+				if result.code == 0 then
+					local digest = (result.stdout or ""):match("([0-9a-fA-F]+)")
+					if digest and #digest == 64 then
+						on_done(digest:lower(), nil)
+						return
+					end
 				end
-			end
 
-			try_command(index + 1)
+				try_command(index + 1)
+			end)
 		end)
 	end
 
@@ -320,67 +326,76 @@ local function _auto_install(on_done)
 		local tmp_path = bin_path .. ".download." .. tostring(vim.uv.hrtime())
 
 		vim.system({ "curl", "-fsSL", "-o", tmp_path, url }, {}, function(dl)
-			if dl.code ~= 0 then
-				_remove_file(tmp_path)
-				_fail_install_waiters(
-					"[LazyVerilog] download failed: "
-					.. (dl.stderr or "unknown error")
-					.. " URL: " .. url
-				)
-				return
-			end
-
-			_sha256_file(tmp_path, function(actual, hash_err)
-				if not actual then
-					_remove_file(tmp_path)
-					_fail_install_waiters("[LazyVerilog] checksum failed: " .. hash_err)
-					return
-				end
-
-				if actual ~= expected then
+			-- `vim.system()` callbacks are fast events.  The installer below
+			-- calls Vimscript-backed helpers (`delete`, later `rename`) and must
+			-- therefore run on the scheduled main loop.
+			vim.schedule(function()
+				if dl.code ~= 0 then
 					_remove_file(tmp_path)
 					_fail_install_waiters(
-						"[LazyVerilog] checksum mismatch for "
-						.. asset
-						.. "; expected "
-						.. expected
-						.. ", got "
-						.. actual
+						"[LazyVerilog] download failed: "
+						.. (dl.stderr or "unknown error")
+						.. " URL: " .. url
 					)
 					return
 				end
 
-				if vim.fn.rename(tmp_path, bin_path) ~= 0 then
-					_remove_file(tmp_path)
-					_fail_install_waiters("[LazyVerilog] failed to install verified binary")
-					return
-				end
-
-				vim.system({ "chmod", "+x", bin_path }, {}, function(ch)
-					if ch.code ~= 0 then
-						_remove_file(bin_path)
-						_fail_install_waiters("[LazyVerilog] chmod +x failed")
+				_sha256_file(tmp_path, function(actual, hash_err)
+					if not actual then
+						_remove_file(tmp_path)
+						_fail_install_waiters("[LazyVerilog] checksum failed: " .. hash_err)
 						return
 					end
-					-- On Linux, verify the binary's shared-library dependencies are
-					-- satisfied before declaring success.  This catches glibc version
-					-- mismatches without executing the server (which reads JSON-RPC
-					-- from stdin and would hang).  macOS ships dyld which handles
-					-- compatibility differently; skip the check there.
-					local uname = vim.uv.os_uname()
-					if uname.sysname:lower():find("linux") then
-						vim.system({ "ldd", bin_path }, {}, function(ldd)
-							local ldd_output = (ldd.stdout or "") .. (ldd.stderr or "")
-							if ldd_output:find("not found") then
+
+					if actual ~= expected then
+						_remove_file(tmp_path)
+						_fail_install_waiters(
+							"[LazyVerilog] checksum mismatch for "
+							.. asset
+							.. "; expected "
+							.. expected
+							.. ", got "
+							.. actual
+						)
+						return
+					end
+
+					if vim.fn.rename(tmp_path, bin_path) ~= 0 then
+						_remove_file(tmp_path)
+						_fail_install_waiters("[LazyVerilog] failed to install verified binary")
+						return
+					end
+
+					vim.system({ "chmod", "+x", bin_path }, {}, function(ch)
+						vim.schedule(function()
+							if ch.code ~= 0 then
 								_remove_file(bin_path)
-								on_compat_fail("binary not compatible with this system (missing libs)")
+								_fail_install_waiters("[LazyVerilog] chmod +x failed")
 								return
 							end
-							on_success()
+							-- On Linux, verify the binary's shared-library dependencies are
+							-- satisfied before declaring success.  This catches glibc version
+							-- mismatches without executing the server (which reads JSON-RPC
+							-- from stdin and would hang).  macOS ships dyld which handles
+							-- compatibility differently; skip the check there.
+							local uname = vim.uv.os_uname()
+							if uname.sysname:lower():find("linux") then
+								vim.system({ "ldd", bin_path }, {}, function(ldd)
+									vim.schedule(function()
+										local ldd_output = (ldd.stdout or "") .. (ldd.stderr or "")
+										if ldd_output:find("not found") then
+											_remove_file(bin_path)
+											on_compat_fail("binary not compatible with this system (missing libs)")
+											return
+										end
+										on_success()
+									end)
+								end)
+							else
+								on_success()
+							end
 						end)
-					else
-						on_success()
-					end
+					end)
 				end)
 			end)
 		end)
