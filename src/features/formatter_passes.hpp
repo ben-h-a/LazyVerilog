@@ -2803,7 +2803,6 @@ public:
                     continue;
                 }
                 size_t j = i;
-                bool group_has_dim = false;
                 int indent = vlines[i].indent;
                 int group_type_width = 0;
                 int group_packed_width = 0;
@@ -2818,7 +2817,6 @@ public:
                     // breaking the group so section2 (packed-dim column) remains
                     // consistent across declarations separated by comments.
                     if (!is_vline[j]) { ++j; continue; }
-                    group_has_dim = group_has_dim || vlines[j].has_dim;
                     group_type_width = std::max(
                         group_type_width,
                         canonical_width(tokens, vlines[j].first,
@@ -2893,28 +2891,44 @@ public:
                         tokens[k].mutable_.align.target_column = -1;
                     }
 
-                    int dim_col = vl.indent + effective_section1;
+                    // Preferred section boundaries are absolute columns for
+                    // this declaration group.  Later boundaries are not chained
+                    // from locally widened earlier boundaries; instead, each
+                    // boundary first tries to use its preferred column and only
+                    // moves right when that specific line's actual text would
+                    // overlap it.  This keeps long section2 text from pushing
+                    // an otherwise empty section4/semicolon column.
+                    const int preferred_dim_col = vl.indent + effective_section1;
+                    const int preferred_name_col = preferred_dim_col + effective_section2;
+                    const int preferred_trailing_col = preferred_name_col + effective_section3;
+                    const int preferred_delim_col = preferred_trailing_col + effective_section4;
+
+                    int dim_col = preferred_dim_col;
                     if (vl.packed_dim != npos) {
-                        if (opts_.var_declaration.align_adaptive)
-                            dim_col = std::max(dim_col,
-                                               vl.indent + canonical_width(tokens, vl.first, vl.packed_dim) + 1);
+                        dim_col = std::max(dim_col,
+                                           vl.indent + canonical_width(tokens, vl.first, vl.packed_dim) + 1);
                         tokens[vl.packed_dim].mutable_.align.enabled = true;
                         tokens[vl.packed_dim].mutable_.align.target_column = dim_col;
                     }
 
-                    int name_col = group_has_dim ? vl.indent + effective_section1 + effective_section2
-                                                 : vl.indent + effective_section1;
-                    if (opts_.var_declaration.align_adaptive) {
-                        name_col = std::max(
-                            name_col,
-                            vl.indent + option_width(canonical_width(tokens, vl.first, vl.first_name) + 1,
-                                                     opts_));
-                    }
-                    if (vl.packed_dim != npos && opts_.var_declaration.align_adaptive) {
+                    // A declaration line is a fixed section record, not a
+                    // compact list of only the sections that have text.  When
+                    // a packed-dimension section is absent, section2 still
+                    // contributes its configured/adaptive width so the signal
+                    // name remains in section3 instead of sliding left into
+                    // section2.  If section2 is present and longer than its
+                    // preferred width, only the name boundary is repaired; the
+                    // later trailing/delimiter boundaries still try their own
+                    // preferred columns before moving right for real overlap.
+                    int name_col = preferred_name_col;
+                    if (vl.packed_dim != npos) {
                         size_t close = tokens[vl.packed_dim].immutable.syntax.matching_token;
                         if (close != npos && close < vl.first_name)
                             name_col = std::max(name_col,
                                                 dim_col + token_text_width(tokens, vl.packed_dim, close + 1) + 1);
+                    } else {
+                        name_col = std::max(name_col,
+                                            vl.indent + canonical_width(tokens, vl.first, vl.first_name) + 1);
                     }
                     size_t unpacked_dim = npos;
                     for (size_t k = vl.first_name + 1; k < vl.first_delim; ++k) {
@@ -2933,45 +2947,44 @@ public:
                         if (close_bracket == npos)
                             return;
 
-                        // Section 3 reserves the signal-name column width.
-                        // The trailing unpacked dimension should begin after
-                        // that reserved column, not after the raw token width
-                        // of the name.  Adaptive mode uses the configured
-                        // section width directly.  Non-adaptive mode widens
-                        // the section for the whole group when one declaration
-                        // has a longer name, so every trailing dimension starts
-                        // in the same column.
-                        int trailing_start = name_col + effective_section3;
+                        // Section4 starts at the preferred trailing column when
+                        // possible.  A long name repairs only this boundary;
+                        // it does not automatically drag the following
+                        // delimiter boundary to the right.
+                        int trailing_start = std::max(preferred_trailing_col,
+                                                      name_col + token_width(tokens[vl.first_name]) + 1);
                         tokens[open_bracket].mutable_.align.enabled = true;
                         tokens[open_bracket].mutable_.align.target_column = trailing_start;
 
                         if (after_target != npos) {
                             tokens[after_target].mutable_.align.enabled = true;
                             tokens[after_target].mutable_.align.target_column =
-                                opts_.var_declaration.align_adaptive
-                                    ? trailing_start + token_text_width(tokens, open_bracket, close_bracket + 1) + section4
-                                    : trailing_start + effective_section4;
+                                std::max(preferred_trailing_col,
+                                         trailing_start + token_text_width(tokens, open_bracket, close_bracket + 1) + 1);
                         }
                     };
 
                     auto align_delim = [&](size_t name, size_t delim) {
                         if (delim != npos && delim < tokens.size()) {
                             tokens[delim].mutable_.align.enabled = true;
-                            tokens[delim].mutable_.align.target_column = tokens[name].mutable_.align.target_column +
-                                                                         effective_section3 + effective_section4;
+                            tokens[delim].mutable_.align.target_column =
+                                name == vl.first_name
+                                    ? preferred_delim_col
+                                    : tokens[name].mutable_.align.target_column + effective_section3 + effective_section4;
                         }
                     };
 
                     if (vl.eq != npos) {
-                        if (unpacked_dim != npos)
+                        if (unpacked_dim != npos) {
                             align_unpacked_trailing(unpacked_dim, vl.eq);
-                        tokens[vl.eq].mutable_.align.enabled = true;
-                        tokens[vl.eq].mutable_.align.target_column = name_col + effective_section3;
+                        } else {
+                            tokens[vl.eq].mutable_.align.enabled = true;
+                            tokens[vl.eq].mutable_.align.target_column =
+                                std::max(preferred_trailing_col,
+                                         name_col + token_width(tokens[vl.first_name]) + 1);
+                        }
                         tokens[vl.semi].mutable_.align.enabled = true;
-                        tokens[vl.semi].mutable_.align.target_column =
-                            opts_.var_declaration.align_adaptive
-                                ? tokens[vl.eq].mutable_.align.target_column + section4
-                                : name_col + effective_section3 + effective_section4;
+                        tokens[vl.semi].mutable_.align.target_column = preferred_delim_col;
                     } else {
                         if (unpacked_dim != npos)
                             align_unpacked_trailing(unpacked_dim, vl.first_delim);
@@ -3191,7 +3204,7 @@ public:
                 const int effective_s2 = opts_.port_declaration.align_adaptive
                                              ? s2
                                              : option_width(std::max(opts_.port_declaration.section2_min_width,
-                                                                     group_type_width + (group_has_packed ? 1 : 3)), opts_);
+                                                                     group_type_width + 1), opts_);
                 const int effective_s3 = opts_.port_declaration.align_adaptive
                                              ? s3
                                              : option_width(std::max(opts_.port_declaration.section3_min_width,
@@ -3209,63 +3222,66 @@ public:
                     }
 
                     const int base = pl.indent;
-                    const int type_col = opts_.port_declaration.align_adaptive
-                                             ? base + option_width(std::max(opts_.port_declaration.section1_min_width,
-                                                                           pl.direction_width + 1), opts_)
-                                             : base + effective_s1;
-                    const int packed_min_col = type_col + effective_s2;
-                    const int name_min_col = group_has_packed ? packed_min_col + effective_s3
-                                                              : type_col + effective_s2;
-                    const int trailing_gap = opts_.tab_align || !opts_.port_declaration.align_adaptive ? 0 : 5;
-                    const int unpacked_col = name_min_col + effective_s4 + trailing_gap;
-                    const int first_sep_col = unpacked_col + s5;
+                    const int preferred_type_col = base + effective_s1;
+                    const int preferred_packed_col = preferred_type_col + effective_s2;
+                    // Preserve the five-section port-declaration model even
+                    // for lines with omitted type or packed-dimension text.
+                    // Empty sections still occupy their section width; later
+                    // sections must not be renumbered leftward just because an
+                    // earlier section has no token on this line or in this
+                    // group.  Each boundary uses its preferred column unless
+                    // actual text on this line would overlap it.
+                    const int preferred_name_col = preferred_packed_col + effective_s3;
+                    const int trailing_gap = 0;
+                    const int preferred_unpacked_col = preferred_name_col + effective_s4 + trailing_gap;
+                    const int preferred_first_sep_col = preferred_unpacked_col + s5;
 
+                    const int type_col = std::max(preferred_type_col,
+                                                  base + pl.direction_width + 1);
                     if (pl.type_first != npos) {
                         tokens[pl.type_first].mutable_.align.enabled = true;
                         tokens[pl.type_first].mutable_.align.target_column = type_col;
                     }
 
-                    int packed_col = packed_min_col;
+                    int packed_col = preferred_packed_col;
                     if (pl.packed_dim != npos) {
-                        if (opts_.port_declaration.align_adaptive && pl.type_first != npos) {
-                            int type_end_col = type_col + pl.type_width;
-                            if (is_identifier_like(tokens[pl.type_first]) && pl.type_width < s2)
-                                packed_col = type_end_col + 3;
-                            else
-                                packed_col = std::max(packed_col, type_end_col + 1);
-                        }
+                        if (pl.type_first != npos)
+                            packed_col = std::max(packed_col, type_col + pl.type_width + 1);
                         tokens[pl.packed_dim].mutable_.align.enabled = true;
                         tokens[pl.packed_dim].mutable_.align.target_column = packed_col;
                     }
 
-                    int name_col = name_min_col;
-                    if (opts_.port_declaration.align_adaptive && pl.packed_dim != npos) {
+                    int name_col = preferred_name_col;
+                    if (pl.packed_dim != npos) {
                         size_t packed_close = tokens[pl.packed_dim].immutable.syntax.matching_token;
                         if (packed_close != npos && packed_close < pl.first_name)
                             name_col = std::max(name_col,
                                                 packed_col + token_text_width(tokens, pl.packed_dim,
                                                                               packed_close + 1) + 1);
+                    } else if (pl.type_first != npos) {
+                        name_col = std::max(name_col, type_col + pl.type_width + 1);
+                    } else {
+                        name_col = std::max(name_col, base + pl.direction_width + 1);
                     }
                     tokens[pl.first_name].mutable_.align.enabled = true;
                     tokens[pl.first_name].mutable_.align.target_column = name_col;
 
+                    const int unpacked_col = std::max(preferred_unpacked_col,
+                                                      name_col + pl.name_width + 1);
                     if (pl.unpacked_dim != npos) {
                         tokens[pl.unpacked_dim].mutable_.align.enabled = true;
                         tokens[pl.unpacked_dim].mutable_.align.target_column = unpacked_col;
                     }
                     tokens[pl.first_delim].mutable_.align.enabled = true;
                     tokens[pl.first_delim].mutable_.align.target_column =
-                        (opts_.port_declaration.align_adaptive && pl.first_delim == pl.semi &&
-                         pl.unpacked_dim == npos && pl.packed_dim != npos)
-                            ? (name_col + effective_s4 + trailing_gap + s5)
-                            : first_sep_col;
+                        std::max(preferred_first_sep_col, unpacked_col + s5);
 
                     // Subsequent comma declarators on the same non-ANSI line
                     // are still aligned relative to the previous separator.
                     // This keeps `input logic a, b;` readable without trying
                     // to fold secondary names into the cross-line section
                     // model, which only describes the first declarator.
-                    int next_name_col = first_sep_col + 2;
+                    int next_name_col = tokens[pl.first_delim].mutable_.align.target_column + 2;
                     size_t delim = pl.first_delim;
                     size_t item_begin = delim + 1;
                     while (delim != pl.semi) {
@@ -3319,7 +3335,7 @@ public:
                 tokens[type_first].mutable_.align.enabled = true;
                 tokens[type_first].mutable_.align.target_column = type_col;
                 int type_width = canonical_width(tokens, type_first, dim);
-                int dim_target = type_col + type_width + 3;
+                int dim_target = type_col + type_width + 1;
                 if (!opts_.port_declaration.align_adaptive)
                     dim_target = std::max(dim_target, base + opts_.port_declaration.section1_min_width +
                                                       opts_.port_declaration.section2_min_width);
@@ -3346,7 +3362,6 @@ public:
                     int typew;
                 };
                 std::vector<Decl> decls;
-                int type_width = opts_.port_declaration.section2_min_width;
                 for (const auto& item : items) {
                     if (!is_port_direction(tokens[item.first].lex.kind))
                         continue;
@@ -3380,7 +3395,6 @@ public:
                     int tw = type_first == npos
                                  ? 0
                                  : canonical_width(tokens, type_first, packed_dim != npos ? packed_dim : name);
-                    type_width = std::max(type_width, tw);
                     size_t unpacked_dim = npos;
                     for (size_t k = name + 1; k < item.last; ++k) {
                         if (kind_is(tokens[k], TK::OpenBracket)) {
@@ -3396,30 +3410,10 @@ public:
                 const int s3 = option_width(opts_.port_declaration.section3_min_width, opts_);
                 const int s4 = option_width(opts_.port_declaration.section4_min_width, opts_);
                 const int s5 = option_width(opts_.port_declaration.section5_min_width, opts_);
-                // ANSI headers only need section-5 comma alignment when the
-                // group actually contains trailing content after the port
-                // name.  If every item is just `dir type name,` then pushing
-                // the comma out to the section-5 column creates the
-                // over-indented `name               ,` shape that breaks the
-                // compact ANSI style tests.
-                //
-                // When at least one item has an unpacked dimension, comma
-                // alignment becomes useful because otherwise the comma on a
-                // shorter item can visually stop before the group reaches its
-                // trailing section.  However, the configured section widths
-                // are still per-declaration widths:
-                //
-                //   name column --section4--> section-5 / unpacked dimension
-                //   section-5 start --section5--> comma
-                //
-                // In other words, `[1:0]` is content inside section 5; it is
-                // not extra text before section 5.  Adding its width to the
-                // comma target makes `section5_min_width = 14` behave like
-                // `19` for a five-column unpacked dimension.  We only need the
-                // boolean "does this group have a trailing section at all?" to
-                // decide whether bare `dir type name,` items should reserve
-                // section4+section5 space.
-                bool group_has_trailing = false;
+                // The configured section widths describe fixed semantic
+                // fields.  Section5 is reserved whenever its minimum width is
+                // enabled, even on ANSI port lines that have no trailing text
+                // after the port name.
                 bool group_has_packed = false;
                 int group_direction_width = 0;
                 int group_type_width = 0;
@@ -3438,9 +3432,6 @@ public:
                                          token_text_width(tokens, d.packed_dim, packed_close + 1));
                     }
                     group_name_width = std::max(group_name_width, token_width(tokens[d.name]));
-                    if (d.unpacked_dim != npos) {
-                        group_has_trailing = true;
-                    }
                 }
                 // `align_adaptive=true` preserves the historical behavior:
                 // each later boundary may adapt to the current declaration's
@@ -3467,129 +3458,89 @@ public:
                         // separating space when section2 is followed by an
                         // explicit packed-dimension section.
                         : option_width(std::max(opts_.port_declaration.section2_min_width,
-                                                group_type_width + (group_has_packed ? 1 : 3)), opts_);
+                                                group_type_width + 1), opts_);
                 const int effective_s3 =
                     opts_.port_declaration.align_adaptive
                         ? s3
                         : option_width(std::max(opts_.port_declaration.section3_min_width,
                                                 group_packed_width + 1), opts_);
 
-                int dir_target = base + effective_s1;
-                int type_target = base + effective_s1;
-                int packed_min_col = type_target + effective_s2;
-                int name_target = opts_.port_declaration.align_adaptive
-                                      ? dir_target + type_width
-                                      : (group_has_packed ? packed_min_col + effective_s3
-                                                          : type_target + effective_s2);
+                const int preferred_type_col = base + effective_s1;
+                const int preferred_packed_col = preferred_type_col + effective_s2;
+                // The port name is section4.  It always begins after the
+                // direction, type, and packed-dimension sections.  A missing
+                // section2 or section3 token is an empty field with preserved
+                // width; it must not cause section4 to collapse into an
+                // earlier column.  Long text repairs only the boundary it
+                // would overlap; later section boundaries keep their own
+                // preferred columns whenever possible.
+                const int preferred_name_col = preferred_packed_col + effective_s3;
+                const int preferred_trailing_col = preferred_name_col +
+                    (opts_.port_declaration.align_adaptive ? s4
+                                                           : option_width(std::max(opts_.port_declaration.section4_min_width,
+                                                                                   group_name_width + 1), opts_));
+                const int preferred_comma_col = preferred_trailing_col + s5;
+
                 for (const auto& d : decls) {
+                    int type_target = std::max(preferred_type_col,
+                                               base + token_width(tokens[d.first]) + 1);
                     if (d.type_first != npos) {
                         tokens[d.type_first].mutable_.align.enabled = true;
                         tokens[d.type_first].mutable_.align.target_column = type_target;
-                        if (opts_.port_declaration.align_adaptive)
-                            name_target = std::max(name_target, dir_target + d.typew + 3);
                     }
-                }
-                for (const auto& d : decls) {
-                    int decl_name_target = name_target;
-                    int packed_col = packed_min_col;
+
+                    int packed_col = preferred_packed_col;
                     if (d.packed_dim != npos && d.type_first != npos) {
                         int packed_width = canonical_width(tokens, d.type_first, d.packed_dim);
-                        if (opts_.port_declaration.align_adaptive)
-                            packed_col = std::max(packed_col, type_target + packed_width + 1);
+                        packed_col = std::max(packed_col, type_target + packed_width + 1);
                         tokens[d.packed_dim].mutable_.align.enabled = true;
                         tokens[d.packed_dim].mutable_.align.target_column = packed_col;
                     }
 
-                    if (d.packed_dim != npos && opts_.port_declaration.align_adaptive) {
+                    int decl_name_target = preferred_name_col;
+                    if (d.packed_dim != npos) {
                         size_t packed_close = tokens[d.packed_dim].immutable.syntax.matching_token;
                         if (packed_close != npos && packed_close < d.name) {
                             decl_name_target = std::max(
                                 decl_name_target,
                                 packed_col + token_text_width(tokens, d.packed_dim, packed_close + 1) + 1);
                         }
-                        decl_name_target = std::max(decl_name_target, packed_col + effective_s3);
+                    } else if (d.type_first != npos) {
+                        decl_name_target = std::max(decl_name_target, type_target + d.typew + 1);
+                    } else {
+                        decl_name_target = std::max(decl_name_target,
+                                                    base + token_width(tokens[d.first]) + 1);
                     }
                     tokens[d.name].mutable_.align.enabled = true;
                     tokens[d.name].mutable_.align.target_column = decl_name_target;
 
-                    // Adaptive alignment keeps each declaration local, but it
-                    // still must never let two sections overlap.  If the
-                    // current name is longer than section4, widen only this
-                    // declaration's name section enough to keep one separating
-                    // space before the trailing unpacked dimensions.
-                    //
-                    // Non-adaptive alignment instead makes the section
-                    // boundary group-wide: if one name is longer than
-                    // section4, every other declaration's trailing section
-                    // starts after that longest name as well.
-                    //
-                    // Example with section4=13 and longest name
-                    // `i_diveeeeeeeee` (14 columns):
-                    //
-                    //   i_clk          [1:0]
-                    //   i_diveeeeeeeee [1:0]
-                    //
-                    // The `+ 1` reserves the normal separating space between
-                    // the section-4 content and section-5 content.
-                    const int effective_s4 =
-                        opts_.port_declaration.align_adaptive
-                            ? option_width(std::max(opts_.port_declaration.section4_min_width,
-                                                    token_width(tokens[d.name]) + 1), opts_)
-                            : option_width(std::max(opts_.port_declaration.section4_min_width,
-                                                    group_name_width + 1), opts_);
+                    // Section5/trailing begins at its preferred column when
+                    // possible.  A long section4 name repairs this boundary,
+                    // but a locally repaired name column does not otherwise
+                    // force the comma boundary to drift right.
+                    const int trailing_start = std::max(preferred_trailing_col,
+                                                        decl_name_target + token_width(tokens[d.name]) + 1);
+                    const int comma_target = std::max(preferred_comma_col,
+                                                      trailing_start + s5);
 
                     if (d.unpacked_dim != npos) {
                         size_t close = tokens[d.unpacked_dim].immutable.syntax.matching_token;
                         if (close == npos)
                             continue;
-                        int trailing_start = decl_name_target + effective_s4;
                         tokens[d.unpacked_dim].mutable_.align.enabled = true;
                         tokens[d.unpacked_dim].mutable_.align.target_column = trailing_start;
-                        if (d.comma != npos && group_has_trailing) {
-                            bool skip_comma_align = false;
-                            for (size_t k = d.comma + 1; k < tokens.size(); ++k) {
-                                if (tokens[k].lex.comment_kind != CommentLexemeKind::None ||
-                                    tokens[k].lex.is_directive) {
-                                    skip_comma_align = true;
-                                    break;
-                                }
-                                if (is_code_token(tokens[k]))
-                                    break;
-                            }
-                            if (skip_comma_align)
-                            {
-                                tokens[d.comma].mutable_.align.enabled = false;
-                                tokens[d.comma].mutable_.align.target_column = -1;
-                                continue;
-                            }
+                        if (d.comma != npos && s5 > 0) {
                             tokens[d.comma].mutable_.align.enabled = true;
-                            tokens[d.comma].mutable_.align.target_column = trailing_start + s5;
+                            tokens[d.comma].mutable_.align.target_column = comma_target;
                         }
                     } else if (d.comma != npos) {
-                        if (!group_has_trailing) {
-                            tokens[d.comma].mutable_.align.enabled = false;
-                            tokens[d.comma].mutable_.align.target_column = -1;
-                            continue;
-                        }
-                        bool skip_comma_align = false;
-                        for (size_t k = d.comma + 1; k < tokens.size(); ++k) {
-                            if (tokens[k].lex.comment_kind != CommentLexemeKind::None ||
-                                tokens[k].lex.is_directive) {
-                                skip_comma_align = true;
-                                break;
-                            }
-                            if (is_code_token(tokens[k]))
-                                break;
-                        }
-                        if (skip_comma_align)
-                        {
+                        if (s5 <= 0) {
                             tokens[d.comma].mutable_.align.enabled = false;
                             tokens[d.comma].mutable_.align.target_column = -1;
                             continue;
                         }
                         tokens[d.comma].mutable_.align.enabled = true;
-                        tokens[d.comma].mutable_.align.target_column =
-                            decl_name_target + effective_s4 + s5;
+                        tokens[d.comma].mutable_.align.target_column = comma_target;
                     }
                 }
             }

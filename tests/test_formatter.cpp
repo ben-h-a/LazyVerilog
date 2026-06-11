@@ -488,14 +488,14 @@ TEST_CASE("formatter: multiline ANSI module header preserves line comments", "[f
                         "output logic intg_err_o);\n"
                         "endmodule\n",
                         opts) == "module adc_ctrl_reg_top(\n"
-                                 "    input                                           clk_i,\n"
-                                 "    input                                           rst_ni,\n"
-                                 "    input     tlul_pkg::tl_h2d_t                    tl_i,\n"
-                                 "    output    tlul_pkg::tl_d2h_t                    tl_o, // To HW\n"
-                                 "    output    adc_ctrl_reg_pkg::adc_ctrl_reg2hw_t   reg2hw, // Write\n"
-                                 "    input     adc_ctrl_reg_pkg::adc_ctrl_hw2reg_t   hw2reg, // Read\n"
+                                 "    input                                                             clk_i                                                       ,\n"
+                                 "    input                                                             rst_ni                                                      ,\n"
+                                 "    input     tlul_pkg::tl_h2d_t                                      tl_i                                                        ,\n"
+                                 "    output    tlul_pkg::tl_d2h_t                                      tl_o                                                        , // To HW\n"
+                                 "    output    adc_ctrl_reg_pkg::adc_ctrl_reg2hw_t                     reg2hw                                                      , // Write\n"
+                                 "    input     adc_ctrl_reg_pkg::adc_ctrl_hw2reg_t                     hw2reg                                                      , // Read\n"
                                  "    // Integrity check errors\n"
-                                 "    output    logic                                 intg_err_o\n"
+                                 "    output    logic                                                   intg_err_o\n"
                                  ");\n"
                                  "endmodule\n");
 }
@@ -552,7 +552,7 @@ TEST_CASE("formatter: imported parameterized ANSI header is idempotent", "[forma
     REQUIRE_NOTHROW(once = format_source(src, opts));
     CHECK(once.find("#(parameter int W = 1)(\n") != std::string::npos);
     CHECK(once.find("\n    // Global enable\n") != std::string::npos);
-    CHECK(once.find("clk_i,") != std::string::npos);
+    CHECK(once.find("clk_i                                                           ,") != std::string::npos);
     CHECK(once.find("done_o") != std::string::npos);
     CHECK(format_source(once, opts) == once);
 }
@@ -573,11 +573,11 @@ TEST_CASE("formatter: ANSI module header after package import is aligned", "[for
                         opts) == "module m\n"
                                  "    import p::*;\n"
                                  "(\n"
-                                 "    input     logic               clk_i,\n"
-                                 "    input     logic               rst_ni,\n"
+                                 "    input     logic                                   clk_i                                                       ,\n"
+                                 "    input     logic                                   rst_ni                                                      ,\n"
                                  "    // Input handshake signals\n"
-                                 "    input     logic               in_valid_i,\n"
-                                 "    output    logic               in_ready_o\n"
+                                 "    input     logic                                   in_valid_i                                                  ,\n"
+                                 "    output    logic                                   in_ready_o\n"
                                  ");\n"
                                  "endmodule\n");
 }
@@ -733,7 +733,7 @@ TEST_CASE("formatter: ANSI port declaration sections with align_adaptive true",
 
     const std::string expected =
         "module memory_top(\n"
-        "    input     looooooooong_t [LOOOOOOOOOONG:0] i_clk        [1:0]         ,\n"
+        "    input     looooooooong_t [LOOOOOOOOOONG:0] i_clk [1:0]         ,\n"
         "    input     packet_t   [1:0]       i_diveeeeeeeee [1:0]         ,\n"
         "    output    logic      [1:0]       o_mul        [1:0]\n"
         ");\n";
@@ -757,7 +757,7 @@ TEST_CASE("formatter: adaptive ANSI ports keep space before trailing unpacked di
 
     const std::string expected =
         "module memory_top(\n"
-        "    input     looooooooong_t [LOOOOOOOOOONG:0] i_clk        [1:0]         ,\n"
+        "    input     looooooooong_t [LOOOOOOOOOONG:0] i_clk [1:0]         ,\n"
         "    input     packet_t   [1:0]       i_diveeeeeeeee [1:0][3:0][1:0][3:1],\n"
         "    output    logic      [1:0]       o_mul        [1:0][3:0][1:0][3:1]\n"
         ");\n";
@@ -811,9 +811,9 @@ TEST_CASE("formatter: non-ANSI port declaration sections with align_adaptive tru
         "    i_diveeeeeeeee,\n"
         "    o_mul\n"
         ");\n"
-        "input     looooooooong_t [LOOOOOOOOOONG:0] i_clk   [1:0]         ;\n"
-        "input     packet_t   [1:0]       i_diveeeeeeeee    [1:0]         ;\n"
-        "output    logic      [1:0]       o_mul             [1:0]         ;\n"
+        "input     looooooooong_t [LOOOOOOOOOONG:0] i_clk [1:0]         ;\n"
+        "input     packet_t   [1:0]       i_diveeeeeeeee [1:0]         ;\n"
+        "output    logic      [1:0]       o_mul        [1:0]         ;\n"
         "endmodule\n";
 
     const std::string result = format_source(input, opts);
@@ -900,6 +900,115 @@ TEST_CASE("formatter: var declaration sections with align_adaptive false",
     CHECK(format_source(result, opts) == expected);
 }
 
+
+TEST_CASE("formatter: var declarations preserve empty packed-dimension section",
+          "[formatter][vars][adaptive]") {
+    FormatOptions opts;
+    opts.default_indent_level_inside_outmost_block = 0;
+    opts.var_declaration.align = true;
+    opts.var_declaration.align_adaptive = false;
+    opts.var_declaration.section1_min_width = 20;
+    opts.var_declaration.section2_min_width = 20;
+    opts.var_declaration.section3_min_width = 20;
+    opts.var_declaration.section4_min_width = 0;
+
+    const std::string result = format_source("module top;\n"
+                                             "logic a, r_a;\n"
+                                             "// test\n"
+                                             "logic a, r_a;\n"
+                                             "logic b, r_b;\n"
+                                             "endmodule\n",
+                                             opts);
+    INFO("formatted output:\n" << result);
+
+    std::istringstream stream(result);
+    std::vector<std::string> out_lines;
+    for (std::string line; std::getline(stream, line);)
+        out_lines.push_back(line);
+    REQUIRE(out_lines.size() >= 5);
+
+    // Section2 (packed dimension) is empty on every declaration here, but the
+    // section is still part of the declaration record.  The signal name must
+    // therefore start after section1 + section2, not immediately after
+    // section1.
+    CHECK(out_lines[1].find("a") == 40);
+    CHECK(out_lines[3].find("a") == 40);
+    CHECK(out_lines[4].find("b") == 40);
+    CHECK(format_source(result, opts) == result);
+}
+
+TEST_CASE("formatter: port declarations preserve empty packed-dimension section",
+          "[formatter][ports][adaptive]") {
+    const FormatOptions opts = port_section_stress_options(true);
+
+    const std::string result = format_source("module top(\n"
+                                             "input packet_t i_diveeeeeeeee,\n"
+                                             "// test\n"
+                                             "output logic [1:0] o_mul\n"
+                                             ");\n",
+                                             opts);
+    INFO("formatted output:\n" << result);
+
+    std::istringstream stream(result);
+    std::vector<std::string> out_lines;
+    for (std::string line; std::getline(stream, line);)
+        out_lines.push_back(line);
+    REQUIRE(out_lines.size() >= 4);
+
+    // `i_diveeeeeeeee` has no packed-dimension token, but it is still section4
+    // (port name), so it must align with `o_mul`, not slide left into section3.
+    CHECK(out_lines[1].find("i_diveeeeeeeee") == out_lines[3].find("o_mul"));
+    CHECK(out_lines[1].find("i_diveeeeeeeee") == 37);
+    CHECK(format_source(result, opts) == result);
+}
+
+
+TEST_CASE("formatter: port declaration reserves section5 without trailing text",
+          "[formatter][ports][adaptive]") {
+    const FormatOptions opts = port_section_stress_options(true);
+
+    const std::string result = format_source("module top(\n"
+                                             "input packet_t i_diveeeeeeeee,\n"
+                                             "// test\n"
+                                             "input packet_t i_diveeeeeeeee [1:0][1:0],\n"
+                                             "output logic [1:0] o_mul\n"
+                                             ");\n",
+                                             opts);
+    INFO("formatted output:\n" << result);
+
+    const std::string expected =
+        "module top(\n"
+        "    input     packet_t               i_diveeeeeeeee               ,\n"
+        "    // test\n"
+        "    input     packet_t               i_diveeeeeeeee [1:0][1:0]    ,\n"
+        "    output    logic      [1:0]       o_mul\n"
+        ");\n";
+    CHECK(result == expected);
+    CHECK(format_source(result, opts) == expected);
+}
+
+TEST_CASE("formatter: adaptive var declarations keep later boundaries aligned when possible",
+          "[formatter][vars][adaptive]") {
+    const FormatOptions opts = var_section_stress_options(true);
+
+    const std::string result = format_source("module top;\n"
+                                             "logic [LOOOOOOOOOOOOOONG_PARAM-1:0] mem2_to_mem3;\n"
+                                             "looooooooooooog_packet_t [`BB-1:0] mem3_to_mem4 [1:0] = 33333333333333;\n"
+                                             "logic [`BB-1:0] mem4_to_mem5;\n"
+                                             "endmodule\n",
+                                             opts);
+    INFO("formatted output:\n" << result);
+
+    const std::string expected =
+        "module top;\n"
+        "logic               [LOOOOOOOOOOOOOONG_PARAM-1:0] mem2_to_mem3       ;\n"
+        "looooooooooooog_packet_t [`BB-1:0]      mem3_to_mem4 [1:0] = 33333333333333;\n"
+        "logic               [`BB-1:0]           mem4_to_mem5                 ;\n"
+        "endmodule\n";
+    CHECK(result == expected);
+    CHECK(format_source(result, opts) == expected);
+}
+
 TEST_CASE("formatter: non-adaptive var declarations align packed section to longest type",
           "[formatter][vars][adaptive]") {
     FormatOptions opts = var_section_stress_options(false);
@@ -962,7 +1071,7 @@ TEST_CASE("formatter: module header closing line comment is preserved", "[format
                         "); // instance\n"
                         "endmodule\n",
                         opts) == "module m(\n"
-                                 "    output    logic               y\n"
+                                 "    output    logic                                   y\n"
                                  "); // instance\n"
                                  "endmodule\n");
 }
@@ -979,8 +1088,8 @@ TEST_CASE("formatter: final ANSI port with line comment does not gain comma", "[
                         ");\n"
                         "endinterface\n",
                         opts) == "interface i(\n"
-                                 "    input     logic               a, // a\n"
-                                 "    input     logic               b // b\n"
+                                 "    input     logic                                   a                                                           , // a\n"
+                                 "    input     logic                                   b // b\n"
                                  ");\n"
                                  "endinterface\n");
 }
@@ -1293,10 +1402,10 @@ TEST_CASE("formatter: configured RTL macros provide declaration statement and bl
 
     const std::string expected =
         "module dma_irq_ctrl(\n"
-        "    input     logic               clk_i,\n"
-        "    input     logic               rst_ni,\n"
-        "    input     logic               irq_i,\n"
-        "    output    logic               irq_o\n"
+        "    input     logic                                   clk_i                                                       ,\n"
+        "    input     logic                                   rst_ni                                                      ,\n"
+        "    input     logic                                   irq_i                                                       ,\n"
+        "    output    logic                                   irq_o\n"
         ");\n"
         "`RTL_ALERT_CONNECT()\n"
         "irq_status u_irq_status (\n"
@@ -2207,19 +2316,19 @@ TEST_CASE("formatter: non-ANSI port declarations keep five-section alignment", "
 
     const std::string expected =
         "module memory_top;\n"
-        "input                            i_clk                           ;\n"
-        "input                            i_rst_n                         ;\n"
-        "input     logic      [1:0]       i_data            [7:0]         ; // input\n"
-        "input     var byte               i_data2                         ;\n"
-        "input                            i_data3                         ;\n"
-        "input                            i_dd                            ;\n"
-        "input                            i_dd22222                       ;\n"
-        "input                            dd22222                         ;\n"
-        "input                            i_d33333                        ;\n"
-        "input                            i_d44333                        , i_dd44321                  ;\n"
-        "input                            i_d44334                        ;\n"
-        "output    logic unsigned [0:0]   VDD                             , VSS                        ; // output\n"
-        "output    packet_tttttttttttttt [0:0] test                       , VSS                        ; /* output */ // test\n"
+        "input                            i_clk                      ;\n"
+        "input                            i_rst_n                    ;\n"
+        "input     logic      [1:0]       i_data       [7:0]         ; // input\n"
+        "input     var byte               i_data2                    ;\n"
+        "input                            i_data3                    ;\n"
+        "input                            i_dd                       ;\n"
+        "input                            i_dd22222                  ;\n"
+        "input                            dd22222                    ;\n"
+        "input                            i_d33333                   ;\n"
+        "input                            i_d44333                   , i_dd44321                  ;\n"
+        "input                            i_d44334                   ;\n"
+        "output    logic unsigned [0:0]   VDD                        , VSS                        ; // output\n"
+        "output    packet_tttttttttttttt [0:0] test                  , VSS                        ; /* output */ // test\n"
         "endmodule\n";
 
     std::string formatted;
@@ -2291,7 +2400,7 @@ TEST_CASE("formatter: zero-port instance is not variable declaration aligned", "
                         "endmodule\n",
                         opts) ==
           "module m;\n"
-          "packet_t            value                               ;\n"
+          "packet_t                                value                               ;\n"
           "memory u_mem4();\n"
           "endmodule\n");
 }
@@ -3006,10 +3115,10 @@ TEST_CASE("formatter: tab_align snaps declaration columns", "[formatter]") {
                                  "    a,\n"
                                  "    bb\n"
                                  ");\n"
-                                 "input   logic   a       ;\n"
-                                 "output  wire    bb      ;\n"
-                                 "logic   a       ;\n"
-                                 "wire    bb      ;\n"
+                                 "input   logic       a       ;\n"
+                                 "output  wire        bb      ;\n"
+                                 "logic       a       ;\n"
+                                 "wire        bb      ;\n"
                                  "endmodule\n");
 }
 
@@ -3080,7 +3189,7 @@ TEST_CASE("formatter: tab_align does not align equals inside headers or for cont
                         opts) == "interface bus_intf #(\n"
                                  "    parameter W_IDTH = 8\n"
                                  ")(\n"
-                                 "    input       logic               i_clk\n"
+                                 "    input       logic                                   i_clk\n"
                                  ");\n"
                                  "for (int i = 0; i < 32; i++) begin\n"
                                  "    foo_bar = 1;\n"
@@ -3462,7 +3571,7 @@ TEST_CASE("formatter: ANSI port directives do not receive commas", "[formatter]"
     CHECK(formatted.find("`ifdef USE_EXTRA,") == std::string::npos);
     CHECK(formatted.find("`endif,") == std::string::npos);
     CHECK(formatted.find("`INOUT_AO(IOA2),") != std::string::npos);
-    CHECK(formatted.find("extra_i,") != std::string::npos);
+    CHECK(formatted.find("extra_i                                                     ,") != std::string::npos);
 }
 
 TEST_CASE("formatter: case item label keeps simple statement", "[formatter]") {
@@ -4083,18 +4192,18 @@ TEST_CASE("formatter: packed port declarations reserve section 5 like scalar one
 
     const std::string src =
         "module top;\n"
-        "input     logic                  i_clk                           ;\n"
+        "input     logic                  i_clk                      ;\n"
         "input     wire       [5:0]       address                    ;\n"
-        "input     wire       [WIDTH-1:0] i_data            [1:0]         ;\n"
-        "output    wire       [WIDTH-1:0] o_data            [2:0]         ;\n"
+        "input     wire       [WIDTH-1:0] i_data       [1:0]         ;\n"
+        "output    wire       [WIDTH-1:0] o_data       [2:0]         ;\n"
         "endmodule\n";
 
     const std::string expected =
         "module top;\n"
-        "input     logic                  i_clk                           ;\n"
-        "input     wire       [5:0]       address                         ;\n"
-        "input     wire       [WIDTH-1:0] i_data            [1:0]         ;\n"
-        "output    wire       [WIDTH-1:0] o_data            [2:0]         ;\n"
+        "input     logic                  i_clk                      ;\n"
+        "input     wire       [5:0]       address                    ;\n"
+        "input     wire       [WIDTH-1:0] i_data       [1:0]         ;\n"
+        "output    wire       [WIDTH-1:0] o_data       [2:0]         ;\n"
         "endmodule\n";
 
     const std::string result = format_source(src, opts);
