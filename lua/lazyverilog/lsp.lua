@@ -3,6 +3,7 @@
 local M = {}
 
 local RELEASE_VERSION = require("lazyverilog.version")
+local RELEASE_CHECKSUMS = require("lazyverilog.checksums")
 local RELEASE_BASE_URL = "https://github.com/hxxdev/LazyVerilog/releases/download"
 
 -- ---------------------------------------------------------------------------
@@ -152,6 +153,72 @@ local function _managed_bin()
 	return _bin_dir() .. "/lazyverilog-lsp"
 end
 
+local function _remove_file(path)
+	if path and path ~= "" then
+		vim.fn.delete(path)
+	end
+end
+
+local function _expected_checksum(asset_platform)
+	local by_version = RELEASE_CHECKSUMS[RELEASE_VERSION]
+	if type(by_version) ~= "table" then
+		return nil
+	end
+
+	local digest = by_version[asset_platform]
+	if type(digest) ~= "string" then
+		return nil
+	end
+
+	return digest:lower()
+end
+
+local function _sha256_file(path, on_done)
+	-- Neovim does not expose a portable file-hash API.  Prefer standard
+	-- command-line hashers that are already available on the supported release
+	-- platforms:
+	--
+	--   * Linux: sha256sum
+	--   * macOS: shasum -a 256
+	--   * Fallback: openssl dgst -sha256 -r
+	--
+	-- The command output is intentionally parsed as "first 64 hex characters"
+	-- because the filename may contain spaces, temporary suffixes, or platform
+	-- characters that should not matter to checksum verification.
+	local commands = {}
+	if vim.fn.executable("sha256sum") == 1 then
+		table.insert(commands, { "sha256sum", path })
+	end
+	if vim.fn.executable("shasum") == 1 then
+		table.insert(commands, { "shasum", "-a", "256", path })
+	end
+	if vim.fn.executable("openssl") == 1 then
+		table.insert(commands, { "openssl", "dgst", "-sha256", "-r", path })
+	end
+
+	local function try_command(index)
+		local command = commands[index]
+		if not command then
+			on_done(nil, "no SHA-256 tool found; install sha256sum, shasum, or openssl")
+			return
+		end
+
+		vim.system(command, {}, function(result)
+			if result.code == 0 then
+				local digest = (result.stdout or ""):match("([0-9a-fA-F]+)")
+				if digest and #digest == 64 then
+					on_done(digest:lower(), nil)
+					return
+				end
+			end
+
+			try_command(index + 1)
+		end)
+	end
+
+	try_command(1)
+end
+
 local function _platform()
 	local uname = vim.uv.os_uname()
 	local sys   = uname.sysname:lower()
@@ -236,10 +303,25 @@ local function _auto_install(on_done)
 	end
 
 	local function _download(asset_platform, on_success, on_compat_fail)
-		local asset = "lazyverilog-lsp-" .. RELEASE_VERSION .. "-" .. asset_platform
-		local url   = RELEASE_BASE_URL .. "/" .. RELEASE_VERSION .. "/" .. asset
-		vim.system({ "curl", "-fsSL", "-o", bin_path, url }, {}, function(dl)
+		local expected = _expected_checksum(asset_platform)
+		if not expected then
+			_fail_install_waiters(
+				"[LazyVerilog] no trusted checksum for "
+				.. RELEASE_VERSION
+				.. " "
+				.. asset_platform
+				.. "; refusing to install downloaded binary"
+			)
+			return
+		end
+
+		local asset    = "lazyverilog-lsp-" .. RELEASE_VERSION .. "-" .. asset_platform
+		local url      = RELEASE_BASE_URL .. "/" .. RELEASE_VERSION .. "/" .. asset
+		local tmp_path = bin_path .. ".download." .. tostring(vim.uv.hrtime())
+
+		vim.system({ "curl", "-fsSL", "-o", tmp_path, url }, {}, function(dl)
 			if dl.code ~= 0 then
+				_remove_file(tmp_path)
 				_fail_install_waiters(
 					"[LazyVerilog] download failed: "
 					.. (dl.stderr or "unknown error")
@@ -247,28 +329,59 @@ local function _auto_install(on_done)
 				)
 				return
 			end
-			vim.system({ "chmod", "+x", bin_path }, {}, function(ch)
-				if ch.code ~= 0 then
-					_fail_install_waiters("[LazyVerilog] chmod +x failed")
+
+			_sha256_file(tmp_path, function(actual, hash_err)
+				if not actual then
+					_remove_file(tmp_path)
+					_fail_install_waiters("[LazyVerilog] checksum failed: " .. hash_err)
 					return
 				end
-				-- On Linux, verify the binary's shared-library dependencies are
-				-- satisfied before declaring success.  This catches glibc version
-				-- mismatches without executing the server (which reads JSON-RPC
-				-- from stdin and would hang).  macOS ships dyld which handles
-				-- compatibility differently; skip the check there.
-				local uname = vim.uv.os_uname()
-				if uname.sysname:lower():find("linux") then
-					vim.system({ "ldd", bin_path }, {}, function(ldd)
-						if ldd.stdout and ldd.stdout:find("not found") then
-							on_compat_fail("binary not compatible with this system (missing libs)")
-							return
-						end
-						on_success()
-					end)
-				else
-					on_success()
+
+				if actual ~= expected then
+					_remove_file(tmp_path)
+					_fail_install_waiters(
+						"[LazyVerilog] checksum mismatch for "
+						.. asset
+						.. "; expected "
+						.. expected
+						.. ", got "
+						.. actual
+					)
+					return
 				end
+
+				if vim.fn.rename(tmp_path, bin_path) ~= 0 then
+					_remove_file(tmp_path)
+					_fail_install_waiters("[LazyVerilog] failed to install verified binary")
+					return
+				end
+
+				vim.system({ "chmod", "+x", bin_path }, {}, function(ch)
+					if ch.code ~= 0 then
+						_remove_file(bin_path)
+						_fail_install_waiters("[LazyVerilog] chmod +x failed")
+						return
+					end
+					-- On Linux, verify the binary's shared-library dependencies are
+					-- satisfied before declaring success.  This catches glibc version
+					-- mismatches without executing the server (which reads JSON-RPC
+					-- from stdin and would hang).  macOS ships dyld which handles
+					-- compatibility differently; skip the check there.
+					local uname = vim.uv.os_uname()
+					if uname.sysname:lower():find("linux") then
+						vim.system({ "ldd", bin_path }, {}, function(ldd)
+							local ldd_output = (ldd.stdout or "") .. (ldd.stderr or "")
+							if ldd_output:find("not found") then
+								_remove_file(bin_path)
+								on_compat_fail("binary not compatible with this system (missing libs)")
+								return
+							end
+							on_success()
+						end)
+					else
+						on_success()
+					end
+				end)
 			end)
 		end)
 	end
