@@ -217,9 +217,9 @@ What LazyVerilog currently supports:
 
 ## 📦 Installation
 
-### 💤 Neovim plugin
+### Neovim plugin
 
-Using <a href="https://github.com/folke/lazy.nvim"><code>lazy.nvim</code></a>:
+💤 Using <a href="https://github.com/folke/lazy.nvim"><code>lazy.nvim</code></a>:
 
 ```lua
 {
