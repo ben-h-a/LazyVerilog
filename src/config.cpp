@@ -5,6 +5,110 @@
 #include <unordered_map>
 #include <toml++/toml.hpp>
 
+namespace {
+
+std::string toml_type_name(const toml::node& node) {
+    switch (node.type()) {
+    case toml::node_type::table: return "table";
+    case toml::node_type::array: return "array";
+    case toml::node_type::string: return "string";
+    case toml::node_type::integer: return "integer";
+    case toml::node_type::floating_point: return "floating-point";
+    case toml::node_type::boolean: return "boolean";
+    case toml::node_type::date: return "date";
+    case toml::node_type::time: return "time";
+    case toml::node_type::date_time: return "date-time";
+    case toml::node_type::none: break;
+    }
+    return "unknown";
+}
+
+void push_type_error(std::vector<std::string>& errors, const std::string& path,
+                     const char* expected, const toml::node& got) {
+    errors.push_back(path + ": expected " + expected + ", got " + toml_type_name(got));
+}
+
+void read_bool(const toml::table* table, const char* key, const std::string& path,
+               bool& dst, std::vector<std::string>& errors) {
+    if (!table)
+        return;
+    const toml::node_view node = (*table)[key];
+    if (!node)
+        return;
+    if (const auto* value = node.as_boolean()) {
+        dst = value->get();
+        return;
+    }
+    push_type_error(errors, path, "boolean", *node.node());
+}
+
+void read_string(const toml::table* table, const char* key, const std::string& path,
+                 std::string& dst, std::vector<std::string>& errors) {
+    if (!table)
+        return;
+    const toml::node_view node = (*table)[key];
+    if (!node)
+        return;
+    if (const auto* value = node.as_string()) {
+        dst = value->get();
+        return;
+    }
+    push_type_error(errors, path, "string", *node.node());
+}
+
+void read_int(const toml::table* table, const char* key, const std::string& path,
+              int min_value, int max_value, int& dst, std::vector<std::string>& errors) {
+    if (!table)
+        return;
+    const toml::node_view node = (*table)[key];
+    if (!node)
+        return;
+
+    const auto* value = node.as_integer();
+    if (!value) {
+        push_type_error(errors, path, "integer", *node.node());
+        return;
+    }
+    const int64_t raw_value = value->get();
+    if (raw_value < min_value || raw_value > max_value) {
+        errors.push_back(path + ": integer " + std::to_string(raw_value) +
+                         " out of range [" + std::to_string(min_value) + ", " +
+                         std::to_string(max_value) + "]");
+        return;
+    }
+    dst = static_cast<int>(raw_value);
+}
+
+void append_string_array(const toml::table* table, const char* key, const std::string& path,
+                         std::vector<std::string>& dst,
+                         std::vector<std::string>& errors) {
+    if (!table)
+        return;
+    const toml::node_view node = (*table)[key];
+    if (!node)
+        return;
+
+    const toml::array* arr = node.as_array();
+    if (!arr) {
+        push_type_error(errors, path, "array of strings", *node.node());
+        return;
+    }
+
+    size_t index = 0;
+    arr->for_each([&](auto&& el) {
+        using El = std::remove_cvref_t<decltype(el)>;
+        if constexpr (toml::is_string<El>) {
+            dst.push_back(*el);
+        } else {
+            errors.push_back(path + "[" + std::to_string(index) +
+                             "]: expected string, got " + toml_type_name(el));
+        }
+        ++index;
+    });
+}
+
+} // namespace
+
 static std::string normalize_macro_config_name(std::string name) {
     if (!name.empty() && name[0] == '`')
         name.erase(name.begin());
@@ -115,328 +219,398 @@ Config load_config(const std::filesystem::path& root, std::string* warning,
     if (!std::filesystem::exists(toml_path)) {
         return cfg;
     }
+    std::vector<std::string> value_errors;
     try {
         auto tbl = toml::parse_file(toml_path.string());
 
+        auto expect_table = [&](const toml::table* parent, const char* key,
+                                const std::string& path) {
+            if (!parent)
+                return;
+            const auto node = (*parent)[key];
+            if (node && !node.as_table())
+                push_type_error(value_errors, path, "table", *node.node());
+        };
+
+        for (const auto* section : {"design", "compilation", "inlay_hint", "format",
+                                    "lint", "rtltree", "autoarg", "autowire", "autoff",
+                                    "autofunc"}) {
+            expect_table(&tbl, section, std::string("[") + section + "]");
+        }
+        if (auto f = tbl["format"].as_table()) {
+            for (const auto* section : {"statement", "port_declaration", "var_declaration",
+                                        "instance", "function_call", "function_declaration",
+                                        "module", "enum_declaration", "modport", "spacing",
+                                        "macros"}) {
+                expect_table(f, section, std::string("[format.") + section + "]");
+            }
+        }
+        if (auto lint = tbl["lint"].as_table()) {
+            for (const auto* section : {"function", "statement", "style", "module",
+                                        "instance", "naming"}) {
+                expect_table(lint, section, std::string("[lint.") + section + "]");
+            }
+        }
+
         // [design]
         if (auto d = tbl["design"].as_table()) {
-            if (auto v = (*d)["vcode"].value<std::string>())
-                cfg.design.vcode = *v;
-            if (auto arr = (*d)["define"].as_array()) {
-                arr->for_each([&](auto&& el) {
-                    if constexpr (toml::is_string<std::remove_cvref_t<decltype(el)>>) {
-                        cfg.design.define.push_back(*el);
-                    }
-                });
-            }
+            read_string(d, "vcode", "[design].vcode", cfg.design.vcode, value_errors);
+            append_string_array(d, "define", "[design].define", cfg.design.define,
+                                value_errors);
         }
 
         // [compilation]
         if (auto p = tbl["compilation"].as_table()) {
-            if (auto v = (*p)["background_compilation"].value<bool>())
-                cfg.compilation.background_compilation = *v;
-            if (auto v = (*p)["background_compilation_threads"].value<int64_t>())
-                cfg.compilation.background_compilation_threads = static_cast<int>(*v);
-            if (auto v = (*p)["background_compilation_debounce_ms"].value<int64_t>())
-                cfg.compilation.background_compilation_debounce_ms = static_cast<int>(*v);
-            if (auto v = (*p)["nice_value"].value<int64_t>())
-                cfg.compilation.nice_value = static_cast<int>(*v);
-            if (auto v = (*p)["log_timing"].value<bool>())
-                cfg.compilation.log_timing = *v;
+            read_bool(p, "background_compilation",
+                      "[compilation].background_compilation",
+                      cfg.compilation.background_compilation, value_errors);
+            read_int(p, "background_compilation_threads",
+                     "[compilation].background_compilation_threads", 1, 1024,
+                     cfg.compilation.background_compilation_threads, value_errors);
+            read_int(p, "background_compilation_debounce_ms",
+                     "[compilation].background_compilation_debounce_ms", 0, 600000,
+                     cfg.compilation.background_compilation_debounce_ms, value_errors);
+            read_int(p, "nice_value", "[compilation].nice_value", -20, 19,
+                     cfg.compilation.nice_value, value_errors);
+            read_bool(p, "log_timing", "[compilation].log_timing",
+                      cfg.compilation.log_timing, value_errors);
         }
 
         // [inlay_hint]
         if (auto ih = tbl["inlay_hint"].as_table()) {
-            if (auto v = (*ih)["enable"].value<bool>())
-                cfg.inlay_hint.enable = *v;
+            read_bool(ih, "enable", "[inlay_hint].enable", cfg.inlay_hint.enable,
+                      value_errors);
         }
 
         // [format]
         if (auto f = tbl["format"].as_table()) {
-            if (auto v = (*f)["indent_size"].value<int64_t>())
-                cfg.format.indent_size = static_cast<int>(*v);
-            if (auto v = (*f)["blank_lines_between_items"].value<int64_t>())
-                cfg.format.blank_lines_between_items = static_cast<int>(*v);
-            if (auto v = (*f)["default_indent_level_inside_outmost_block"].value<int64_t>())
-                cfg.format.default_indent_level_inside_outmost_block = static_cast<int>(*v);
-            if (auto v = (*f)["enable_format_on_save"].value<bool>())
-                cfg.format.enable_format_on_save = *v;
-            if (auto v = (*f)["tab_align"].value<bool>())
-                cfg.format.tab_align = *v;
-            if (auto v = (*f)["format_off_comment_pattern"].value<std::string>())
-                cfg.format.format_off_comment_pattern = *v;
-            if (auto v = (*f)["format_on_comment_pattern"].value<std::string>())
-                cfg.format.format_on_comment_pattern = *v;
-            if (auto v = (*f)["log_path"].value<std::string>())
-                cfg.format.log_path = *v;
+            read_int(f, "indent_size", "[format].indent_size", 1, 64,
+                     cfg.format.indent_size, value_errors);
+            read_int(f, "blank_lines_between_items", "[format].blank_lines_between_items",
+                     0, 100, cfg.format.blank_lines_between_items, value_errors);
+            read_int(f, "default_indent_level_inside_outmost_block",
+                     "[format].default_indent_level_inside_outmost_block", 0, 1,
+                     cfg.format.default_indent_level_inside_outmost_block, value_errors);
+            read_bool(f, "enable_format_on_save", "[format].enable_format_on_save",
+                      cfg.format.enable_format_on_save, value_errors);
+            read_bool(f, "tab_align", "[format].tab_align", cfg.format.tab_align,
+                      value_errors);
+            read_string(f, "format_off_comment_pattern",
+                        "[format].format_off_comment_pattern",
+                        cfg.format.format_off_comment_pattern, value_errors);
+            read_string(f, "format_on_comment_pattern",
+                        "[format].format_on_comment_pattern",
+                        cfg.format.format_on_comment_pattern, value_errors);
+            read_string(f, "log_path", "[format].log_path", cfg.format.log_path,
+                        value_errors);
             // Nested subtables
             if (auto st = (*f)["statement"].as_table()) {
-                if (auto v = (*st)["align"].value<bool>())
-                    cfg.format.statement.align = *v;
-                if (auto v = (*st)["align_adaptive"].value<bool>())
-                    cfg.format.statement.align_adaptive = *v;
-                if (auto v = (*st)["lhs_min_width"].value<int64_t>())
-                    cfg.format.statement.lhs_min_width = static_cast<int>(*v);
-                if (auto v = (*st)["begin_newline"].value<bool>())
-                    cfg.format.statement.begin_newline = *v;
-                if (auto v = (*st)["wrap_end_else_clauses"].value<bool>())
-                    cfg.format.statement.wrap_end_else_clauses = *v;
+                read_bool(st, "align", "[format.statement].align",
+                          cfg.format.statement.align, value_errors);
+                read_bool(st, "align_adaptive", "[format.statement].align_adaptive",
+                          cfg.format.statement.align_adaptive, value_errors);
+                read_int(st, "lhs_min_width", "[format.statement].lhs_min_width", 0, 10000,
+                         cfg.format.statement.lhs_min_width, value_errors);
+                read_bool(st, "begin_newline", "[format.statement].begin_newline",
+                          cfg.format.statement.begin_newline, value_errors);
+                read_bool(st, "wrap_end_else_clauses",
+                          "[format.statement].wrap_end_else_clauses",
+                          cfg.format.statement.wrap_end_else_clauses, value_errors);
             }
             if (auto pd = (*f)["port_declaration"].as_table()) {
-                if (auto v = (*pd)["align"].value<bool>())
-                    cfg.format.port_declaration.align = *v;
-                if (auto v = (*pd)["align_adaptive"].value<bool>())
-                    cfg.format.port_declaration.align_adaptive = *v;
-                if (auto v = (*pd)["section1_min_width"].value<int64_t>())
-                    cfg.format.port_declaration.section1_min_width = static_cast<int>(*v);
-                if (auto v = (*pd)["section2_min_width"].value<int64_t>())
-                    cfg.format.port_declaration.section2_min_width = static_cast<int>(*v);
-                if (auto v = (*pd)["section3_min_width"].value<int64_t>())
-                    cfg.format.port_declaration.section3_min_width = static_cast<int>(*v);
-                if (auto v = (*pd)["section4_min_width"].value<int64_t>())
-                    cfg.format.port_declaration.section4_min_width = static_cast<int>(*v);
-                if (auto v = (*pd)["section5_min_width"].value<int64_t>())
-                    cfg.format.port_declaration.section5_min_width = static_cast<int>(*v);
+                read_bool(pd, "align", "[format.port_declaration].align",
+                          cfg.format.port_declaration.align, value_errors);
+                read_bool(pd, "align_adaptive", "[format.port_declaration].align_adaptive",
+                          cfg.format.port_declaration.align_adaptive, value_errors);
+                read_int(pd, "section1_min_width",
+                         "[format.port_declaration].section1_min_width", 0, 10000,
+                         cfg.format.port_declaration.section1_min_width, value_errors);
+                read_int(pd, "section2_min_width",
+                         "[format.port_declaration].section2_min_width", 0, 10000,
+                         cfg.format.port_declaration.section2_min_width, value_errors);
+                read_int(pd, "section3_min_width",
+                         "[format.port_declaration].section3_min_width", 0, 10000,
+                         cfg.format.port_declaration.section3_min_width, value_errors);
+                read_int(pd, "section4_min_width",
+                         "[format.port_declaration].section4_min_width", 0, 10000,
+                         cfg.format.port_declaration.section4_min_width, value_errors);
+                read_int(pd, "section5_min_width",
+                         "[format.port_declaration].section5_min_width", 0, 10000,
+                         cfg.format.port_declaration.section5_min_width, value_errors);
             }
             if (auto vd = (*f)["var_declaration"].as_table()) {
-                if (auto v = (*vd)["align"].value<bool>())
-                    cfg.format.var_declaration.align = *v;
-                if (auto v = (*vd)["align_adaptive"].value<bool>())
-                    cfg.format.var_declaration.align_adaptive = *v;
-                if (auto v = (*vd)["section1_min_width"].value<int64_t>())
-                    cfg.format.var_declaration.section1_min_width = static_cast<int>(*v);
-                if (auto v = (*vd)["section2_min_width"].value<int64_t>())
-                    cfg.format.var_declaration.section2_min_width = static_cast<int>(*v);
-                if (auto v = (*vd)["section3_min_width"].value<int64_t>())
-                    cfg.format.var_declaration.section3_min_width = static_cast<int>(*v);
-                if (auto v = (*vd)["section4_min_width"].value<int64_t>())
-                    cfg.format.var_declaration.section4_min_width = static_cast<int>(*v);
+                read_bool(vd, "align", "[format.var_declaration].align",
+                          cfg.format.var_declaration.align, value_errors);
+                read_bool(vd, "align_adaptive", "[format.var_declaration].align_adaptive",
+                          cfg.format.var_declaration.align_adaptive, value_errors);
+                read_int(vd, "section1_min_width",
+                         "[format.var_declaration].section1_min_width", 0, 10000,
+                         cfg.format.var_declaration.section1_min_width, value_errors);
+                read_int(vd, "section2_min_width",
+                         "[format.var_declaration].section2_min_width", 0, 10000,
+                         cfg.format.var_declaration.section2_min_width, value_errors);
+                read_int(vd, "section3_min_width",
+                         "[format.var_declaration].section3_min_width", 0, 10000,
+                         cfg.format.var_declaration.section3_min_width, value_errors);
+                read_int(vd, "section4_min_width",
+                         "[format.var_declaration].section4_min_width", 0, 10000,
+                         cfg.format.var_declaration.section4_min_width, value_errors);
             }
             if (auto inst = (*f)["instance"].as_table()) {
-                if (auto v = (*inst)["align"].value<bool>())
-                    cfg.format.instance.align = *v;
-                if (auto v = (*inst)["port_indent_level"].value<int64_t>())
-                    cfg.format.instance.port_indent_level = static_cast<int>(*v);
-                if (auto v = (*inst)["instance_port_name_width"].value<int64_t>())
-                    cfg.format.instance.instance_port_name_width = static_cast<int>(*v);
-                if (auto v = (*inst)["instance_port_between_paren_width"].value<int64_t>())
-                    cfg.format.instance.instance_port_between_paren_width = static_cast<int>(*v);
-                if (auto v = (*inst)["align_adaptive"].value<bool>())
-                    cfg.format.instance.align_adaptive = *v;
+                read_bool(inst, "align", "[format.instance].align",
+                          cfg.format.instance.align, value_errors);
+                read_int(inst, "port_indent_level", "[format.instance].port_indent_level",
+                         0, 1000, cfg.format.instance.port_indent_level, value_errors);
+                read_int(inst, "instance_port_name_width",
+                         "[format.instance].instance_port_name_width", 0, 10000,
+                         cfg.format.instance.instance_port_name_width, value_errors);
+                read_int(inst, "instance_port_between_paren_width",
+                         "[format.instance].instance_port_between_paren_width", 0, 10000,
+                         cfg.format.instance.instance_port_between_paren_width, value_errors);
+                read_bool(inst, "align_adaptive", "[format.instance].align_adaptive",
+                          cfg.format.instance.align_adaptive, value_errors);
             }
             if (auto fn = (*f)["function_call"].as_table()) {
-                if (auto v = (*fn)["break_policy"].value<std::string>())
-                    cfg.format.function_call.break_policy = *v;
-                if (auto v = (*fn)["line_length"].value<int64_t>())
-                    cfg.format.function_call.line_length = static_cast<int>(*v);
-                if (auto v = (*fn)["arg_count"].value<int64_t>())
-                    cfg.format.function_call.arg_count = static_cast<int>(*v);
-                if (auto v = (*fn)["layout"].value<std::string>())
-                    cfg.format.function_call.layout = *v;
-                if (auto v = (*fn)["space_before_paren"].value<bool>())
-                    cfg.format.function_call.space_before_paren = *v;
-                if (auto v = (*fn)["space_inside_paren"].value<bool>())
-                    cfg.format.function_call.space_inside_paren = *v;
+                read_string(fn, "break_policy", "[format.function_call].break_policy",
+                            cfg.format.function_call.break_policy, value_errors);
+                read_int(fn, "line_length", "[format.function_call].line_length", 1, 10000,
+                         cfg.format.function_call.line_length, value_errors);
+                read_int(fn, "arg_count", "[format.function_call].arg_count", -1, 10000,
+                         cfg.format.function_call.arg_count, value_errors);
+                read_string(fn, "layout", "[format.function_call].layout",
+                            cfg.format.function_call.layout, value_errors);
+                read_bool(fn, "space_before_paren", "[format.function_call].space_before_paren",
+                          cfg.format.function_call.space_before_paren, value_errors);
+                read_bool(fn, "space_inside_paren", "[format.function_call].space_inside_paren",
+                          cfg.format.function_call.space_inside_paren, value_errors);
             }
             if (auto fd = (*f)["function_declaration"].as_table()) {
-                if (auto v = (*fd)["layout"].value<std::string>())
-                    cfg.format.function_declaration.layout = *v;
-                if (auto v = (*fd)["line_length"].value<int64_t>())
-                    cfg.format.function_declaration.line_length = static_cast<int>(*v);
-                if (auto v = (*fd)["space_before_paren"].value<bool>())
-                    cfg.format.function_declaration.space_before_paren = *v;
+                read_string(fd, "layout", "[format.function_declaration].layout",
+                            cfg.format.function_declaration.layout, value_errors);
+                read_int(fd, "line_length", "[format.function_declaration].line_length", 1,
+                         10000, cfg.format.function_declaration.line_length, value_errors);
+                read_bool(fd, "space_before_paren",
+                          "[format.function_declaration].space_before_paren",
+                          cfg.format.function_declaration.space_before_paren, value_errors);
             }
             if (auto po = (*f)["module"].as_table()) {
-                if (auto v = (*po)["non_ansi_port_per_line_enabled"].value<bool>())
-                    cfg.format.module.non_ansi_port_per_line_enabled = *v;
-                if (auto v = (*po)["non_ansi_port_per_line"].value<int64_t>())
-                    cfg.format.module.non_ansi_port_per_line = static_cast<int>(*v);
-                if (auto v = (*po)["non_ansi_port_max_line_length_enabled"].value<bool>())
-                    cfg.format.module.non_ansi_port_max_line_length_enabled = *v;
-                if (auto v = (*po)["non_ansi_port_max_line_length"].value<int64_t>())
-                    cfg.format.module.non_ansi_port_max_line_length = static_cast<int>(*v);
-                if (auto v = (*po)["parameter_layout"].value<std::string>())
-                    cfg.format.module.parameter_layout = *v;
+                read_bool(po, "non_ansi_port_per_line_enabled",
+                          "[format.module].non_ansi_port_per_line_enabled",
+                          cfg.format.module.non_ansi_port_per_line_enabled, value_errors);
+                read_int(po, "non_ansi_port_per_line",
+                         "[format.module].non_ansi_port_per_line", 1, 1000,
+                         cfg.format.module.non_ansi_port_per_line, value_errors);
+                read_bool(po, "non_ansi_port_max_line_length_enabled",
+                          "[format.module].non_ansi_port_max_line_length_enabled",
+                          cfg.format.module.non_ansi_port_max_line_length_enabled, value_errors);
+                read_int(po, "non_ansi_port_max_line_length",
+                         "[format.module].non_ansi_port_max_line_length", 1, 10000,
+                         cfg.format.module.non_ansi_port_max_line_length, value_errors);
+                read_string(po, "parameter_layout", "[format.module].parameter_layout",
+                            cfg.format.module.parameter_layout, value_errors);
             }
             if (auto en = (*f)["enum_declaration"].as_table()) {
-                if (auto v = (*en)["align"].value<bool>())
-                    cfg.format.enum_declaration.align = *v;
-                if (auto v = (*en)["align_adaptive"].value<bool>())
-                    cfg.format.enum_declaration.align_adaptive = *v;
-                if (auto v = (*en)["enum_name_min_width"].value<int64_t>())
-                    cfg.format.enum_declaration.enum_name_min_width = static_cast<int>(*v);
-                if (auto v = (*en)["enum_value_min_width"].value<int64_t>())
-                    cfg.format.enum_declaration.enum_value_min_width = static_cast<int>(*v);
+                read_bool(en, "align", "[format.enum_declaration].align",
+                          cfg.format.enum_declaration.align, value_errors);
+                read_bool(en, "align_adaptive", "[format.enum_declaration].align_adaptive",
+                          cfg.format.enum_declaration.align_adaptive, value_errors);
+                read_int(en, "enum_name_min_width",
+                         "[format.enum_declaration].enum_name_min_width", 0, 10000,
+                         cfg.format.enum_declaration.enum_name_min_width, value_errors);
+                read_int(en, "enum_value_min_width",
+                         "[format.enum_declaration].enum_value_min_width", 0, 10000,
+                         cfg.format.enum_declaration.enum_value_min_width, value_errors);
             }
             if (auto mp = (*f)["modport"].as_table()) {
-                if (auto v = (*mp)["align"].value<bool>())
-                    cfg.format.modport.align = *v;
-                if (auto v = (*mp)["align_adaptive"].value<bool>())
-                    cfg.format.modport.align_adaptive = *v;
-                if (auto v = (*mp)["direction_min_width"].value<int64_t>())
-                    cfg.format.modport.direction_min_width = static_cast<int>(*v);
-                if (auto v = (*mp)["signal_min_width"].value<int64_t>())
-                    cfg.format.modport.signal_min_width = static_cast<int>(*v);
+                read_bool(mp, "align", "[format.modport].align",
+                          cfg.format.modport.align, value_errors);
+                read_bool(mp, "align_adaptive", "[format.modport].align_adaptive",
+                          cfg.format.modport.align_adaptive, value_errors);
+                read_int(mp, "direction_min_width", "[format.modport].direction_min_width",
+                         0, 10000, cfg.format.modport.direction_min_width, value_errors);
+                read_int(mp, "signal_min_width", "[format.modport].signal_min_width", 0,
+                         10000, cfg.format.modport.signal_min_width, value_errors);
             }
             if (auto sp = (*f)["spacing"].as_table()) {
-                if (auto v = (*sp)["control_keyword_space"].value<bool>())
-                    cfg.format.spacing.control_keyword_space = *v;
-                if (auto v = (*sp)["space_inside_parens"].value<bool>())
-                    cfg.format.spacing.space_inside_parens = *v;
-                if (auto v = (*sp)["space_inside_dimension_brackets"].value<bool>())
-                    cfg.format.spacing.space_inside_dimension_brackets = *v;
-                if (auto v = (*sp)["binary_operator_spacing"].value<std::string>())
-                    cfg.format.spacing.binary_operator_spacing = *v;
-                if (auto v = (*sp)["dimension_binary_operator_spacing"].value<std::string>())
-                    cfg.format.spacing.dimension_binary_operator_spacing = *v;
-                if (auto v = (*sp)["semicolon_spacing"].value<std::string>())
-                    cfg.format.spacing.semicolon_spacing = *v;
-                if (auto v = (*sp)["range_colon_spacing"].value<std::string>())
-                    cfg.format.spacing.range_colon_spacing = *v;
-                if (auto v = (*sp)["indexed_part_select_spacing"].value<std::string>())
-                    cfg.format.spacing.indexed_part_select_spacing = *v;
-                if (auto v = (*sp)["procedural_event_control_at_spacing"].value<std::string>())
-                    cfg.format.spacing.procedural_event_control_at_spacing = *v;
-                if (auto v = (*sp)["space_inside_event_control_parens"].value<bool>())
-                    cfg.format.spacing.space_inside_event_control_parens = *v;
-                if (auto v = (*sp)["assignment_operator_spacing"].value<std::string>())
-                    cfg.format.spacing.assignment_operator_spacing = *v;
+                read_bool(sp, "control_keyword_space", "[format.spacing].control_keyword_space",
+                          cfg.format.spacing.control_keyword_space, value_errors);
+                read_bool(sp, "space_inside_parens", "[format.spacing].space_inside_parens",
+                          cfg.format.spacing.space_inside_parens, value_errors);
+                read_bool(sp, "space_inside_dimension_brackets",
+                          "[format.spacing].space_inside_dimension_brackets",
+                          cfg.format.spacing.space_inside_dimension_brackets, value_errors);
+                read_string(sp, "binary_operator_spacing",
+                            "[format.spacing].binary_operator_spacing",
+                            cfg.format.spacing.binary_operator_spacing, value_errors);
+                read_string(sp, "dimension_binary_operator_spacing",
+                            "[format.spacing].dimension_binary_operator_spacing",
+                            cfg.format.spacing.dimension_binary_operator_spacing, value_errors);
+                read_string(sp, "semicolon_spacing", "[format.spacing].semicolon_spacing",
+                            cfg.format.spacing.semicolon_spacing, value_errors);
+                read_string(sp, "range_colon_spacing", "[format.spacing].range_colon_spacing",
+                            cfg.format.spacing.range_colon_spacing, value_errors);
+                read_string(sp, "indexed_part_select_spacing",
+                            "[format.spacing].indexed_part_select_spacing",
+                            cfg.format.spacing.indexed_part_select_spacing, value_errors);
+                read_string(sp, "procedural_event_control_at_spacing",
+                            "[format.spacing].procedural_event_control_at_spacing",
+                            cfg.format.spacing.procedural_event_control_at_spacing, value_errors);
+                read_bool(sp, "space_inside_event_control_parens",
+                          "[format.spacing].space_inside_event_control_parens",
+                          cfg.format.spacing.space_inside_event_control_parens, value_errors);
+                read_string(sp, "assignment_operator_spacing",
+                            "[format.spacing].assignment_operator_spacing",
+                            cfg.format.spacing.assignment_operator_spacing, value_errors);
             }
             if (auto macros = (*f)["macros"].as_table()) {
-                auto append_strings = [](const toml::table* t, const char* key,
-                                         std::vector<std::string>& dst) {
-                    if (auto arr = (*t)[key].as_array()) {
-                        arr->for_each([&](auto&& el) {
-                            if constexpr (toml::is_string<std::remove_cvref_t<decltype(el)>>)
-                                dst.push_back(*el);
-                        });
-                    }
-                };
-                append_strings(macros, "object_like_expr", cfg.format.macros.object_like_expr);
-                append_strings(macros, "function_like_expr",
-                               cfg.format.macros.function_like_expr);
-                append_strings(macros, "statement_like", cfg.format.macros.statement_like);
-                append_strings(macros, "declaration_like", cfg.format.macros.declaration_like);
-                append_strings(macros, "control_flow_like", cfg.format.macros.control_flow_like);
-                append_strings(macros, "block_begin_like", cfg.format.macros.block_begin_like);
-                append_strings(macros, "block_end_like", cfg.format.macros.block_end_like);
-                append_strings(macros, "whitespace_sensitive",
-                               cfg.format.macros.whitespace_sensitive);
+                append_string_array(macros, "object_like_expr",
+                                    "[format.macros].object_like_expr",
+                                    cfg.format.macros.object_like_expr, value_errors);
+                append_string_array(macros, "function_like_expr",
+                                    "[format.macros].function_like_expr",
+                                    cfg.format.macros.function_like_expr, value_errors);
+                append_string_array(macros, "statement_like", "[format.macros].statement_like",
+                                    cfg.format.macros.statement_like, value_errors);
+                append_string_array(macros, "declaration_like",
+                                    "[format.macros].declaration_like",
+                                    cfg.format.macros.declaration_like, value_errors);
+                append_string_array(macros, "control_flow_like",
+                                    "[format.macros].control_flow_like",
+                                    cfg.format.macros.control_flow_like, value_errors);
+                append_string_array(macros, "block_begin_like",
+                                    "[format.macros].block_begin_like",
+                                    cfg.format.macros.block_begin_like, value_errors);
+                append_string_array(macros, "block_end_like", "[format.macros].block_end_like",
+                                    cfg.format.macros.block_end_like, value_errors);
+                append_string_array(macros, "whitespace_sensitive",
+                                    "[format.macros].whitespace_sensitive",
+                                    cfg.format.macros.whitespace_sensitive, value_errors);
             }
         }
 
         // [lint.*]
         if (auto lint = tbl["lint"].as_table()) {
-            auto set_bool = [](const toml::table* t, const char* key, bool& field) {
-                if (t)
-                    if (auto v = (*t)[key].value<bool>())
-                        field = *v;
-            };
-            auto set_rule = [&](const toml::table* t, LintRuleConfig& rule) {
-                set_bool(t, "enable", rule.enable);
-                if (t)
-                    if (auto v = (*t)["severity"].value<std::string>())
-                        rule.severity = *v;
+            auto set_rule = [&](const toml::table* t, const std::string& path,
+                                LintRuleConfig& rule) {
+                read_bool(t, "enable", path + ".enable", rule.enable, value_errors);
+                read_string(t, "severity", path + ".severity", rule.severity, value_errors);
             };
 
-            set_bool(lint, "enable", cfg.lint.enable);
+            read_bool(lint, "enable", "[lint].enable", cfg.lint.enable, value_errors);
 
             if (auto fn = (*lint)["function"].as_table()) {
-                set_rule(fn, cfg.lint.function);
-                set_bool(fn, "functions_automatic", cfg.lint.function.functions_automatic);
-                if (auto v = (*fn)["function_call_style"].value<std::string>())
-                    cfg.lint.function.function_call_style = *v;
-                set_bool(fn, "explicit_function_lifetime",
-                         cfg.lint.function.explicit_function_lifetime);
-                set_bool(fn, "explicit_task_lifetime", cfg.lint.function.explicit_task_lifetime);
+                set_rule(fn, "[lint.function]", cfg.lint.function);
+                read_bool(fn, "functions_automatic", "[lint.function].functions_automatic",
+                          cfg.lint.function.functions_automatic, value_errors);
+                read_string(fn, "function_call_style", "[lint.function].function_call_style",
+                            cfg.lint.function.function_call_style, value_errors);
+                read_bool(fn, "explicit_function_lifetime",
+                          "[lint.function].explicit_function_lifetime",
+                          cfg.lint.function.explicit_function_lifetime, value_errors);
+                read_bool(fn, "explicit_task_lifetime",
+                          "[lint.function].explicit_task_lifetime",
+                          cfg.lint.function.explicit_task_lifetime, value_errors);
             }
             if (auto st = (*lint)["statement"].as_table()) {
-                set_rule(st, cfg.lint.statement);
-                set_bool(st, "case_missing_default", cfg.lint.statement.case_missing_default);
-                set_bool(st, "latch_inference_detection",
-                         cfg.lint.statement.latch_inference_detection);
-                set_bool(st, "explicit_begin", cfg.lint.statement.explicit_begin);
-                set_bool(st, "no_raw_always", cfg.lint.statement.no_raw_always);
-                set_bool(st, "blocking_nonblocking_assignments",
-                         cfg.lint.statement.blocking_nonblocking_assignments);
+                set_rule(st, "[lint.statement]", cfg.lint.statement);
+                read_bool(st, "case_missing_default",
+                          "[lint.statement].case_missing_default",
+                          cfg.lint.statement.case_missing_default, value_errors);
+                read_bool(st, "latch_inference_detection",
+                          "[lint.statement].latch_inference_detection",
+                          cfg.lint.statement.latch_inference_detection, value_errors);
+                read_bool(st, "explicit_begin", "[lint.statement].explicit_begin",
+                          cfg.lint.statement.explicit_begin, value_errors);
+                read_bool(st, "no_raw_always", "[lint.statement].no_raw_always",
+                          cfg.lint.statement.no_raw_always, value_errors);
+                read_bool(st, "blocking_nonblocking_assignments",
+                          "[lint.statement].blocking_nonblocking_assignments",
+                          cfg.lint.statement.blocking_nonblocking_assignments, value_errors);
             }
             if (auto style = (*lint)["style"].as_table()) {
-                set_bool(style, "trailing_whitespace", cfg.lint.style.trailing_whitespace);
+                read_bool(style, "trailing_whitespace", "[lint.style].trailing_whitespace",
+                          cfg.lint.style.trailing_whitespace, value_errors);
             }
             if (auto mod = (*lint)["module"].as_table()) {
-                set_rule(mod, cfg.lint.module);
-                set_bool(mod, "one_module_per_file", cfg.lint.module.one_module_per_file);
+                set_rule(mod, "[lint.module]", cfg.lint.module);
+                read_bool(mod, "one_module_per_file", "[lint.module].one_module_per_file",
+                          cfg.lint.module.one_module_per_file, value_errors);
             }
             if (auto inst = (*lint)["instance"].as_table()) {
-                set_rule(inst, cfg.lint.instance);
-                if (auto v = (*inst)["module_instantiation_style"].value<std::string>())
-                    cfg.lint.instance.module_instantiation_style = *v;
-                set_bool(inst, "stale_instance_diagnostic",
-                         cfg.lint.instance.stale_instance_diagnostic);
+                set_rule(inst, "[lint.instance]", cfg.lint.instance);
+                read_string(inst, "module_instantiation_style",
+                            "[lint.instance].module_instantiation_style",
+                            cfg.lint.instance.module_instantiation_style, value_errors);
+                read_bool(inst, "stale_instance_diagnostic",
+                          "[lint.instance].stale_instance_diagnostic",
+                          cfg.lint.instance.stale_instance_diagnostic, value_errors);
             }
             if (auto nm = (*lint)["naming"].as_table()) {
-                set_rule(nm, cfg.lint.naming);
-                if (auto v = (*nm)["module_pattern"].value<std::string>())
-                    cfg.lint.naming.module_pattern = *v;
-                if (auto v = (*nm)["input_port_pattern"].value<std::string>())
-                    cfg.lint.naming.input_port_pattern = *v;
-                if (auto v = (*nm)["output_port_pattern"].value<std::string>())
-                    cfg.lint.naming.output_port_pattern = *v;
-                if (auto v = (*nm)["signal_pattern"].value<std::string>())
-                    cfg.lint.naming.signal_pattern = *v;
-                if (auto v = (*nm)["interface_pattern"].value<std::string>())
-                    cfg.lint.naming.interface_pattern = *v;
-                if (auto v = (*nm)["struct_pattern"].value<std::string>())
-                    cfg.lint.naming.struct_pattern = *v;
-                if (auto v = (*nm)["union_pattern"].value<std::string>())
-                    cfg.lint.naming.union_pattern = *v;
-                if (auto v = (*nm)["enum_pattern"].value<std::string>())
-                    cfg.lint.naming.enum_pattern = *v;
-                if (auto v = (*nm)["parameter_pattern"].value<std::string>())
-                    cfg.lint.naming.parameter_pattern = *v;
-                if (auto v = (*nm)["localparam_pattern"].value<std::string>())
-                    cfg.lint.naming.localparam_pattern = *v;
-                if (auto v = (*nm)["register_pattern"].value<std::string>())
-                    cfg.lint.naming.register_pattern = *v;
-                set_bool(nm, "check_module_filename", cfg.lint.naming.check_module_filename);
-                set_bool(nm, "check_package_filename", cfg.lint.naming.check_package_filename);
+                set_rule(nm, "[lint.naming]", cfg.lint.naming);
+                read_string(nm, "module_pattern", "[lint.naming].module_pattern",
+                            cfg.lint.naming.module_pattern, value_errors);
+                read_string(nm, "input_port_pattern", "[lint.naming].input_port_pattern",
+                            cfg.lint.naming.input_port_pattern, value_errors);
+                read_string(nm, "output_port_pattern", "[lint.naming].output_port_pattern",
+                            cfg.lint.naming.output_port_pattern, value_errors);
+                read_string(nm, "signal_pattern", "[lint.naming].signal_pattern",
+                            cfg.lint.naming.signal_pattern, value_errors);
+                read_string(nm, "interface_pattern", "[lint.naming].interface_pattern",
+                            cfg.lint.naming.interface_pattern, value_errors);
+                read_string(nm, "struct_pattern", "[lint.naming].struct_pattern",
+                            cfg.lint.naming.struct_pattern, value_errors);
+                read_string(nm, "union_pattern", "[lint.naming].union_pattern",
+                            cfg.lint.naming.union_pattern, value_errors);
+                read_string(nm, "enum_pattern", "[lint.naming].enum_pattern",
+                            cfg.lint.naming.enum_pattern, value_errors);
+                read_string(nm, "parameter_pattern", "[lint.naming].parameter_pattern",
+                            cfg.lint.naming.parameter_pattern, value_errors);
+                read_string(nm, "localparam_pattern", "[lint.naming].localparam_pattern",
+                            cfg.lint.naming.localparam_pattern, value_errors);
+                read_string(nm, "register_pattern", "[lint.naming].register_pattern",
+                            cfg.lint.naming.register_pattern, value_errors);
+                read_bool(nm, "check_module_filename", "[lint.naming].check_module_filename",
+                          cfg.lint.naming.check_module_filename, value_errors);
+                read_bool(nm, "check_package_filename",
+                          "[lint.naming].check_package_filename",
+                          cfg.lint.naming.check_package_filename, value_errors);
             }
         }
 
         // [rtltree]
         if (auto rt = tbl["rtltree"].as_table()) {
-            if (auto v = (*rt)["show_instance_name"].value<bool>())
-                cfg.rtltree.show_instance_name = *v;
-            if (auto v = (*rt)["show_file"].value<bool>())
-                cfg.rtltree.show_file = *v;
+            read_bool(rt, "show_instance_name", "[rtltree].show_instance_name",
+                      cfg.rtltree.show_instance_name, value_errors);
+            read_bool(rt, "show_file", "[rtltree].show_file", cfg.rtltree.show_file,
+                      value_errors);
         }
 
         // [autoarg]
         if (auto aa = tbl["autoarg"].as_table()) {
-            if (auto v = (*aa)["autoarg_on_save"].value<bool>())
-                cfg.autoarg.autoarg_on_save = *v;
+            read_bool(aa, "autoarg_on_save", "[autoarg].autoarg_on_save",
+                      cfg.autoarg.autoarg_on_save, value_errors);
         }
 
         // [autowire]
         if (auto aw = tbl["autowire"].as_table()) {
-            if (auto v = (*aw)["group_by_instance"].value<bool>())
-                cfg.autowire.group_by_instance = *v;
-            if (auto v = (*aw)["sort_by_name"].value<bool>())
-                cfg.autowire.sort_by_name = *v;
+            read_bool(aw, "group_by_instance", "[autowire].group_by_instance",
+                      cfg.autowire.group_by_instance, value_errors);
+            read_bool(aw, "sort_by_name", "[autowire].sort_by_name",
+                      cfg.autowire.sort_by_name, value_errors);
         }
 
         // [autoff]
         if (auto aff = tbl["autoff"].as_table()) {
-            if (auto v = (*aff)["register_pattern"].value<std::string>())
-                cfg.autoff.register_pattern = *v;
+            read_string(aff, "register_pattern", "[autoff].register_pattern",
+                        cfg.autoff.register_pattern, value_errors);
         }
 
         // [autofunc]
         if (auto af = tbl["autofunc"].as_table()) {
-            if (auto v = (*af)["indent_size"].value<int64_t>())
-                cfg.autofunc.indent_size = static_cast<int>(*v);
-            if (auto v = (*af)["use_named_arguments"].value<bool>())
-                cfg.autofunc.use_named_arguments = *v;
+            read_int(af, "indent_size", "[autofunc].indent_size", 1, 64,
+                     cfg.autofunc.indent_size, value_errors);
+            read_bool(af, "use_named_arguments", "[autofunc].use_named_arguments",
+                      cfg.autofunc.use_named_arguments, value_errors);
         }
 
         // Unknown top-level keys silently ignored (toml++ doesn't error on them)
@@ -478,12 +652,16 @@ Config load_config(const std::filesystem::path& root, std::string* warning,
         }
     }
 
-    // Validate enum/string fields (only when no parse error set a warning)
+    // Validate typed/ranged scalar fields, string enums, and cross-option
+    // relationships (only when no parse error set a warning).  Invalid typed
+    // fields are not assigned while parsing, so callers keep safe defaults for
+    // those options and receive all accumulated diagnostics in one warning.
     if (!warning || warning->empty()) {
-        auto val_errors = validate_config(cfg);
-        if (!val_errors.empty()) {
+        auto semantic_errors = validate_config(cfg);
+        value_errors.insert(value_errors.end(), semantic_errors.begin(), semantic_errors.end());
+        if (!value_errors.empty()) {
             std::string msg = "lazyverilog.toml value error(s):";
-            for (const auto& e : val_errors)
+            for (const auto& e : value_errors)
                 msg += "\n  " + e;
             std::cerr << msg << "\n";
             if (warning)
@@ -493,7 +671,7 @@ Config load_config(const std::filesystem::path& root, std::string* warning,
                 warning_detail->line = 0;
                 warning_detail->column = 0;
                 warning_detail->message = msg;
-                warning_detail->validation_errors = val_errors;
+                warning_detail->validation_errors = value_errors;
             }
         }
     }

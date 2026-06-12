@@ -354,3 +354,119 @@ declaration_like = ["MY_MACRO"]
     CHECK(warning.find("MY_MACRO") != std::string::npos);
     CHECK(warning.find("multiple role lists") != std::string::npos);
 }
+
+TEST_CASE("config: invalid value types and integer ranges are reported", "[config]") {
+    auto dir = make_temp_toml(R"(
+[design]
+vcode = true
+define = ["RTL_SIM", 123, false]
+
+[compilation]
+background_compilation = "yes"
+background_compilation_threads = 0
+background_compilation_debounce_ms = -1
+nice_value = 20
+log_timing = 1
+
+[format]
+indent_size = 0
+blank_lines_between_items = -1
+default_indent_level_inside_outmost_block = 2
+enable_format_on_save = "true"
+tab_align = 1
+format_off_comment_pattern = false
+format_on_comment_pattern = 7
+log_path = 99
+
+[format.statement]
+align = "true"
+lhs_min_width = -1
+
+[format.function_call]
+break_policy = false
+line_length = 0
+arg_count = -2
+space_before_paren = 1
+
+[format.macros]
+statement_like = "MY_MACRO"
+declaration_like = ["OK_DECL", 42]
+
+[lint]
+enable = "true"
+
+[lint.naming]
+severity = true
+module_pattern = 1
+check_module_filename = "yes"
+
+[rtltree]
+show_file = 1
+
+[autowire]
+group_by_instance = "yes"
+
+[autoff]
+register_pattern = false
+
+[autofunc]
+indent_size = 0
+use_named_arguments = "yes"
+)");
+
+    std::string warning;
+    ConfigWarning warning_detail;
+    Config cfg = load_config(dir, &warning, &warning_detail);
+
+    auto has_error = [&](const std::string& needle) {
+        return std::any_of(warning_detail.validation_errors.begin(),
+                           warning_detail.validation_errors.end(),
+                           [&](const std::string& err) {
+                               return err.find(needle) != std::string::npos;
+                           });
+    };
+
+    CHECK_FALSE(warning.empty());
+    CHECK(warning.find("lazyverilog.toml value error(s)") != std::string::npos);
+    CHECK(warning_detail.path == dir / "lazyverilog.toml");
+    CHECK(warning_detail.line == 0);
+    CHECK(warning_detail.column == 0);
+    CHECK(warning_detail.validation_errors.size() >= 25);
+
+    CHECK(has_error("[design].vcode: expected string, got boolean"));
+    CHECK(has_error("[design].define[1]: expected string, got integer"));
+    CHECK(has_error("[design].define[2]: expected string, got boolean"));
+    CHECK(has_error("[compilation].background_compilation: expected boolean, got string"));
+    CHECK(has_error("[compilation].background_compilation_threads: integer 0 out of range [1, 1024]"));
+    CHECK(has_error("[compilation].nice_value: integer 20 out of range [-20, 19]"));
+    CHECK(has_error("[format].indent_size: integer 0 out of range [1, 64]"));
+    CHECK(has_error("[format].default_indent_level_inside_outmost_block: integer 2 out of range [0, 1]"));
+    CHECK(has_error("[format].format_off_comment_pattern: expected string, got boolean"));
+    CHECK(has_error("[format.function_call].break_policy: expected string, got boolean"));
+    CHECK(has_error("[format.function_call].arg_count: integer -2 out of range [-1, 10000]"));
+    CHECK(has_error("[format.macros].statement_like: expected array of strings, got string"));
+    CHECK(has_error("[format.macros].declaration_like[1]: expected string, got integer"));
+    CHECK(has_error("[lint.naming].severity: expected string, got boolean"));
+    CHECK(has_error("[rtltree].show_file: expected boolean, got integer"));
+    CHECK(has_error("[autoff].register_pattern: expected string, got boolean"));
+    CHECK(has_error("[autofunc].indent_size: integer 0 out of range [1, 64]"));
+
+    // Invalid scalar/ranged options keep their safe defaults instead of
+    // propagating bad values into formatter, linter, or background worker code.
+    CHECK(cfg.design.vcode.empty());
+    REQUIRE(cfg.design.define.size() == 1);
+    CHECK(cfg.design.define[0] == "RTL_SIM");
+    CHECK(cfg.compilation.background_compilation == false);
+    CHECK(cfg.compilation.background_compilation_threads == 1);
+    CHECK(cfg.compilation.nice_value == 10);
+    CHECK(cfg.format.indent_size == 2);
+    CHECK(cfg.format.default_indent_level_inside_outmost_block == 1);
+    CHECK(cfg.format.function_call.arg_count == -1);
+    CHECK(cfg.format.macros.declaration_like.back() == "OK_DECL");
+    CHECK(cfg.lint.enable == true);
+    CHECK(cfg.lint.naming.severity == "warning");
+    CHECK(cfg.rtltree.show_file == true);
+    CHECK(cfg.autoff.register_pattern.empty());
+    CHECK(cfg.autofunc.indent_size == 4);
+    CHECK(cfg.autofunc.use_named_arguments == true);
+}
