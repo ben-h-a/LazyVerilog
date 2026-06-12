@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/lazyverilog_logo.png" alt="LazyVerilog logo" width="260">
+</p>
+
 <h1 align="center">⚡ LazyVerilog</h1>
 
 <p align="center">
@@ -51,112 +55,112 @@
 <details>
 <summary><b>🎨 Formatting</b></summary>
 
-![Formatting](demo/videos/Format.gif)
+![Formatting](assets/videos/Format.gif)
 
 </details>
 
 <details>
 <summary><b>🚨 Lint diagnostics</b></summary>
 
-![Lint diagnostics](demo/videos/lint_diagnostics.png)
+![Lint diagnostics](assets/videos/lint_diagnostics.png)
 
 </details>
 
 <details>
 <summary><b>⚡ Auto-complete</b></summary>
 
-![Auto-complete](demo/videos/AutoComplete.gif)
+![Auto-complete](assets/videos/AutoComplete.gif)
 
 </details>
 
 <details>
 <summary><b>🌳 RTL tree</b></summary>
 
-![RTL tree](demo/videos/RtlTree.gif)
+![RTL tree](assets/videos/RtlTree.gif)
 
 </details>
 
 <details>
 <summary><b>📂 Folding</b></summary>
 
-![Folding](demo/videos/Folding.gif)
+![Folding](assets/videos/Folding.gif)
 
 </details>
 
 <details>
 <summary><b>🧭 Go to definition</b></summary>
 
-![Go to definition](demo/videos/GoToDef.gif)
+![Go to definition](assets/videos/GoToDef.gif)
 
 </details>
 
 <details>
 <summary><b>🔗 Interface connect</b></summary>
 
-![Interface connect](demo/videos/InterfaceConnect.gif)
+![Interface connect](assets/videos/InterfaceConnect.gif)
 
 </details>
 
 <details>
 <summary><b>🧩 Auto-instantiation</b></summary>
 
-![Auto-instantiation](demo/videos/AutoInst.gif)
+![Auto-instantiation](assets/videos/AutoInst.gif)
 
 </details>
 
 <details>
 <summary><b>🔌 Auto-wire</b></summary>
 
-![Auto-wire](demo/videos/AutoWire.gif)
+![Auto-wire](assets/videos/AutoWire.gif)
 
 </details>
 
 <details>
 <summary><b>🛠️ Auto-arg</b></summary>
 
-![Auto-arg](demo/videos/AutoArg.gif)
+![Auto-arg](assets/videos/AutoArg.gif)
 
 </details>
 
 <details>
 <summary><b>💡 Hover</b></summary>
 
-![Hover](demo/videos/hover.gif)
+![Hover](assets/videos/hover.gif)
 
 </details>
 
 <details>
 <summary><b>💬 Inlay hints</b></summary>
 
-![Inlay hints](demo/videos/inlay_hint.png)
+![Inlay hints](assets/videos/inlay_hint.png)
 
 </details>
 
 <details>
 <summary><b>🔍 Find references</b></summary>
 
-![Find references](demo/videos/get_reference.gif)
+![Find references](assets/videos/get_reference.gif)
 
 </details>
 
 <details>
 <summary><b>✏️ Rename</b></summary>
 
-![Rename](demo/videos/rename.gif)
+![Rename](assets/videos/rename.gif)
 
 </details>
 
 <details>
 <summary><b>🔭 Workspace symbols</b></summary>
 
-![Workspace symbols](demo/videos/workspace_symbols.gif)
+![Workspace symbols](assets/videos/workspace_symbols.gif)
 
 </details>
 
 <details>
 <summary><b>📝 Signature help</b></summary>
 
-![Signature help](demo/videos/sig_help.gif)
+![Signature help](assets/videos/sig_help.gif)
 
 </details>
 
