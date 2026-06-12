@@ -1569,7 +1569,7 @@ void LazyVerilogServer::register_handlers() {
             };
 
             auto apply_ff_edits = [&](const AutoffResult& result, const std::string& uri,
-                                       const std::string& source) {
+                                       const std::string& /*source*/) {
                 if (result.has_error || (result.edits.empty() && result.warn)) {
                     lsp::Any null_result;
                     null_result.SetJsonString("null", lsp::Any::kNullType);
@@ -1579,26 +1579,28 @@ void LazyVerilogServer::register_handlers() {
                 if (result.edits.empty())
                     return;
 
-                // Build new_source by applying edits in reverse line order (highest
-                // first, as stored) so earlier insertions don't shift later offsets.
-                std::string new_source = source;
-                for (const auto& edit : result.edits) {
-                    size_t pos = 0;
-                    for (int i = 0; i < edit.line; ++i) {
-                        size_t nl = new_source.find('\n', pos);
-                        pos = (nl == std::string::npos) ? new_source.size() : nl + 1;
-                    }
-                    new_source.insert(pos, edit.text);
-                }
-                const std::string formatted = format_source(new_source, config_.format);
-
-                // Emit each edit as a zero-width insertion with the formatted content.
-                // Process in ascending line order, tracking accumulated line shift so
-                // we can slice the correct region from formatted.
+                // Serialize AutoFF's own insertion strings directly.  An earlier
+                // implementation inserted the strings into a temporary copy of the
+                // document, formatted the whole temporary document, and then tried
+                // to slice the newly inserted lines back out by line number.  That
+                // was fragile: formatting can add/remove/reflow lines *before* the
+                // always_ff block, so original-source insertion coordinates no
+                // longer identify the inserted region in the formatted source.  The
+                // visible preview was still correct because it came from AutoffPair,
+                // but confirm/apply could then send a stale neighbouring line or an
+                // empty string as newText.
+                //
+                // AutoFF already computes indentation from the actual begin/end
+                // tokens of the selected always_ff block, and the edits are pure
+                // zero-width insertions.  Keeping those exact strings preserves the
+                // preview/apply contract and keeps edit ranges in the same coordinate
+                // system as the client document.
                 auto sorted_edits = result.edits;
                 std::sort(sorted_edits.begin(), sorted_edits.end(),
                           [](const AutoffEdit& a, const AutoffEdit& b) {
-                              return a.line < b.line;
+                              if (a.line != b.line)
+                                  return a.line < b.line;
+                              return a.character < b.character;
                           });
 
                 std::string json;
@@ -1606,24 +1608,21 @@ void LazyVerilogServer::register_handlers() {
                 json += json_string(uri);
                 json += ":[";
                 bool first = true;
-                int shift = 0;
                 for (const auto& edit : sorted_edits) {
                     if (!first) json += ',';
                     first = false;
-                    const int n_ins =
-                        (int)std::count(edit.text.begin(), edit.text.end(), '\n');
-                    const int ins_line = edit.line + shift;
-                    const std::string fmt_text = slice_lsp_range(
-                        formatted,
-                        lsRange(lsPosition(ins_line, 0), lsPosition(ins_line + n_ins, 0)));
-                    shift += n_ins;
                     const auto line_str = std::to_string(edit.line);
+                    const auto character_str = std::to_string(edit.character);
                     json += "{\"range\":{\"start\":{\"line\":";
                     json += line_str;
-                    json += ",\"character\":0},\"end\":{\"line\":";
+                    json += ",\"character\":";
+                    json += character_str;
+                    json += "},\"end\":{\"line\":";
                     json += line_str;
-                    json += ",\"character\":0}},\"newText\":";
-                    json += json_string(fmt_text);
+                    json += ",\"character\":";
+                    json += character_str;
+                    json += "}},\"newText\":";
+                    json += json_string(edit.text);
                     json += '}';
                 }
                 json += "]}}";
