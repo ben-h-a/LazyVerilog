@@ -1,0 +1,54 @@
+{
+  "name": "lazyverilog",
+  "displayName": "LazyVerilog",
+  "description": "SystemVerilog language support via LazyVerilog LSP",
+  "version": "1.2.8",
+  "publisher": "lazyverilog",
+  "license": "MIT",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Programming Languages", "Linters", "Formatters"],
+  "activationEvents": [
+    "onLanguage:systemverilog",
+    "onLanguage:verilog"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "systemverilog",
+        "extensions": [".sv", ".svh"],
+        "aliases": ["SystemVerilog"]
+      },
+      {
+        "id": "verilog",
+        "extensions": [".v", ".vh"],
+        "aliases": ["Verilog"]
+      }
+    ],
+    "configuration": {
+      "title": "LazyVerilog",
+      "properties": {
+        "lazyverilog.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to lazyverilog-lsp binary. If empty, uses PATH or auto-installs."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -watch -p .",
+    "package": "vsce package --no-dependencies",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.0"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "@types/node": "^20.0.0",
+    "@vscode/vsce": "^3.0.0",
+    "typescript": "^5.4.0"
+  }
+}
