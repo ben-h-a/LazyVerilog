@@ -6,7 +6,6 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
-#include <sys/resource.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -18,6 +17,10 @@
 #include <slang/util/Bag.h>
 #include <unordered_set>
 
+#ifndef _WIN32
+#include <sys/resource.h>
+#endif
+
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -28,6 +31,23 @@ using Clock = std::chrono::steady_clock;
 constexpr int kMaxBackgroundCompilerThreads = 4;
 constexpr int kMinNiceValue = 0;
 constexpr int kMaxNiceValue = 19;
+
+static void apply_background_worker_priority(int nice_value) {
+#ifdef _WIN32
+    // Windows does not provide POSIX nice / setpriority().  Keep the option as
+    // a harmless no-op on Windows so the same configuration file remains
+    // portable across platforms.  If Windows-specific background priority is
+    // needed later, this is the single place to map the user-facing nice value
+    // to SetThreadPriority() values.
+    (void)nice_value;
+#else
+    errno = 0;
+    if (setpriority(PRIO_PROCESS, 0, nice_value) != 0) {
+        std::cerr << "[lazyverilog] background compiler setpriority(" << nice_value
+                  << ") failed: " << std::strerror(errno) << "\n";
+    }
+#endif
+}
 
 static std::string diagnostic_uri(const slang::SourceManager& sm, const std::string& fallback_uri,
                                   slang::SourceLocation location) {
@@ -165,12 +185,7 @@ void BackgroundCompiler::configure(BackgroundCompilerConfig config) {
             while (static_cast<int>(workers_.size()) < config.thread_count) {
                 auto slot = std::make_shared<WorkerSlot>(next_worker_id_++);
                 slot->thread = std::thread([this, slot, nice_value = config.nice_value] {
-                    errno = 0;
-                    if (setpriority(PRIO_PROCESS, 0, nice_value) != 0) {
-                        std::cerr << "[lazyverilog] background compiler setpriority("
-                                  << nice_value << ") failed: " << std::strerror(errno)
-                                  << "\n";
-                    }
+                    apply_background_worker_priority(nice_value);
                     worker_loop(std::move(slot));
                 });
                 workers_.push_back(std::move(slot));
