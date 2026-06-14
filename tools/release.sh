@@ -213,12 +213,24 @@ push_branch() {
 
 trigger_release_workflow() {
     local branch
+    local workflow_dry_run
     branch="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)"
     [[ "$branch" != "HEAD" ]] || die "cannot dispatch release from detached HEAD"
 
     confirm "Trigger release workflow for ${VERSION} on ${branch}?" || die "aborted before workflow dispatch"
 
-    run gh workflow run "$RELEASE_WORKFLOW" --repo "$RELEASE_REPO" --ref "$branch" -f "version=${VERSION}"
+    # The workflow defaults dry_run to true for safety when users click
+    # "Run workflow" in the GitHub UI.  This release helper is the intentional
+    # publish path, so pass dry_run=false explicitly unless this script itself is
+    # running in --dry-run mode.
+    workflow_dry_run=false
+    if [[ "$DRY_RUN" == 1 ]]; then
+        workflow_dry_run=true
+    fi
+
+    run gh workflow run "$RELEASE_WORKFLOW" --repo "$RELEASE_REPO" --ref "$branch" \
+        -f "version=${VERSION}" \
+        -f "dry_run=${workflow_dry_run}"
 
     if [[ "$DRY_RUN" == 1 || "$DO_WATCH" == 0 ]]; then
         return 0
