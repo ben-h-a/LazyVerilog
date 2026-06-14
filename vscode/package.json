@@ -1,10 +1,11 @@
 {
-  "name": "lazyverilog",
-  "displayName": "LazyVerilog",
+  "name": "lazyverilog-vscode",
+  "displayName": "LazyVerilog for VS Code",
   "description": "SystemVerilog language support via LazyVerilog LSP",
   "version": "1.3.0",
   "publisher": "lazyverilog",
   "license": "MIT",
+  "icon": "assets/lazyverilog_icon.png",
   "engines": { "vscode": "^1.80.0" },
   "categories": ["Programming Languages", "Linters", "Formatters"],
   "activationEvents": [
