@@ -10,9 +10,14 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <vector>
+
+#ifdef _WIN32
+#include <process.h>
+#else
 #include <sys/wait.h>
 #include <unistd.h>
-#include <vector>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -20,6 +25,14 @@ static volatile std::sig_atomic_t interrupted = 0;
 
 static void handle_signal(int) {
     interrupted = 1;
+}
+
+static int current_process_id() {
+#ifdef _WIN32
+    return _getpid();
+#else
+    return getpid();
+#endif
 }
 
 struct Failure {
@@ -57,6 +70,20 @@ static void write_file(const fs::path& path, const std::string& text) {
 }
 
 static std::string shell_quote(const fs::path& path) {
+#ifdef _WIN32
+    // `std::system()` on Windows runs through cmd.exe.  Double quotes preserve
+    // spaces in paths; embedded double quotes are doubled to keep the generated
+    // command line well-formed for the simple file paths used by this sweep.
+    std::string result = "\"";
+    for (char c : path.string()) {
+        if (c == '"')
+            result += "\"\"";
+        else
+            result += c;
+    }
+    result += "\"";
+    return result;
+#else
     std::string result = "'";
     for (char c : path.string()) {
         if (c == '\'')
@@ -66,11 +93,12 @@ static std::string shell_quote(const fs::path& path) {
     }
     result += "'";
     return result;
+#endif
 }
 
 static CommandResult run_formatter(const fs::path& formatter, const fs::path& input) {
     const fs::path base = fs::temp_directory_path() /
-                          ("lazyverilog-format-sweep-" + std::to_string(getpid()) + "-" +
+                          ("lazyverilog-format-sweep-" + std::to_string(current_process_id()) + "-" +
                            std::to_string(reinterpret_cast<std::uintptr_t>(&input)));
     const fs::path stdout_path = base.string() + ".out";
     const fs::path stderr_path = base.string() + ".err";
@@ -83,7 +111,16 @@ static CommandResult run_formatter(const fs::path& formatter, const fs::path& in
     if (status == -1) {
         result.exit_code = 127;
         result.stderr_text = std::strerror(errno);
-    } else if (WIFEXITED(status)) {
+    }
+#ifdef _WIN32
+    else {
+        // MSVC's system() returns the command interpreter's exit code directly,
+        // unlike POSIX where the return value encodes wait status bits.
+        result.exit_code = status;
+        result.interrupted = result.exit_code == 130;
+    }
+#else
+    else if (WIFEXITED(status)) {
         result.exit_code = WEXITSTATUS(status);
         result.interrupted = result.exit_code == 130;
     } else if (WIFSIGNALED(status)) {
@@ -93,6 +130,7 @@ static CommandResult run_formatter(const fs::path& formatter, const fs::path& in
     } else {
         result.exit_code = 128;
     }
+#endif
 
     if (fs::exists(stdout_path)) {
         result.stdout_text = read_file(stdout_path);
@@ -107,7 +145,8 @@ static CommandResult run_formatter(const fs::path& formatter, const fs::path& in
 
 static fs::path make_temp_source_path(const fs::path& source) {
     static int counter = 0;
-    return source.parent_path() / (".__lazyverilog_format_sweep_" + std::to_string(getpid()) +
+    return source.parent_path() / (".__lazyverilog_format_sweep_" +
+                                   std::to_string(current_process_id()) +
                                    "_" + std::to_string(counter++) + source.extension().string());
 }
 
