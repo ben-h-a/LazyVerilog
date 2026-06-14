@@ -54,7 +54,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up MSVC developer environment
         if: ${{ runner.os == 'Windows' }}
@@ -124,7 +124,7 @@ jobs:
           PY
 
       - name: Upload release artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lazyverilog-release-${{ inputs.version }}-${{ matrix.platform }}
           path: |
@@ -136,13 +136,13 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ github.ref_name }}
           fetch-depth: 0
 
       - name: Download built release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: lazyverilog-release-${{ inputs.version }}-*
           path: dist-release
@@ -264,7 +264,7 @@ jobs:
           package_lock.write_text(lock_text, encoding="utf-8")
           PY
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 20
 
