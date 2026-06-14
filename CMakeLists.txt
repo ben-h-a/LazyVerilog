@@ -18,6 +18,15 @@ set(LSPCPP_USE_CPP17 ON CACHE BOOL "Use tl::optional instead of boost::optional"
 set(LSPCPP_BUILD_EXAMPLES OFF CACHE BOOL "Skip LspCpp examples" FORCE)
 set(OPTIONAL_BUILD_TESTS OFF CACHE BOOL "Skip tl-optional tests" FORCE)
 
+# LspCpp vendors ixwebsocket for optional WebSocket transport support.  This
+# server talks JSON-RPC over stdin/stdout, so it does not need WebSocket
+# per-message compression.  ixwebsocket enables ZLIB by default and Windows
+# GitHub runners do not provide a CMake-discoverable ZLIB package out of the
+# box, which breaks release builds before our own targets are configured.
+# Disable it globally before FetchContent_MakeAvailable(LspCpp) so the vendored
+# ixwebsocket subproject sees the cache option during its first configure pass.
+set(USE_ZLIB OFF CACHE BOOL "Disable ixwebsocket zlib compression" FORCE)
+
 # ──────────────────────────────────────────────────────────────────────────────
 # External: fmt v11
 # OVERRIDE_FIND_PACKAGE lets downstream dependencies reuse this pinned fmt.
