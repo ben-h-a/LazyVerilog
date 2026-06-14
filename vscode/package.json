@@ -67,6 +67,14 @@
         "command": "lazyverilog.rtlTreeRefresh",
         "title": "LazyVerilog: Refresh RTL Tree",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "lazyverilog.interface",
+        "title": "LazyVerilog: Interface"
+      },
+      {
+        "command": "lazyverilog.connect",
+        "title": "LazyVerilog: Connect"
       }
     ],
     "menus": {
