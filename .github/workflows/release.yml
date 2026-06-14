@@ -69,7 +69,12 @@ jobs:
 
       - name: Build
         shell: bash
-        run: cmake --build build --config Release --parallel
+        run: |
+          # Build the full default target so release CI still verifies every
+          # configured binary/test helper, but keep parallelism modest because
+          # slang's generated translation units are large in optimized builds
+          # and can exceed memory on smaller hosted runners.
+          cmake --build build --config Release --parallel 2
 
       - name: Strip and rename artifact
         shell: bash
