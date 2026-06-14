@@ -8,6 +8,11 @@ on:
         description: "Release version to build and publish, for example v1.2.6"
         required: true
         type: string
+      dry_run:
+        description: "Build and validate artifacts without committing, tagging, or publishing"
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -197,6 +202,7 @@ jobs:
           PY
 
       - name: Commit release metadata and create tag
+        if: ${{ !inputs.dry_run }}
         run: |
           version="${{ inputs.version }}"
 
@@ -228,6 +234,7 @@ jobs:
           fi
 
       - name: Publish GitHub release
+        if: ${{ !inputs.dry_run }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.version }}
