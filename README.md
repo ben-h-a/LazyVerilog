@@ -288,8 +288,7 @@ Then install it from VS Code:
 ### 1. Add a project config to your RTL project root.
 
 Create `lazyverilog.toml` in the project root.  At minimum, point `design.vcode` to a filelist so
-LazyVerilog can index modules, packages, ports, and cross-file references. This project setup is
-shared by both Neovim and VS Code.
+LazyVerilog can index modules, packages, ports, and cross-file references.
 
 For full configuration, refer to [`lazyverilog.toml`](lazyverilog.toml) — complete example configuration.
 
@@ -330,7 +329,7 @@ path/to/rtl3.sv
 ```
 
 <details>
-<summary><b>Neovim usage</b></summary>
+<summary><b>Guide for neovim users</b></summary>
 
 #### Open a SystemVerilog project
 
@@ -377,7 +376,7 @@ cursor is on a supported construct.
 </details>
 
 <details>
-<summary><b>VS Code usage</b></summary>
+<summary><b>Guide for vscode users</b></summary>
 
 Open a Verilog/SystemVerilog RTL file in VS Code after installing the extension. The extension starts
 LazyVerilog automatically for `verilog` and `systemverilog` buffers.
