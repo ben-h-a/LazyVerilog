@@ -271,6 +271,56 @@ local function _platform()
 	return os_part .. "-" .. arch_part
 end
 
+local function _expected_checksums_for_platform(platform)
+	local checksums = {}
+	local expected = _expected_checksum(platform)
+	if expected then
+		table.insert(checksums, expected)
+	end
+
+	-- Linux may have installed the static fallback into the same managed path.
+	local static_expected = platform and platform:find("^linux") and _expected_checksum(platform .. "-static") or nil
+	if static_expected then
+		table.insert(checksums, static_expected)
+	end
+
+	return checksums
+end
+
+local function _managed_bin_matches_release(on_done)
+	local bin_path = _managed_bin()
+	if vim.fn.executable(bin_path) ~= 1 then
+		on_done(false)
+		return
+	end
+
+	local platform = _platform()
+	if not platform then
+		on_done(true)
+		return
+	end
+
+	local expected = _expected_checksums_for_platform(platform)
+	if #expected == 0 then
+		on_done(true)
+		return
+	end
+
+	_sha256_file(bin_path, function(actual, _hash_err)
+		if not actual then
+			on_done(false)
+			return
+		end
+		for _, digest in ipairs(expected) do
+			if actual == digest then
+				on_done(true)
+				return
+			end
+		end
+		on_done(false)
+	end)
+end
+
 -- ---------------------------------------------------------------------------
 -- Auto install
 -- ---------------------------------------------------------------------------
@@ -456,7 +506,7 @@ end
 -- Command resolver (canonical format)
 -- ---------------------------------------------------------------------------
 
-local function resolve_cmd(cfg)
+local function resolve_external_cmd(cfg)
 	-- Case 1: already a full command
 	if type(cfg.cmd) == "table" then
 		if type(cfg.cmd[1]) == "string" and vim.fn.executable(cfg.cmd[1]) == 1 then
@@ -475,8 +525,9 @@ local function resolve_cmd(cfg)
 		return nil
 	end
 
-	-- Case 3: fallback
-	local candidates = { "lazyverilog-lsp", _managed_bin() }
+	-- Case 3: PATH fallback. Managed binaries are resolved asynchronously below
+	-- so we can verify their checksum against the current plugin release.
+	local candidates = { "lazyverilog-lsp" }
 	if _is_windows() then
 		table.insert(candidates, 2, "lazyverilog-lsp.exe")
 	end
@@ -676,13 +727,24 @@ end
 -- ---------------------------------------------------------------------------
 
 function M.start(cfg, bufnr)
-	local cmd = resolve_cmd(cfg)
+	local cmd = resolve_external_cmd(cfg)
 
 	if cmd then
 		start_lsp(cfg, cmd, bufnr)
 	else
-		_auto_install(function(bin_path)
-			start_lsp(cfg, { bin_path }, bufnr) -- guaranteed flat
+		local bin_path = _managed_bin()
+		_managed_bin_matches_release(function(matches)
+			if matches then
+				start_lsp(cfg, { bin_path }, bufnr) -- guaranteed flat
+				return
+			end
+
+			if vim.fn.filereadable(bin_path) == 1 then
+				_remove_file(bin_path)
+			end
+			_auto_install(function(installed_bin_path)
+				start_lsp(cfg, { installed_bin_path }, bufnr) -- guaranteed flat
+			end)
 		end)
 	end
 end

@@ -19,7 +19,7 @@ export async function activate(
 ): Promise<void> {
   const config = vscode.workspace.getConfiguration();
 
-  let serverPath = resolveServerPath(config, context);
+  let serverPath = await resolveServerPath(config, context);
   if (!serverPath) {
     try {
       serverPath = await autoInstall(context);

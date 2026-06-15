@@ -113,10 +113,42 @@ function which(name: string): string | undefined {
   }
 }
 
-export function resolveServerPath(
+function expectedChecksumsForPlatform(platformKey: string): string[] {
+  const versionChecksums = RELEASE_CHECKSUMS[RELEASE_VERSION];
+  if (!versionChecksums) return [];
+
+  const checksums: string[] = [];
+  const expected = versionChecksums[platformKey];
+  if (expected) checksums.push(expected.toLowerCase());
+
+  // Linux may have installed the static fallback into the same managed path.
+  const staticExpected = versionChecksums[`${platformKey}-static`];
+  if (process.platform === "linux" && staticExpected) {
+    checksums.push(staticExpected.toLowerCase());
+  }
+
+  return checksums;
+}
+
+async function managedBinaryMatchesRelease(binPath: string): Promise<boolean> {
+  const platformKey = getPlatformKey();
+  if (!platformKey) return true;
+
+  const expected = expectedChecksumsForPlatform(platformKey);
+  if (expected.length === 0) return true;
+
+  try {
+    const actual = (await sha256File(binPath)).toLowerCase();
+    return expected.includes(actual);
+  } catch {
+    return false;
+  }
+}
+
+export async function resolveServerPath(
   config: vscode.WorkspaceConfiguration,
   context: vscode.ExtensionContext,
-): string | undefined {
+): Promise<string | undefined> {
   // 1. User-configured path
   const userPath = config.get<string>("lazyverilog.serverPath", "").trim();
   if (userPath && isExecutable(userPath)) {
@@ -134,7 +166,10 @@ export function resolveServerPath(
   // 3. Managed binary
   const managed = getManagedBinPath(context);
   if (isExecutable(managed)) {
-    return managed;
+    if (await managedBinaryMatchesRelease(managed)) {
+      return managed;
+    }
+    fs.rmSync(managed, { force: true });
   }
 
   return undefined;
