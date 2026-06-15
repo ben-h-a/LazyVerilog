@@ -405,6 +405,22 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc) --target lazyverilog-lsp
 ```
 
+### Server binary resolution
+
+Editors resolve the `lazyverilog-lsp` server in this order:
+
+1. Explicit config path
+   - VS Code: set `lazyverilog.serverPath`.
+   - Neovim: pass `cmd` to `require("lazyverilog").setup({ ... })`.
+   - Use this for a locally built or custom binary that LazyVerilog should never replace.
+2. PATH binary
+   - If `lazyverilog-lsp` is available on `PATH` (`lazyverilog-lsp.exe` on Windows), the editor uses it as a user-owned binary.
+   - PATH binaries are not checksum-checked or auto-updated by LazyVerilog.
+3. Managed binary
+   - If no explicit config path or PATH binary is found, the editor uses its managed storage directory and can download the matching release binary there.
+   - Managed binaries are release-owned: when the plugin or VS Code extension updates, stale managed binaries can be replaced with the current checked release binary.
+   - Do not put custom builds in the managed binary directory. Use an explicit config path or PATH instead.
+
 ## ⚙️ Configuration
 
 LazyVerilog reads `lazyverilog.toml` from your project root. If neovim is opened in a subdirectory, LazyVerilog walks upward until it finds the nearest config file.
