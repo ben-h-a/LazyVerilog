@@ -397,6 +397,24 @@ void process_module(const ModuleDeclarationSyntax& node, SyntaxIndex& index,
                                         node_text_raw(sm, *fn->prototype->returnType), "function",
                                         module.name))
                 value->name = node_text_raw(sm, *fn->prototype->name);
+        } else if (const auto* cls = member->as_if<ClassDeclarationSyntax>()) {
+            // Module-scoped class declarations are valid SystemVerilog symbols.
+            // Keep their parent scope so member-access lookup can distinguish
+            // the compact identity `top::Packet` from a compilation-unit class
+            // with the same spelling.
+            process_class(*cls, index, sm, module.name);
+        } else if (const auto* td = member->as_if<TypedefDeclarationSyntax>()) {
+            // Module-scoped typedefs are especially important for aggregate
+            // member lookup:
+            //
+            //     typedef struct packed { logic valid; } fifo_entry_t;
+            //     fifo_entry_t fifo_entry;
+            //     assign x = fifo_entry.valid;
+            //
+            // The dedicated member-access resolver identifies `fifo_entry` as
+            // type `fifo_entry_t` and then searches indexed typedef fields.
+            // Without this shard fact, it falls through to generic lookup.
+            process_typedef(*td, index, sm, module.name);
         } else if (const auto* hierarchy = member->as_if<HierarchyInstantiationSyntax>()) {
             process_hierarchy(*hierarchy, index, sm, lines, module.name);
         } else if (const auto* modport = member->as_if<ModportDeclarationSyntax>()) {

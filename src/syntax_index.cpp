@@ -340,6 +340,12 @@ static void extract_instances(const SyntaxList<MemberSyntax>& members,
     }
 }
 
+static void process_class(const ClassDeclarationSyntax& cls, SyntaxIndex& index,
+                          const slang::SourceManager& sm, std::string parent_scope);
+
+static void process_typedef(const TypedefDeclarationSyntax& td, SyntaxIndex& index,
+                            const slang::SourceManager& sm, std::string parent_scope);
+
 static void process_module(const ModuleDeclarationSyntax& module, SyntaxIndex& index,
                            const slang::SourceManager& sm, std::string_view source,
                            IndexDepth depth = IndexDepth::Full) {
@@ -453,6 +459,19 @@ static void process_module(const ModuleDeclarationSyntax& module, SyntaxIndex& i
                 .col = nc,
                 .signature = make_fn_signature(proto, fn_name, sm),
             });
+        } else if (const auto* cls = member->as_if<ClassDeclarationSyntax>()) {
+            // Closed/project files are represented by compact SyntaxIndex
+            // shards, so module-local types must be present in the shard too.
+            // This mirrors the live dynamic index and lets member access in
+            // another file resolve `top::Packet` / `Packet` fields and methods
+            // without retaining the closed file AST.
+            process_class(*cls, index, sm, entry.name);
+        } else if (const auto* td = member->as_if<TypedefDeclarationSyntax>()) {
+            // Store module-scoped typedefs, including struct/union fields, so
+            // `obj.field` can resolve through find_typedef_field_definition().
+            // The generic AST definition visitor intentionally skips aggregate
+            // field declarators; member access is the correct path for fields.
+            process_typedef(*td, index, sm, entry.name);
         }
     }
 

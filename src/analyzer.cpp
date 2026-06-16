@@ -1036,6 +1036,7 @@ struct GenericDefinitionVisitor : public slang::syntax::SyntaxVisitor<GenericDef
     int use_line_one_based{0};
     std::string current_module;
     std::string current_package;
+    int aggregate_type_depth{0};
     std::optional<Location> first_result;
     std::optional<Location> scoped_result;
 
@@ -1130,7 +1131,35 @@ struct GenericDefinitionVisitor : public slang::syntax::SyntaxVisitor<GenericDef
 
     void handle(const slang::syntax::ExplicitAnsiPortSyntax& node) { maybe_set(node.name); }
 
-    void handle(const slang::syntax::DeclaratorSyntax& node) { maybe_set(node.name); }
+    void handle(const slang::syntax::StructUnionTypeSyntax& node) {
+        // Fields declared inside a struct / union are not visible as ordinary
+        // unqualified identifiers in the surrounding module or package scope.
+        //
+        // Example:
+        //
+        //     typedef struct packed {
+        //         logic valid;      // field, only reachable as obj.valid
+        //     } fifo_entry_t;
+        //     logic valid;          // module variable
+        //     assign valid = entry.valid;
+        //
+        // A blanket DeclaratorSyntax handler used to treat both `valid`
+        // declarations as scoped module definitions because included header
+        // text is parsed under the including module.  Since the field appears
+        // first, go-to-definition on the LHS `valid` jumped to the aggregate
+        // field.  Keep aggregate fields out of the generic lookup path; member
+        // access (`entry.valid`) is resolved by the dedicated ClassMember path
+        // via find_typedef_field_definition().
+        ++aggregate_type_depth;
+        visitDefault(node);
+        --aggregate_type_depth;
+    }
+
+    void handle(const slang::syntax::DeclaratorSyntax& node) {
+        if (aggregate_type_depth > 0)
+            return;
+        maybe_set(node.name);
+    }
 
     void handle(const slang::syntax::FunctionDeclarationSyntax& node) {
         if (const auto* identifier =
@@ -1377,6 +1406,56 @@ static std::optional<Location> find_typedef_field_definition(const SyntaxIndex& 
             const int line = to_lsp_line(field.line);
             return Location{actual_uri.empty() ? uri : actual_uri, line, field.col, line,
                             field.col + (int)field.name.size()};
+        }
+    }
+    return std::nullopt;
+}
+
+static std::optional<Location> find_aggregate_field_declaration_at(const SyntaxIndex& index,
+                                                                   const std::string& uri,
+                                                                   std::string_view field_name,
+                                                                   int lsp_line,
+                                                                   int lsp_col) {
+    if (field_name.empty())
+        return std::nullopt;
+
+    auto field_location_if_clicked = [&](const FieldEntry& field) -> std::optional<Location> {
+        if (field.name != field_name || field.line <= 0 || field.col != lsp_col)
+            return std::nullopt;
+
+        const int field_lsp_line = to_lsp_line(field.line);
+        if (field_lsp_line != lsp_line)
+            return std::nullopt;
+
+        const std::string actual_uri = index.source_uri(field.file_id);
+        const std::string resolved_uri = actual_uri.empty() ? uri : actual_uri;
+        if (resolved_uri != uri)
+            return std::nullopt;
+
+        return Location{resolved_uri, field_lsp_line, field.col, field_lsp_line,
+                        field.col + (int)field.name.size()};
+    };
+
+    // Generic unqualified lookup intentionally ignores aggregate fields, but
+    // requests that start on the declaration token itself still need a stable
+    // definition location.  Hover and references both ask definition_of() first
+    // even for declarations:
+    //
+    //     typedef struct { logic addr; } packet_t;
+    //                            ^ hover / references here
+    //
+    // Without this exact-location path, excluding fields from generic lookup
+    // would make declaration-origin requests look unresolved.
+    for (const auto& td : index.typedefs) {
+        for (const auto& field : td.fields) {
+            if (auto loc = field_location_if_clicked(field))
+                return loc;
+        }
+    }
+    for (const auto& cls : index.classes) {
+        for (const auto& field : cls.fields) {
+            if (auto loc = field_location_if_clicked(field))
+                return loc;
         }
     }
     return std::nullopt;
@@ -2568,6 +2647,13 @@ Analyzer::definition_of_state(const DocumentState& state, const std::string& uri
     }
 
     const int use_line_one_based = line + 1;
+    const auto& current_index = get_structural_index(state);
+
+    if (target.kind == DefinitionTargetKind::Generic) {
+        if (auto loc =
+                find_aggregate_field_declaration_at(current_index, uri, target.name, line, col))
+            return loc;
+    }
 
     if (target.kind == DefinitionTargetKind::ClassMember) {
         // Resolve simple object member calls by first identifying the object's
@@ -2580,7 +2666,6 @@ Analyzer::definition_of_state(const DocumentState& state, const std::string& uri
         //
         // jumps to `class Packet::req_data`, not to an unrelated unit-level
         // `task req_data`.
-        const auto& current_index = get_structural_index(state);
         auto class_type = class_type_for_object_reference(current_index, target.scope_module,
                                                           target.object_name, use_line_one_based);
         if (!class_type) {

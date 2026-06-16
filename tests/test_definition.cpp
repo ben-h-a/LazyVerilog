@@ -209,6 +209,71 @@ TEST_CASE("definition: variable lookup prefers same module scope", "[definition]
     CHECK(loc->col == 40);
 }
 
+TEST_CASE("definition: unqualified name ignores aggregate fields", "[definition]") {
+    Analyzer analyzer;
+    const std::string uri = "file:///tmp/lazyverilog_definition_aggregate_field_scope.sv";
+    analyzer.open(uri,
+                  "module top;\n"
+                  "    typedef struct packed {\n"
+                  "        logic valid;\n"
+                  "    } fifo_entry_t;\n"
+                  "    fifo_entry_t fifo_entry;\n"
+                  "    logic valid;\n"
+                  "    always_comb begin\n"
+                  "        valid = fifo_entry.valid;\n"
+                  "    end\n"
+                  "endmodule\n");
+
+    // The left-hand `valid` is an ordinary unqualified module variable use.
+    // A packed-struct field happens to have the same spelling and appears
+    // earlier in the same module text, but it is only visible through member
+    // access (`fifo_entry.valid`) and must not shadow the module signal.
+    auto lhs = analyzer.definition_of(uri, 7, 8);
+    REQUIRE(lhs.has_value());
+    CHECK(lhs->uri == uri);
+    CHECK(lhs->line == 5);
+    CHECK(lhs->col == 10);
+    CHECK(lhs->end_col == 15);
+
+    // The right-hand member access should still resolve to the aggregate field.
+    auto rhs = analyzer.definition_of(uri, 7, 27);
+    REQUIRE(rhs.has_value());
+    CHECK(rhs->uri == uri);
+    CHECK(rhs->line == 2);
+    CHECK(rhs->col == 14);
+    CHECK(rhs->end_col == 19);
+}
+
+TEST_CASE("definition: demo memory_top valid lhs prefers module signal", "[definition]") {
+    Analyzer analyzer;
+    const auto top_path = find_repo_file("demo/memory_top.sv");
+    const std::string top_uri = "file://" + top_path.string();
+    analyzer.open(top_uri, read_text(top_path.string()));
+
+    // Exact regression for demo/memory_top.sv:
+    //
+    //     valid = fifo_entry.valid;
+    //     ^^^^^
+    //
+    // The included params.svh defines fifo_entry_t.valid before the module
+    // signal declaration.  The unqualified LHS must still resolve to the
+    // module-level `logic valid`, not the aggregate field.
+    auto lhs = analyzer.definition_of(top_uri, 47, 4);
+    REQUIRE(lhs.has_value());
+    CHECK(lhs->uri == top_uri);
+    CHECK(lhs->line == 45);
+    CHECK(lhs->col == 40);
+    CHECK(lhs->end_col == 45);
+
+    // Keep the member-access behavior intact for the RHS.
+    auto rhs = analyzer.definition_of(top_uri, 47, 28);
+    REQUIRE(rhs.has_value());
+    CHECK(rhs->uri.ends_with("/demo/params.svh"));
+    CHECK(rhs->line == 2);
+    CHECK(rhs->col == 44);
+    CHECK(rhs->end_col == 49);
+}
+
 TEST_CASE("definition: named subroutine argument resolves to formal argument", "[definition]") {
     Analyzer analyzer;
     const auto top_path = find_repo_file("tests/definition_memory_top.sv");
